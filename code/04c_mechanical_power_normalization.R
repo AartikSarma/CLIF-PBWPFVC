@@ -22,6 +22,7 @@ library(here)
 library(gtsummary)
 library(gt)
 library(broom)
+library(marginaleffects)
 
 source("utils/config.R")
 site_name <- config$site_name
@@ -66,6 +67,9 @@ if (n_mp == 0) {
 adjustment <- "vtpbw + race_category + age10 + sex_category + sofa_total + sf10 + bmi"
 
 mp_specs <- c(mp_pbw_z = "MP / PBW (per SD)", mp_pfvc_z = "MP / PFVC (per SD)")
+
+# Representative ages for the interpretable interaction slopes (see below).
+AGE_POINTS <- c(40, 60, 80)
 
 # =============================================================================
 # Fit the two mortality models
@@ -135,4 +139,117 @@ tbl_merge(mp_tables, tab_spanner = unname(mp_specs)) %>%
                        paste0("regression_mp_normalization_", site_name, ".html")))
 
 message("Mechanical-power normalization table written")
+
+# =============================================================================
+# Mechanical power x age interaction
+# =============================================================================
+# As with elastance (script 04b), lung and chest-wall mechanics change with age
+# independently of injury, so age can modify the mechanical-power / mortality
+# association. Re-fit each model with an MP x age interaction, test it by
+# likelihood-ratio test against the no-interaction model, and use marginaleffects
+# to express the result on the probability scale (the MP slope at each age).
+# Age enters through the interaction, so it is dropped from the adjustment set.
+adjustment_no_age <- "vtpbw + race_category + sex_category + sofa_total + sf10 + bmi"
+
+interaction_models    <- list()
+no_interaction_models <- list()
+for (v in names(mp_specs)) {
+  f_int  <- as.formula(paste0("deceased ~ ", v, " * age10 + ", adjustment_no_age))
+  f_main <- as.formula(paste0("deceased ~ ", v, " + age10 + ", adjustment_no_age))
+  interaction_models[[v]]    <- glm(f_int,  data = model_data, family = binomial)
+  no_interaction_models[[v]] <- glm(f_main, data = model_data, family = binomial)
+}
+
+# Likelihood-ratio test (the no-interaction model is nested, 1 extra df) plus the
+# interaction odds ratio (per SD MP, per 10 yr of age).
+mp_age_interaction <- imap_dfr(interaction_models, function(m_int, v) {
+  m_main <- no_interaction_models[[v]]
+  lrt <- anova(m_main, m_int, test = "LRT")
+  or_row <- broom::tidy(m_int, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == paste0(v, ":age10"))
+  tibble(
+    site            = site_name,
+    exposure        = mp_specs[[v]],
+    term            = paste0(v, ":age10"),
+    n_obs           = stats::nobs(m_int),
+    interaction_or  = or_row$estimate,
+    conf_low        = or_row$conf.low,
+    conf_high       = or_row$conf.high,
+    p_value         = or_row$p.value,
+    aic_no_interact = AIC(m_main),
+    aic_interact    = AIC(m_int),
+    delta_aic       = AIC(m_int) - AIC(m_main),
+    lrt_chisq       = lrt$Deviance[2],
+    lrt_df          = lrt$Df[2],
+    lrt_p           = lrt$`Pr(>Chi)`[2]
+  )
+})
+
+write_csv(mp_age_interaction,
+          file.path(final_dir, paste0("mp_age_interaction_", site_name, ".csv")))
+
+message("Mechanical power x age interaction (LRT vs no-interaction model):")
+pwalk(mp_age_interaction, function(exposure, interaction_or, lrt_p, ...) {
+  message("  ", exposure, ": interaction OR = ", round(interaction_or, 3),
+          ", LRT p = ", signif(lrt_p, 3))
+})
+
+# Regression table for the interaction models.
+interaction_tables <- imap(interaction_models, ~ {
+  tbl_regression(
+    .x, exponentiate = TRUE,
+    label = c(
+      setNames(list(mp_specs[[.y]]), .y),
+      list(age10 = "Age (per 10 yr)", sf10 = "SF ratio (per 10)", vtpbw = "VT/PBW")
+    )
+  ) %>% bold_p()
+})
+tbl_merge(interaction_tables, tab_spanner = unname(mp_specs)) %>%
+  as_gt() %>%
+  gt::gtsave(file.path(final_dir,
+                       paste0("regression_mp_age_interaction_", site_name, ".html")))
+
+# Interpretable interaction: MP slope on the probability scale, by age. A non-flat
+# slope-vs-age profile is the interaction expressed in clinical terms.
+slopes_by_age <- imap_dfr(interaction_models, function(m, v) {
+  slopes(
+    m,
+    variables = v,
+    newdata = datagrid(age10 = AGE_POINTS / 10, grid_type = "counterfactual"),
+    by = "age10"
+  ) %>%
+    as_tibble() %>%
+    transmute(
+      exposure  = mp_specs[[v]],
+      age_years = age10 * 10,
+      slope     = estimate,
+      conf_low  = conf.low,
+      conf_high = conf.high,
+      p_value   = p.value
+    )
+})
+
+write_csv(slopes_by_age,
+          file.path(final_dir, paste0("mp_age_interaction_slopes_", site_name, ".csv")))
+
+okabe_ito <- c("#E69F00", "#0072B2")
+slopes_plot <- ggplot(slopes_by_age,
+                      aes(x = age_years, y = slope, color = exposure)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_line() +
+  geom_pointrange(aes(ymin = conf_low, ymax = conf_high)) +
+  scale_color_manual(values = okabe_ito, name = "Normalized mechanical power") +
+  labs(
+    title = "Mechanical power effect on mortality by age",
+    subtitle = paste0(site_name,
+      " — change in predicted mortality probability per 1 SD MP (95% CI)"),
+    x = "Age (years)",
+    y = "Marginal effect on mortality probability (per SD)"
+  ) +
+  theme_minimal(base_size = 11)
+
+ggsave(file.path(final_dir, paste0("mp_age_interaction_slopes_", site_name, ".pdf")),
+       slopes_plot, width = 8, height = 5)
+
+message("Mechanical power x age interaction outputs written")
 message("Script 04c complete.")

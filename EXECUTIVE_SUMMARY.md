@@ -56,7 +56,10 @@ subprocess.
   spontaneous/unclassifiable modes are left undefined. 04c then compares MP
   normalized to PBW (J/min/kg) against MP normalized to PFVC (J/min/L), z-scaled,
   as predictors of in-hospital mortality, with an AIC evidence ratio referenced to
-  the PBW-scaled model.
+  the PBW-scaled model. As in 04b, it also adds an MP × age interaction (since
+  lung/chest-wall mechanics change with age), tested by likelihood-ratio test and
+  summarized with `marginaleffects` as the MP slope on mortality at representative
+  ages.
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
   analysis + a combined PDF), covariate forests for the demographic-bias and
@@ -201,6 +204,14 @@ human-readable tables and figures for local review.
   odds ratio per SD with CI and p-value, AIC, and the AIC evidence ratio relative
   to the PBW-scaled model (> 1 favors MP/PFVC), plus `n_obs` (the subset with a
   computable, mode-appropriate mechanical power).
+- **`regression_mp_age_interaction_<site>.html`** — the two mortality models with
+  an MP × age interaction (MP/PBW and MP/PFVC, per SD).
+- **`mp_age_interaction_<site>.csv`** — poolable summary of the interaction odds
+  ratio (per SD MP × per 10 yr) with CI and p-value, the likelihood-ratio test
+  against the no-interaction model (chi-square, df, p), and both models' AIC.
+- **`mp_age_interaction_slopes_<site>.csv` / `.pdf`** — the MP effect on mortality
+  on the probability scale (`marginaleffects`): change in predicted mortality per
+  1 SD of MP at ages 40, 60, and 80, as a table and a slope-by-age plot.
 
 **Survival outputs:**
 
