@@ -31,6 +31,7 @@
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/stress_strain_mortality_<site>.pdf    (three predicted-risk surfaces)
 #          final/stress_strain_models_<site>.csv         (exposure odds ratios)
+#          final/stress_strain_modelfit_<site>.csv       (AIC / AUC / LRT comparison)
 # =============================================================================
 
 library(tidyverse)
@@ -103,7 +104,7 @@ build_surface <- function(y_var, y_label) {
               odds_ratio = estimate, conf_low = conf.low, conf_high = conf.high,
               p_value = p.value, n_obs = stats::nobs(m), n_deaths = sum(mech$deceased))
 
-  list(preds = preds, coefs = coefs, y_var = y_var, y_label = y_label)
+  list(preds = preds, coefs = coefs, model = m, y_var = y_var, y_label = y_label)
 }
 
 surfaces <- list(
@@ -122,6 +123,49 @@ message("Odds ratios (each model: strain VT/PFVC + y-axis quantity + VT/PBW + co
 pwalk(models_tbl, function(y_axis, exposure, odds_ratio, p_value, ...) {
   message("  [y=", y_axis, "] ", exposure, ": OR = ", round(odds_ratio, 2),
           " (p = ", signif(p_value, 2), ")")
+})
+
+# =============================================================================
+# Model-fit comparison
+# =============================================================================
+# All models are fit on the same mechanics subset, so AIC is directly comparable.
+# The base model is strain (VT/PFVC) + observed dosing (VT/PBW) + covariates; each
+# mechanics model adds one y-axis term (nested in base, 1 df), so a likelihood-ratio
+# test measures what that term adds. AUC is in-sample (apparent) -- fine for a
+# relative comparison of equal-complexity models, but optimistic in absolute terms.
+base_model <- glm(as.formula(paste("deceased ~ vtpfvc +", adjustment)),
+                  data = mech, family = binomial)
+
+# Wilcoxon (rank-based) AUC -- no extra dependency.
+auc <- function(y, p) {
+  n1 <- sum(y == 1); n0 <- sum(y == 0)
+  (sum(rank(p)[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+}
+
+fit_tbl <- bind_rows(
+  tibble(model = "Base (VT/PFVC + VT/PBW + covars)", added_term = NA_character_,
+         aic = AIC(base_model), auc = auc(mech$deceased, fitted(base_model)),
+         lrt_chisq_vs_base = NA_real_, lrt_p_vs_base = NA_real_),
+  map_dfr(surfaces, function(s) {
+    lrt <- anova(base_model, s$model, test = "LRT")
+    tibble(model = paste0("+ ", s$y_label), added_term = s$y_var,
+           aic = AIC(s$model), auc = auc(mech$deceased, fitted(s$model)),
+           lrt_chisq_vs_base = lrt$Deviance[2], lrt_p_vs_base = lrt$`Pr(>Chi)`[2])
+  })
+) %>%
+  mutate(
+    site = site_name, n_obs = nrow(mech), n_deaths = sum(mech$deceased),
+    delta_aic_vs_base = aic - aic[model == "Base (VT/PFVC + VT/PBW + covars)"],
+    evidence_ratio_vs_best = exp(-0.5 * (aic - min(aic)))
+  )
+write_csv(fit_tbl, file.path(final_dir, paste0("stress_strain_modelfit_", site_name, ".csv")))
+
+message("Model-fit comparison (same n=", nrow(mech), "; lower AIC / higher AUC = better):")
+pwalk(fit_tbl, function(model, aic, auc, delta_aic_vs_base, evidence_ratio_vs_best,
+                        lrt_p_vs_base, ...) {
+  message("  ", model, ": AIC=", round(aic, 1), " (dAIC=", round(delta_aic_vs_base, 1),
+          "), AUC=", round(auc, 3), ", ER vs best=", signif(evidence_ratio_vs_best, 3),
+          if (!is.na(lrt_p_vs_base)) paste0(", LRT p=", signif(lrt_p_vs_base, 2)) else "")
 })
 
 make_surface_plot <- function(s) {
