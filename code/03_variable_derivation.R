@@ -725,6 +725,13 @@ analysis_with_completeness <- analysis_with_sf %>%
       !is.na(sf_ratio) & !is.na(sofa_total)
   )
 
+# Save the pre-gate per-timepoint dataset (all eligible IMV timepoints with derived
+# variables, BEFORE the lung-protective VT/PBW gate). This lets exploratory scripts
+# re-derive the cohort under a different (e.g. liberalized) VT/PBW band without
+# re-running the pipeline. Not a consortium deliverable.
+write_parquet(analysis_with_completeness,
+              file.path(output_dir, "analysis_all_eligible_timepoints.parquet"))
+
 # Apply the inclusion predicates BEFORE reducing to one row per patient, matching
 # the original analysis (filter qualifying timepoints, then distinct(subject_id)).
 # A patient is included if ANY complete-data IMV timepoint is simultaneously
