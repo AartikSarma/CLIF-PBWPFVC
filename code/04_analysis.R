@@ -134,7 +134,8 @@ covar_labels <- list(age10 ~ "Age (per 10 yr)", sf10 ~ "SF ratio (per 10)")
 # driving pressure (static DP, elastance, compliance, and the elastance-normalized
 # Ers x PBW / Ers x PFVC) is additionally adjusted for BMI. Models without a
 # driving-pressure component use the standard covariate set.
-DP_DERIVED <- c("dp", "ers", "crs", "ers_pbw", "ers_pfvc")
+DP_DERIVED <- c("dp", "ers", "crs", "ers_pbw", "ers_pfvc",
+                "mechanical_power", "mp_pbw", "mp_pfvc")
 uses_dp <- function(...) {
   vars <- trimws(unlist(strsplit(paste(c(...), collapse = " + "), "\\+")))
   any(vars %in% DP_DERIVED)
@@ -241,9 +242,14 @@ if (has_mortality_variation) {
 # Harhay (AJRCCM 2019), VFDs are analyzed as a competing-risks outcome (extubation
 # vs death) in section 4d2 below; mortality (section 4c) is the other component.
 continuous_outcomes <- list(
-  ers    = list(var = "ers",    label = "Elastance"),
-  crs    = list(var = "crs",    label = "Compliance"),
-  dp     = list(var = "dp",     label = "Static DP")
+  ers      = list(var = "ers",              label = "Elastance"),
+  crs      = list(var = "crs",              label = "Compliance"),
+  dp       = list(var = "dp",               label = "Static DP"),
+  ers_pbw  = list(var = "ers_pbw",          label = "Ers x PBW"),
+  ers_pfvc = list(var = "ers_pfvc",         label = "Ers x PFVC"),
+  mp       = list(var = "mechanical_power", label = "Mechanical power"),
+  mp_pbw   = list(var = "mp_pbw",           label = "MP / PBW"),
+  mp_pfvc  = list(var = "mp_pfvc",          label = "MP / PFVC")
 )
 
 continuous_models <- list()

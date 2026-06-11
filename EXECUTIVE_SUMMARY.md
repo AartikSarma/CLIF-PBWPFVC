@@ -33,7 +33,10 @@ subprocess.
 - **04 — Analysis (the main results).** Table 1 (stratified by PBW/PFVC tercile);
   logistic mortality regressions across the exposure specifications; the
   **elastance-normalized mortality models** (`ers_pbw` / `ers_pfvc`, z-scaled and
-  VT/PBW-adjusted); linear models for elastance, compliance, and driving pressure;
+  VT/PBW-adjusted); linear models for the mechanics outcomes — elastance,
+  compliance, driving pressure, normalized elastance (Ers×PBW, Ers×PFVC),
+  mechanical power, and normalized mechanical power (MP/PBW, MP/PFVC) — each
+  regressed across the exposure specifications;
   **28-day VFDs modeled as a competing-risks outcome** (extubation vs death, via
   Fine–Gray subdistribution models, per Yehya & Harhay 2019) rather than a
   continuous value; an AIC / evidence-ratio comparison; 60-day survival (Cox +
@@ -173,8 +176,14 @@ human-readable tables and figures for local review.
   models: in-hospital mortality on z-scaled Ers×PBW and Ers×PFVC (odds ratio per
   1 SD), adjusted for VT/PBW and the standard covariates.
 - **`regression_ers_<site>.html`**, **`regression_crs_<site>.html`**,
-  **`regression_dp_<site>.html`** — linear regressions of elastance, compliance,
-  and static driving pressure, each across the same five exposure specifications.
+  **`regression_dp_<site>.html`**, **`regression_ers_pbw_<site>.html`**,
+  **`regression_ers_pfvc_<site>.html`**, **`regression_mp_<site>.html`**,
+  **`regression_mp_pbw_<site>.html`**, **`regression_mp_pfvc_<site>.html`** —
+  linear regressions of the mechanics outcomes (elastance, compliance, static
+  driving pressure, normalized elastance Ers×PBW / Ers×PFVC, mechanical power, and
+  normalized mechanical power MP/PBW / MP/PFVC), each across the same five exposure
+  specifications. The mechanical-power outcomes require a recorded peak inspiratory
+  pressure, so their N is the (smaller) subset where MP is computable.
 - **`regression_vfd28_<site>.html`** — 28-day VFDs as a **competing-risks**
   outcome (Yehya & Harhay 2019): Fine–Gray subdistribution models for extubation
   (death as the competing risk), across the same five exposure specifications,
