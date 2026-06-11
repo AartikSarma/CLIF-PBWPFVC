@@ -54,7 +54,11 @@ cross_sectional <- cross_sectional %>%
 cross_sectional <- cross_sectional %>%
   mutate(
     sex_category  = factor(sex_category,  levels = c("Male", "Female")),
-    race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER"))
+    race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
+    # Per-10-unit covariates so the adjusted age and SF-ratio coefficients are
+    # reported per 10 years / 10 SF units (Table 1 keeps the raw scales).
+    age10 = age_at_admission / 10,
+    sf10  = sf_ratio / 10
   )
 
 # =============================================================================
@@ -120,7 +124,11 @@ table1 %>%
 # =============================================================================
 
 # Common covariates for all models
-covariates <- "race_category + age_at_admission + sex_category + sofa_total + sf_ratio"
+covariates <- "race_category + age10 + sex_category + sofa_total + sf10"
+
+# Readable labels for the per-10-unit covariates in the rendered regression
+# tables (age10 / sf10 appear in every model's covariate set).
+covar_labels <- list(age10 ~ "Age (per 10 yr)", sf10 ~ "SF ratio (per 10)")
 
 # Per the original paper, any model whose outcome OR exposure is derived from
 # driving pressure (static DP, elastance, compliance, and the elastance-normalized
@@ -165,7 +173,7 @@ if (has_mortality_variation) {
   })
 
   mortality_tables <- map(mortality_models, ~ {
-    tbl_regression(.x, exponentiate = TRUE) %>% bold_p()
+    tbl_regression(.x, exponentiate = TRUE, label = covar_labels) %>% bold_p()
   })
 
   message("Logistic regression (mortality) — AIC:")
@@ -215,7 +223,8 @@ if (has_mortality_variation) {
     zname <- paste0(.y, "_z")
     tbl_regression(
       .x, exponentiate = TRUE,
-      label = setNames(list(paste0(ers_mortality_specs[[.y]], " (per SD)")), zname)
+      label = c(setNames(list(paste0(ers_mortality_specs[[.y]], " (per SD)")), zname),
+                covar_labels)
     ) %>% bold_p()
   })
   tbl_merge(ers_mortality_tables,
@@ -249,7 +258,7 @@ for (outcome_name in names(continuous_outcomes)) {
   })
 
   tables_for_outcome <- map(models_for_outcome, ~ {
-    tbl_regression(.x) %>% bold_p()
+    tbl_regression(.x, label = covar_labels) %>% bold_p()
   })
 
   continuous_models[[outcome_name]] <- models_for_outcome
@@ -368,15 +377,17 @@ message("Survival analysis: ", nrow(surv_data), " patients, ", n_deaths,
 
 if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
   cox_model <- coxph(
-    Surv(surv_time, event) ~ pbwpfvc + vtpbw + age_at_admission +
-      sex_category + race_category + sf_ratio + sofa_total,
+    Surv(surv_time, event) ~ pbwpfvc + vtpbw + age10 +
+      sex_category + race_category + sf10 + sofa_total,
     data = surv_data
   )
 
   message("Cox model:")
   print(summary(cox_model))
 
-  km_fit <- survfit(Surv(surv_time, event) ~ ntile(pbwpfvc,3), data = surv_data)
+  # Fit on the labelled pbwpfvc_tercile factor (not ntile()) so the strata carry
+  # informative names instead of "ntile(pbwpfvc, 3)=1".
+  km_fit <- survfit(Surv(surv_time, event) ~ pbwpfvc_tercile, data = surv_data)
 
   km_plot <- ggsurvplot(
     km_fit,
@@ -388,8 +399,11 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
     xlab = "Days from Admission",
     ylab = "Survival Probability",
     title = "Kaplan-Meier Survival by PBW/PFVC Tercile",
-    legend.title = "PBW/PFVC Tercile",
-    ggtheme = theme_minimal()
+    legend.title = "PBW/PFVC tercile (lower = PBW closer to PFVC)",
+    legend.labs = c("Lowest tercile (T1)", "Middle tercile (T2)", "Highest tercile (T3)"),
+    ggtheme = theme_minimal(),
+    # Clean risk table: drop the background grid behind the at-risk counts.
+    tables.theme = theme_cleantable()
   )
 
   pdf(file.path(final_dir, paste0("km_curves_", site_name, ".pdf")),
@@ -621,8 +635,8 @@ for (outcome_name in names(continuous_outcomes)) {
 # Survival (Cox proportional hazards -> hazard ratios)
 if (exists("cox_model")) {
   cox_formula <- paste(
-    "Surv(surv_time, event) ~ pbwpfvc + vtpbw + age_at_admission +",
-    "sex_category + race_category + sf_ratio + sofa_total"
+    "Surv(surv_time, event) ~ pbwpfvc + vtpbw + age10 +",
+    "sex_category + race_category + sf10 + sofa_total"
   )
   results_long <- c(results_long, list(
     extract_model_results(cox_model, "HR", "Survival",
