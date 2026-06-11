@@ -36,13 +36,14 @@ subprocess.
   VT/PBW-adjusted); linear models for elastance, compliance, VFD-28, and driving
   pressure; an AIC / evidence-ratio comparison; 60-day survival (Cox +
   Kaplan-Meier by PBW/PFVC tercile); demographic-bias models (each metric vs
-  demographics); the H1 broad-cohort PFVC-vs-PBW relationship; conditional-bias
-  diagnostic plots; and the unified long-format effect-estimate table that feeds
-  the cross-cohort step.
+  demographics); the predicted-FVC-vs-predicted-body-weight model (regressing
+  PFVC on PBW plus age, sex, and race to show that PBW alone does not capture
+  predicted lung size); conditional-bias diagnostic plots; and the unified
+  long-format effect-estimate table that feeds the cross-cohort step.
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
-  analysis + a combined PDF), covariate forests for the bias/H1 analyses, and
-  pooled consort and PBW:PFVC distribution figures.
+  analysis + a combined PDF), covariate forests for the demographic-bias and
+  PFVC-vs-PBW analyses, and pooled consort and PBW:PFVC distribution figures.
 
 ## What the output files are
 
@@ -95,8 +96,10 @@ data and should **not** leave the site.
   mortality flags, and demographics.
 - **`analysis_all_timepoints.parquet`** — the longitudinal counterpart: one row
   per hospitalization × ventilator timepoint, for time-varying analyses.
-- **`analysis_broad_pfvc.parquet`** — a broader cohort (wider than the ventilated
-  analytic cohort) used only for the H1 PFVC-vs-PBW relationship.
+- **`analysis_broad_pfvc.parquet`** — a broader cohort (all eligible subjects with
+  height, age, sex, race, and a computable PFVC — wider than the ventilated
+  analytic cohort) used only for the predicted-FVC-vs-predicted-body-weight
+  model.
 - **`sofa_scores.parquet`** — per-encounter aggregated SOFA (worst component
   values and total). **`sofa_daily.parquet`** — the per-encounter-day components
   and totals.
@@ -150,8 +153,12 @@ human-readable tables and figures for local review.
   how each metric (VT/PBW, VT/PFVC, Ers×PBW, Ers×PFVC, Static DP, and mortality)
   varies by demographics (age per 10 yr, sex, race, height per 10 cm, SF ratio
   per 10, SOFA, BMI), as within-site standardized betas / odds ratios.
-- **`table_h1_pfvc_vs_pbw_<site>.html` / `.pdf`** — the H1 broad-cohort linear
-  model `PFVC ~ PBW + age + sex + race`, quantifying how PFVC tracks PBW.
+- **`table_pfvc_vs_pbw_<site>.html` / `.pdf`** — the predicted-FVC-vs-
+  predicted-body-weight model: a broad-cohort linear regression
+  `PFVC ~ PBW + age + sex + race`. The PBW coefficient shows how much of PFVC is
+  explained by PBW, and the significant age / sex / race coefficients demonstrate
+  that PBW alone does not capture predicted lung size — the core motivation for
+  scaling tidal volume by PFVC instead.
 
 **Survival outputs:**
 
@@ -189,8 +196,8 @@ into the local `output/` tree.
 - **`forest_plots/forest_all_analyses.pdf`** — all analyses combined into a
   single multi-page PDF.
 - **`forest_plots/covforest_*.pdf`** — covariate forests for the
-  demographic-bias and H1 analyses (the demographic coefficients across cohorts,
-  rather than the exposures).
+  demographic-bias and PFVC-vs-PBW analyses (the demographic coefficients
+  across cohorts, rather than the exposures).
 - **`consort_diagram_pooled.pdf`** — the CONSORT funnel pooled across sites.
 - **`distribution_pbwpfvc_pooled.pdf`** — the pooled PBW:PFVC distribution built
   by summing the per-site histogram exports.

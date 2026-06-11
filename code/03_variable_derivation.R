@@ -95,7 +95,7 @@ pbw_pfvc_data <- cohort_demographics %>%
 
 message("PBW/PFVC calculated: ", nrow(pbw_pfvc_data), " hospitalizations")
 
-# Broad PFVC cohort for the H1 (PFVC vs PBW) table: all eligible patients with
+# Broad PFVC cohort for the PFVC-vs-PBW table: all eligible patients with
 # height/age/sex/race/PFVC, before any ventilation-based inclusion. Saved for
 # script 04.
 write_parquet(pbw_pfvc_data, file.path(output_dir, "analysis_broad_pfvc.parquet"))

@@ -538,10 +538,12 @@ gt::gtsave(demo_gt, file.path(final_dir, paste0("table_demographic_bias_", site_
 message("Demographic-bias table written (", length(demo_models), " outcome models)")
 
 # =============================================================================
-# 4f3. H1 table: predicted FVC vs predicted body weight
+# 4f3. Predicted FVC vs predicted body weight
 # =============================================================================
-# PFVC regressed on PBW + demographics on the BROAD cohort (all eligible patients
-# with height/age/sex/race/PFVC, not just the ventilated cross-sectional cohort).
+# Does PBW capture predicted lung size? PFVC regressed on PBW + demographics on
+# the BROAD cohort (all eligible patients with height/age/sex/race/PFVC, not just
+# the ventilated cross-sectional cohort). Significant age/sex/race coefficients
+# indicate PBW alone does not capture predicted lung size.
 broad_pfvc <- read_parquet(file.path(output_dir, "analysis_broad_pfvc.parquet")) %>%
   mutate(
     sex_category  = factor(sex_category,  levels = c("Male", "Female")),
@@ -549,11 +551,11 @@ broad_pfvc <- read_parquet(file.path(output_dir, "analysis_broad_pfvc.parquet"))
     age10 = age_at_admission / 10
   )
 
-h1_model <- lm(pfvc ~ pbw + age10 + sex_category + race_category, data = broad_pfvc)
-h1_formula <- "pfvc ~ pbw + age10 + sex_category + race_category"
+pfvc_vs_pbw_model <- lm(pfvc ~ pbw + age10 + sex_category + race_category, data = broad_pfvc)
+pfvc_vs_pbw_formula <- "pfvc ~ pbw + age10 + sex_category + race_category"
 
-h1_gt <- tbl_regression(
-  h1_model,
+pfvc_vs_pbw_gt <- tbl_regression(
+  pfvc_vs_pbw_model,
   label = list(
     pbw ~ "PBW (kg)",
     age10 ~ "Age (per 10 yr)",
@@ -562,17 +564,17 @@ h1_gt <- tbl_regression(
   )
 ) %>%
   bold_p() %>%
-  modify_caption(paste0("H1. ", site_name,
+  modify_caption(paste0(site_name,
                         " — predicted FVC vs. predicted body weight (all subjects, N = ",
                         nrow(broad_pfvc), ")"))
 
-h1_gt %>%
+pfvc_vs_pbw_gt %>%
   as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table_h1_pfvc_vs_pbw_", site_name, ".html")))
-h1_gt %>%
+  gt::gtsave(file.path(final_dir, paste0("table_pfvc_vs_pbw_", site_name, ".html")))
+pfvc_vs_pbw_gt %>%
   as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table_h1_pfvc_vs_pbw_", site_name, ".pdf")))
-message("H1 PFVC-vs-PBW table written (N = ", nrow(broad_pfvc), ")")
+  gt::gtsave(file.path(final_dir, paste0("table_pfvc_vs_pbw_", site_name, ".pdf")))
+message("PFVC-vs-PBW table written (N = ", nrow(broad_pfvc), ")")
 
 # =============================================================================
 # 4g. Unified long-format regression results table
@@ -660,10 +662,10 @@ results_long <- c(results_long, imap(demo_models, ~ {
                         .x$family, .x$formula)
 }))
 
-# H1: PFVC vs PBW (broad cohort)
+# Predicted FVC vs PBW (broad cohort)
 results_long <- c(results_long, list(
-  extract_model_results(h1_model, "Beta", "H1: PFVC ~ PBW",
-                        "PFVC ~ PBW", "linear", h1_formula)
+  extract_model_results(pfvc_vs_pbw_model, "Beta", "PFVC vs PBW",
+                        "PFVC ~ PBW", "linear", pfvc_vs_pbw_formula)
 ))
 
 # Drop intercepts (not a reportable effect) and stamp the cohort name so the

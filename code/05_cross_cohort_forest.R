@@ -178,13 +178,13 @@ message("Combined forest plots saved to: ",
         file.path(forest_dir, "forest_all_analyses.pdf"))
 
 # =============================================================================
-# Covariate forests for the demographic-bias and H1 analyses
+# Covariate forests for the demographic-bias and PFVC-vs-PBW analyses
 # =============================================================================
 # These analyses regress an outcome on demographics only, so the comparison of
 # interest is the covariate coefficients (not exposures). Plot all non-intercept
 # terms across cohorts, one facet per term.
 covariate_analyses <- all_results %>%
-  filter(str_detect(analysis, "^Demo bias:") | analysis == "H1: PFVC ~ PBW")
+  filter(str_detect(analysis, "^Demo bias:") | analysis == "PFVC vs PBW")
 
 if (nrow(covariate_analyses) > 0) {
   cov_term_labels <- c(
