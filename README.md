@@ -129,6 +129,7 @@ Rscript code/explore_elastance_age_interaction.R       # Normalized elastance x 
 Rscript code/explore_mechanical_power_normalization.R  # Mechanical power scaled to PBW vs PFVC
 Rscript code/explore_elastance_fingerprints.R          # Disentangling recoil vs size-surrogate error
 Rscript code/explore_stress_strain_mortality.R         # Predicted-mortality stress-strain surfaces
+Rscript code/explore_height_sensitivity.R              # Does VT/PBW+PFVC's fit survive height adjustment?
 ```
 
 ## Data safety
