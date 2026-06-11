@@ -12,8 +12,13 @@
 # PRVC; pure pressure control is excluded) -- within the first 6 hours of
 # ventilation, and for each such subject:
 #   * collects the (VT, driving pressure) pairs,
-#   * fits the slope of DP vs VT (the "Ers/V0" estimate, = Ers), and
-#   * plots DP vs VT with the fitted line, one panel per subject.
+#   * fits the per-subject slope of DP vs VT (the "Ers/V0" estimate, = Ers) and
+#     checks it against the single-point DP/VT elastance,
+#   * plots DP vs VT one panel per subject, and
+#   * plots the per-subject slope against age, sex, race, and height.
+# The per-subject slope -- not a pooled regression across subjects -- is the unit
+# of analysis: subjects differ systematically by predicted lung size (the PBW vs
+# PFVC finding), so a single line across subjects would be misleading.
 #
 # Caveats (exploratory): the slope is a clean elastance estimate only if PEEP is
 # unchanged across the pairs (otherwise recruitment/derecruitment confounds it),
@@ -26,13 +31,14 @@
 # Outputs: final/ers_v0_per_subject_<site>.csv   (per-subject; LOCAL ONLY, patient-level)
 #          final/ers_v0_summary_<site>.csv        (aggregate distribution; poolable)
 #          final/ers_v0_dp_vs_vt_<site>.pdf       (DP-vs-VT panels, one per subject)
-#          final/ers_v0_dp_vs_vt_combined_<site>.pdf (all constant-PEEP subjects, one panel)
+#          final/ers_v0_vs_demographics_<site>.pdf (per-subject slope vs age/sex/race/height)
 # =============================================================================
 
 library(tidyverse)
 library(arrow)
 library(here)
 library(lubridate)
+library(patchwork)
 
 source("utils/config.R")
 site_name <- config$site_name
@@ -43,6 +49,12 @@ dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 resp_waterfall <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet"))
 cohort_ids     <- readRDS(file.path(output_dir, "cohort_hospitalization_ids.rds"))
+
+# Subject-level demographics for the slope-vs-covariate plots.
+demographics <- read_parquet(file.path(output_dir, "cohort_demographics.parquet")) %>%
+  select(hospitalization_id, age_at_admission, sex_category, race_category)
+heights <- read_parquet(file.path(output_dir, "cohort_heights.parquet")) %>%
+  select(hospitalization_id, height_cm)
 
 WINDOW_HOURS <- 6  # "first six hours of ventilation" (anchored at first IMV timepoint)
 
@@ -112,10 +124,25 @@ ers_v0 <- multibreath %>%
     peep_constant  = n_distinct(peep_set) == 1,
     ers_v0_cmh2o_per_ml = cov(tidal_volume_set, dp) / var(tidal_volume_set),
     r_squared      = if (n_distinct(dp) > 1) cor(tidal_volume_set, dp)^2 else NA_real_,
+    # Single-point elastance check: Ers/V0 = dDP/dVT should be close to the
+    # point-wise DP/VT (mean across the subject's measurements). cmH2O/L.
+    ers_single_point_cmh2o_per_l = mean(dp / tidal_volume_set) * 1000,
     .groups = "drop"
   ) %>%
   mutate(ers_v0_cmh2o_per_l = ers_v0_cmh2o_per_ml * 1000) %>%
+  left_join(demographics, by = "hospitalization_id") %>%
+  left_join(heights, by = "hospitalization_id") %>%
   arrange(desc(peep_constant), hospitalization_id)
+
+# Validation: the multi-point slope should track the single-point DP/VT elastance.
+valid <- ers_v0 %>% filter(is.finite(ers_v0_cmh2o_per_l),
+                           is.finite(ers_single_point_cmh2o_per_l))
+if (nrow(valid) >= 2) {
+  message("Validation — per-subject slope (Ers/V0) vs single-point Ers (mean DP/VT): ",
+          "Pearson r = ",
+          round(cor(valid$ers_v0_cmh2o_per_l, valid$ers_single_point_cmh2o_per_l), 3),
+          " across ", nrow(valid), " subjects.")
+}
 
 # Per-subject table is patient-level: written for LOCAL exploration only (the
 # output/ tree is gitignored). Do not share without aggregation.
@@ -182,37 +209,56 @@ ggsave(file.path(final_dir, paste0("ers_v0_dp_vs_vt_", site_name, ".pdf")),
 message("DP-vs-VT panel plot written for ", n_subj, " subjects.")
 
 # =============================================================================
-# Combined plot: all paired DP-VT values (constant-PEEP subjects) on one panel
+# Per-subject Ers/V0 vs demographics
 # =============================================================================
-# Restricted to PEEP-constant subjects, for whom the slope is an unconfounded
-# elastance estimate. Each faint line is one subject's paired (VT, DP) points; the
-# orange line is the pooled least-squares fit across all points.
-constant_peep_ids <- ers_v0 %>% filter(peep_constant) %>% pull(hospitalization_id)
-combined_data <- multibreath %>% filter(hospitalization_id %in% constant_peep_ids)
+# The unit of analysis is the per-subject slope, NOT pooled DP-VT points: a single
+# regression line across subjects would conflate within- and between-subject
+# variation, and subjects differ systematically by predicted lung size (the PBW vs
+# PFVC finding). Restricted to constant-PEEP subjects, for whom the slope is an
+# unconfounded elastance estimate.
+demo_slopes <- ers_v0 %>% filter(peep_constant, is.finite(ers_v0_cmh2o_per_l))
 
-if (nrow(combined_data) == 0) {
-  message("No constant-PEEP subjects; skipping combined DP-vs-VT plot.")
+if (nrow(demo_slopes) == 0) {
+  message("No constant-PEEP subjects with a finite slope; skipping demographic plots.")
 } else {
-  combined_plot <- ggplot(combined_data, aes(x = tidal_volume_set, y = dp)) +
-    geom_line(aes(group = hospitalization_id),
-              color = "#0072B2", alpha = 0.35, linewidth = 0.4) +
-    geom_point(color = "#0072B2", alpha = 0.45, size = 1.3) +
-    geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
-                color = "#E69F00", fill = "#E69F00", alpha = 0.15, linewidth = 1) +
-    labs(
-      title = "Driving pressure vs tidal volume — constant-PEEP subjects",
-      subtitle = paste0(site_name, " — each faint line is one subject (>= 2 paired ",
-                        "VT/DP points); orange line is the pooled fit (n = ",
-                        length(constant_peep_ids), " subjects)"),
-      x = "Set tidal volume (mL)",
-      y = "Driving pressure, Pplat - PEEP (cmH2O)"
-    ) +
-    theme_minimal(base_size = 11)
+  okabe_ito_cat <- c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
+  y_lab <- expression(E[rs] * "/V0 (slope of DP vs VT, cmH"[2] * "O/L)")
 
-  ggsave(file.path(final_dir, paste0("ers_v0_dp_vs_vt_combined_", site_name, ".pdf")),
-         combined_plot, width = 8, height = 6)
-  message("Combined DP-vs-VT plot written for ", length(constant_peep_ids),
-          " constant-PEEP subjects.")
+  p_age <- ggplot(demo_slopes, aes(age_at_admission, ers_v0_cmh2o_per_l)) +
+    geom_point(color = "#0072B2", alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+                color = "#E69F00", fill = "#E69F00", alpha = 0.15) +
+    labs(x = "Age (years)", y = y_lab) + theme_minimal(base_size = 11)
+
+  p_height <- ggplot(demo_slopes, aes(height_cm, ers_v0_cmh2o_per_l)) +
+    geom_point(color = "#0072B2", alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+                color = "#E69F00", fill = "#E69F00", alpha = 0.15) +
+    labs(x = "Height (cm)", y = y_lab) + theme_minimal(base_size = 11)
+
+  p_sex <- ggplot(demo_slopes, aes(sex_category, ers_v0_cmh2o_per_l, color = sex_category)) +
+    geom_boxplot(outlier.shape = NA, width = 0.5) +
+    geom_jitter(width = 0.12, alpha = 0.6, size = 2) +
+    scale_color_manual(values = okabe_ito_cat, guide = "none") +
+    labs(x = "Sex", y = y_lab) + theme_minimal(base_size = 11)
+
+  p_race <- ggplot(demo_slopes, aes(race_category, ers_v0_cmh2o_per_l, color = race_category)) +
+    geom_boxplot(outlier.shape = NA, width = 0.5) +
+    geom_jitter(width = 0.12, alpha = 0.6, size = 2) +
+    scale_color_manual(values = okabe_ito_cat, guide = "none") +
+    labs(x = "Race", y = y_lab) + theme_minimal(base_size = 11)
+
+  demo_fig <- (p_age | p_height) / (p_sex | p_race) +
+    plot_annotation(
+      title = "Per-subject Ers/V0 (multi-breath DP-vs-VT slope) by demographics",
+      subtitle = paste0(site_name, " — one point per subject (constant-PEEP, n = ",
+                        nrow(demo_slopes), "); slope = dDP/dVT")
+    )
+
+  ggsave(file.path(final_dir, paste0("ers_v0_vs_demographics_", site_name, ".pdf")),
+         demo_fig, width = 11, height = 9)
+  message("Ers/V0-vs-demographics figure written (n = ", nrow(demo_slopes),
+          " constant-PEEP subjects).")
 }
 
 message("Exploratory Ers/V0 analysis complete.")
