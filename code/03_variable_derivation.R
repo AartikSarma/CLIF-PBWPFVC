@@ -424,7 +424,8 @@ analysis_data <- imv_timepoints %>%
       TRUE ~ NA_real_
     ),
     # Mechanical power normalized to predicted body weight (J/min/kg) vs predicted
-    # FVC (J/min/L) -- the PBW-vs-PFVC scaling comparison carried into script 04c.
+    # FVC (J/min/L) -- the PBW-vs-PFVC scaling comparison used by the exploratory
+    # mechanical-power script.
     mp_pbw  = mechanical_power / pbw,
     mp_pfvc = mechanical_power / pfvc
   )

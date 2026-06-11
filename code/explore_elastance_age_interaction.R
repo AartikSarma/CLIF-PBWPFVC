@@ -1,7 +1,10 @@
 # =============================================================================
-# Script 04b: Normalized elastance x age interaction
+# Exploratory: normalized elastance x age interaction
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
+# Exploratory, standalone analysis (NOT part of the 00 pipeline runner). Reads the
+# script 03 cross-sectional dataset and refits its own models.
+#
 # Motivation: normalized elastance (Ers x PBW, Ers x PFVC) is used as a surrogate
 # for severity of lung injury, but the elastic recoil of lung tissue changes with
 # age independently of injury -- so age confounds elastance as a severity marker.
@@ -265,4 +268,4 @@ tbl_merge(vfd_interaction_tables, tab_spanner = unname(ers_specs)) %>%
                        paste0("regression_ers_age_interaction_vfd_", site_name, ".html")))
 
 message("VFD interaction outputs written")
-message("Script 04b complete.")
+message("Exploratory elastance x age interaction complete.")

@@ -111,8 +111,6 @@ Rscript code/01_cohort_identification.R   # Filter CLIF tables to the eligible c
 Rscript code/02_quality_checks.R          # Apply outlier thresholds, QC stats
 Rscript code/03_variable_derivation.R     # PBW, PFVC, SOFA, SF/PF, VT metrics
 Rscript code/04_analysis.R                # Regressions, survival, bias diagnostics
-Rscript code/04b_elastance_age_interaction.R  # Normalized elastance x age interaction
-Rscript code/04c_mechanical_power_normalization.R  # Mechanical power scaled to PBW vs PFVC
 Rscript code/05_cross_cohort_forest.R     # Cross-cohort forest plots (after 04)
 ```
 
@@ -120,6 +118,18 @@ Scripts must be run in order — each reads the outputs of the previous step.
 Script 05 aggregates the per-cohort regression tables produced by script 04 and
 is site-agnostic: it discovers every `regression_results_long_*.csv` on disk and
 stacks them into cross-cohort forest plots.
+
+### Exploratory analyses (standalone, not in the runner)
+
+These read the script 03 cross-sectional dataset and refit their own models;
+they are not part of the consortium pipeline. Run individually after scripts 01–03.
+
+```bash
+Rscript code/explore_elastance_age_interaction.R       # Normalized elastance x age interaction
+Rscript code/explore_mechanical_power_normalization.R  # Mechanical power scaled to PBW vs PFVC
+Rscript code/explore_elastance_fingerprints.R          # Disentangling recoil vs size-surrogate error
+Rscript code/explore_stress_strain_mortality.R         # Predicted-mortality stress-strain surfaces
+```
 
 ## Data safety
 

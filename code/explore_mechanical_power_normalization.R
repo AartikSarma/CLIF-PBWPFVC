@@ -1,7 +1,10 @@
 # =============================================================================
-# Script 04c: Mechanical power normalized to PBW vs PFVC
+# Exploratory: mechanical power normalized to PBW vs PFVC
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
+# Exploratory, standalone analysis (NOT part of the 00 pipeline runner). Reads the
+# script 03 cross-sectional dataset and refits its own models.
+#
 # Just as tidal volume and elastance can be scaled by predicted body weight (PBW)
 # or predicted FVC (PFVC), so can mechanical power (MP). This script compares MP
 # normalized to PBW (J/min/kg) against MP normalized to PFVC (J/min/L) as a
@@ -144,7 +147,7 @@ message("Mechanical-power normalization table written")
 # =============================================================================
 # Mechanical power x age interaction
 # =============================================================================
-# As with elastance (script 04b), lung and chest-wall mechanics change with age
+# As with elastance (explore_elastance_age_interaction.R), lung and chest-wall mechanics change with age
 # independently of injury, so age can modify the mechanical-power / mortality
 # association. Re-fit each model with an MP x age interaction, test it by
 # likelihood-ratio test against the no-interaction model, and use marginaleffects
@@ -341,4 +344,4 @@ pwalk(mp_vfd_interaction, function(exposure, interaction_shr, lrt_p, ...) {
 })
 
 message("VFD competing-risks outputs written")
-message("Script 04c complete.")
+message("Exploratory mechanical-power normalization complete.")

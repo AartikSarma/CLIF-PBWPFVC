@@ -42,33 +42,30 @@ subprocess.
   PFVC on PBW plus age, sex, and race to show that PBW alone does not capture
   predicted lung size); conditional-bias diagnostic plots; and the unified
   long-format effect-estimate table that feeds the cross-cohort step.
-- **04b — Normalized elastance × age interaction.** Because lung elastic recoil
-  changes with age independently of injury, age confounds normalized elastance as
-  a severity-of-injury surrogate. This script re-fits the mortality models with an
-  elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), tests it against the
-  no-interaction model by likelihood-ratio test, and uses `marginaleffects` to
-  express the result on the probability scale (the elastance slope on mortality at
-  representative ages). The interaction is tested for **two outcomes**: in-hospital
-  mortality (logistic) and 28-day VFDs (competing risks, Fine–Gray; interaction
-  reported as a subdistribution hazard ratio + LRT).
-- **04c — Mechanical power normalized to PBW vs PFVC.** Extends the PBW-vs-PFVC
-  scaling question to mechanical power (MP). MP is derived per index timepoint in
-  script 03 with a **mode-aware** simplified power equation — volume-control modes
-  use the Gattinoni form with the driving-pressure (resistive) correction,
-  `0.098·RR·VT·(Ppeak − ½·ΔP)`, while pressure-targeted modes (pressure control,
-  PRVC; decelerating flow) use the rectangular Becher form, `0.098·RR·VT·Ppeak`;
-  spontaneous/unclassifiable modes are left undefined. 04c then compares MP
-  normalized to PBW (J/min/kg) against MP normalized to PFVC (J/min/L), z-scaled,
-  as predictors of in-hospital mortality, with an AIC evidence ratio referenced to
-  the PBW-scaled model. As in 04b, it also adds an MP × age interaction (since
-  lung/chest-wall mechanics change with age), tested by likelihood-ratio test and
-  summarized with `marginaleffects` as the MP slope on mortality at representative
-  ages. Both the MP/PBW-vs-MP/PFVC comparison and the MP × age interaction are run
-  for two outcomes — mortality and 28-day VFDs (competing risks, Fine–Gray, SHR).
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
   analysis + a combined PDF), covariate forests for the demographic-bias and
   PFVC-vs-PBW analyses, and pooled consort and PBW:PFVC distribution figures.
+
+### Exploratory analyses (standalone — not in the pipeline runner)
+
+These read the script 03 cross-sectional dataset and refit their own models. They
+are run individually (not via `00_run_pipeline.R`) and are not consortium
+deliverables. Mechanical power (`mp_pbw`/`mp_pfvc`) is still derived in script 03
+with the mode-aware simplified power equation; the modeling lives here.
+
+- **`explore_elastance_age_interaction.R`** — refits the mortality (and 28-day VFD
+  competing-risks) models with an elastance × age interaction (Ers×PBW and Ers×PFVC,
+  per SD), since recoil changes with age independently of injury; LRT + probability-
+  scale slopes via `marginaleffects`.
+- **`explore_mechanical_power_normalization.R`** — compares mechanical power scaled
+  to PBW (J/min/kg) vs PFVC (J/min/L), z-scaled, as predictors of mortality and
+  28-day VFDs, with an AIC evidence ratio and an MP × age interaction.
+- **`explore_elastance_fingerprints.R`** — probes the statistical fingerprints that
+  distinguish the size-surrogate error from non-constant recoil (size vs injury
+  axes, predicted FEV1/FVC as a recoil surrogate, variance partition).
+- **`explore_stress_strain_mortality.R`** — predicted-mortality surfaces over the
+  strain (VT/PFVC) × stress/elastance plane, with a model-fit comparison.
 
 ## What the output files are
 
@@ -196,7 +193,7 @@ human-readable tables and figures for local review.
   that PBW alone does not capture predicted lung size — the core motivation for
   scaling tidal volume by PFVC instead.
 
-**Elastance × age interaction (script 04b):**
+**Elastance × age interaction (exploratory — `explore_elastance_age_interaction.R`):**
 
 - **`regression_ers_age_interaction_<site>.html`** — the two mortality models with
   an elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), showing the main
@@ -215,7 +212,7 @@ human-readable tables and figures for local review.
   subdistribution hazard ratio with CI/p and the likelihood-ratio test. (The
   unsuffixed files above are the mortality outcome.)
 
-**Mechanical power normalization (script 04c):**
+**Mechanical power normalization (exploratory — `explore_mechanical_power_normalization.R`):**
 
 - **`regression_mp_normalization_<site>.html`** — the two mortality models with
   mechanical power scaled to PBW (J/min/kg) and to PFVC (J/min/L), z-scaled
