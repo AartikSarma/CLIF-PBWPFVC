@@ -7,10 +7,11 @@
 # In the Chiumello / Gattinoni / Protti stress-strain framework, varying tidal
 # volume at a fixed PEEP traces out the driving-pressure-vs-tidal-volume line
 # whose slope is the respiratory-system elastance (Ers = dDP/dVT). This script
-# finds subjects who happened to be ventilated at >= 2 distinct tidal volumes --
-# each with a recorded plateau pressure, under a volume-targeted mode (AC-VC or
-# PRVC; pure pressure control is excluded) -- within the first 6 hours of
-# ventilation, and for each such subject:
+# finds subjects who happened to be ventilated at >= 2 distinct tidal volumes
+# (spread >= 5%, to avoid unstable slopes from near-identical VTs) -- each with a
+# recorded plateau pressure, under a volume-targeted mode (AC-VC or PRVC; pure
+# pressure control is excluded) -- within the first 6 hours of ventilation, and
+# for each such subject:
 #   * collects the (VT, driving pressure) pairs,
 #   * fits the per-subject slope of DP vs VT (the "Ers/V0" estimate, = Ers) and
 #     checks it against the single-point DP/VT elastance,
@@ -56,7 +57,9 @@ demographics <- read_parquet(file.path(output_dir, "cohort_demographics.parquet"
 heights <- read_parquet(file.path(output_dir, "cohort_heights.parquet")) %>%
   select(hospitalization_id, height_cm)
 
-WINDOW_HOURS <- 6  # "first six hours of ventilation" (anchored at first IMV timepoint)
+WINDOW_HOURS  <- 6     # "first six hours of ventilation" (anchored at first IMV timepoint)
+MIN_VT_CHANGE <- 0.05  # require >= 5% spread in tidal volume between timepoints; smaller
+                       # changes give unstable dDP/dVT slopes (often data-entry artifacts)
 
 # =============================================================================
 # Assemble qualifying (VT, driving pressure) measurements in the first 6 hours
@@ -87,23 +90,37 @@ imv_pressures <- resp_waterfall %>%
   filter(dp > 0)
 
 # Subjects qualify if they have >= 2 DISTINCT tidal volumes (each with a plateau)
-# in the window -- i.e. at least two points on the DP-vs-VT line.
+# in the window -- i.e. at least two points on the DP-vs-VT line -- AND the spread
+# between the smallest and largest VT is >= MIN_VT_CHANGE. The VT-spread filter
+# drops near-identical VTs whose tiny denominator (dVT) produces improbably large
+# slopes that are usually data-entry errors.
 subject_counts <- imv_pressures %>%
   group_by(hospitalization_id) %>%
-  summarise(n_vt_levels = n_distinct(tidal_volume_set), .groups = "drop")
+  summarise(
+    n_vt_levels = n_distinct(tidal_volume_set),
+    vt_min      = min(tidal_volume_set),
+    vt_max      = max(tidal_volume_set),
+    .groups = "drop"
+  ) %>%
+  mutate(pct_vt_change = (vt_max - vt_min) / vt_min)
 
-qualifying_ids <- subject_counts %>% filter(n_vt_levels >= 2) %>% pull(hospitalization_id)
+qualifying_ids <- subject_counts %>%
+  filter(n_vt_levels >= 2, pct_vt_change >= MIN_VT_CHANGE) %>%
+  pull(hospitalization_id)
 multibreath <- imv_pressures %>% filter(hospitalization_id %in% qualifying_ids)
 
-message("Subjects with a measured plateau at >= 2 distinct tidal volumes in the ",
-        "first ", WINDOW_HOURS, " h: ", length(qualifying_ids),
-        " of ", length(cohort_ids), " cohort subjects.")
+message("Subjects with a measured plateau at >= 2 distinct tidal volumes ",
+        "(>= ", round(MIN_VT_CHANGE * 100), "% VT spread) in the first ",
+        WINDOW_HOURS, " h: ", length(qualifying_ids),
+        " of ", length(cohort_ids), " cohort subjects (",
+        sum(subject_counts$n_vt_levels >= 2 & subject_counts$pct_vt_change < MIN_VT_CHANGE),
+        " dropped for < ", round(MIN_VT_CHANGE * 100), "% VT change).")
 
 if (length(qualifying_ids) == 0) {
-  stop("No subjects had a measured plateau pressure at two or more distinct ",
-       "tidal volumes within the first ", WINDOW_HOURS, " h of ventilation. ",
-       "This exploratory analysis requires within-patient tidal-volume variation ",
-       "with concurrent plateau measurements.")
+  stop("No subjects had a measured plateau pressure at two or more tidal volumes ",
+       ">= ", round(MIN_VT_CHANGE * 100), "% apart within the first ", WINDOW_HOURS,
+       " h of ventilation. This exploratory analysis requires within-patient ",
+       "tidal-volume variation with concurrent plateau measurements.")
 }
 
 # =============================================================================
