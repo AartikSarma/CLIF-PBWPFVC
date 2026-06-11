@@ -291,8 +291,13 @@ if (!is.null(mortality_models)) {
   )
 }
 
-# Continuous outcomes
-for (outcome_name in names(continuous_outcomes)) {
+# Continuous outcomes. Exclude the normalized-mechanics outcomes (Ers x PBW/PFVC,
+# MP/PBW/PFVC) from the AIC comparison/heatmap: the outcome shares a predicted-size
+# variable with the size-containing exposures, so their evidence ratios are inflated
+# by the shared denominator rather than a dosing-outcome relationship. Their
+# standalone regression tables and long-format results are still produced.
+AIC_EXCLUDE <- c("ers_pbw", "ers_pfvc", "mp_pbw", "mp_pfvc")
+for (outcome_name in setdiff(names(continuous_outcomes), AIC_EXCLUDE)) {
   aic_results[[continuous_outcomes[[outcome_name]]$label]] <- tibble(
     exposure = exposure_labels,
     AIC = map_dbl(continuous_models[[outcome_name]], AIC),
@@ -326,9 +331,15 @@ aic_all <- bind_rows(aic_results, .id = "outcome") %>%
       TRUE                      ~ formatC(evidence_ratio, format = "g", digits = 2)
     )
   ) %>%
-  ungroup()
+  ungroup() %>%
+  # Column order: clinical outcomes first, then compliance/elastance, then static
+  # driving pressure and mechanical power.
+  mutate(outcome = factor(outcome, levels = intersect(
+    c("Mortality", "28-day VFDs", "Compliance", "Elastance",
+      "Static DP", "Mechanical power"),
+    unique(outcome))))
 
-message("AIC comparison (evidence ratios vs the PBW-scaled reference within each outcome):")
+message("AIC comparison (evidence ratios vs VT/PBW-alone within each outcome):")
 print(aic_all)
 
 write_csv(aic_all, file.path(final_dir, paste0("aic_comparison_all_", site_name, ".csv")))
@@ -341,14 +352,14 @@ er_heatmap <- ggplot(aic_all,
   geom_tile(color = "grey80", linewidth = 0.5) +
   geom_text(aes(label = er_label), size = 3.5) +
   scale_fill_gradient2(
-    name = "Evidence ratio\n(vs PBW reference)",
+    name = "Evidence ratio\n(vs VT/PBW)",
     low = "#2166AC", mid = "white", high = "#B2182B",
     midpoint = 0, limits = c(log10(ER_FLOOR), log10(ER_CEIL)),
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")
   ) +
   labs(
     title = "Evidence ratios across models and outcomes",
-    subtitle = "Each cell vs the PBW-scaled reference within that outcome (VT/PBW; Ers x PBW for the elastance-normalized mortality models); truncated to [0.001, 1000]",
+    subtitle = "Each cell vs the VT/PBW-alone model within that outcome; truncated to [0.001, 1000]",
     x = "Outcome",
     y = "Exposure specification"
   ) +
