@@ -1,32 +1,40 @@
 # =============================================================================
-# Exploratory: does the VT/PBW + PFVC fit advantage survive height adjustment?
+# Exploratory: height as a COLLINEARITY / OVER-ADJUSTMENT diagnostic (not a model)
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
 # Exploratory, standalone analysis (NOT part of the 00 pipeline runner).
 #
-# In the script-04 AIC heatmap, "VT/PBW + PFVC" fits dramatically better than every
-# other exposure specification (evidence ratio >1000) for nearly every outcome.
-# Hypothesis: this is largely an OMITTED-COVARIATE effect -- PFVC = GLI(age, height,
-# sex, race) injects HEIGHT (a strong body/lung-size axis absent from the covariate
-# set), whereas the PBW/PFVC ratio cancels height and keeps only the relative
-# discrepancy. If so, adding height to the covariates should collapse the
-# "VT/PBW + PFVC" vs "VT/PBW + PBW/PFVC" gap.
+# IMPORTANT (causal framing): height is NOT a confounder of strain -> mortality. In
+# the DAG, height affects mortality only through lung size (height -> lung size ->
+# strain -> mortality); there is no plausible path from height to mortality that
+# bypasses lung size. So height is a determinant of the exposure ON the causal path,
+# and conditioning on it is OVER-ADJUSTMENT (it removes the lung-size variation the
+# analysis is about), not confounder control. Height was therefore deliberately
+# EXCLUDED from the script-04 models, correctly. This script is a DIAGNOSTIC: it
+# shows what over-adjusting for height does to the evidence-ratio structure (it
+# collapses the PFVC terms because they are largely height), which is a collinearity
+# probe -- NOT a "better-specified" or preferred model. Do not read the +height
+# panel as the right adjustment.
 #
-# This refits the AIC comparison (Mortality, 28-day VFD competing-risks, Compliance,
-# Elastance, Static DP, Mechanical power x the five exposure specs) TWICE: with the
-# standard covariates, and with height added. Height is present for every cohort
-# subject (cohort height range 150-210 cm), so the two fits are on the SAME rows
-# within each outcome -- the AIC change is purely the height covariate.
+# Refits the AIC comparison (Mortality, 28-day VFD competing-risks, Compliance,
+# Elastance, Static DP, Mechanical power x the five exposure specs) with vs without
+# height (same rows; height present for every subject). Also runs a height-mediation
+# test (below): does height predict mortality CONDITIONAL on strain (VT/PFVC) and
+# severity? If not, height's effect is fully via strain (DAG holds). If it persists,
+# either absolute lung size matters beyond the strain ratio, or there is a non-lung
+# height path the DAG is missing.
 #
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/height_sensitivity_<site>.csv     (AIC / evidence ratios, both covsets)
 #          final/height_sensitivity_<site>.pdf      (side-by-side heatmaps)
+#          final/height_mediation_<site>.csv         (height | strain mortality test)
 # =============================================================================
 
 library(tidyverse)
 library(arrow)
 library(here)
 library(survival)
+library(splines)
 
 source("utils/config.R")
 site_name <- config$site_name
@@ -148,10 +156,11 @@ heat <- ggplot(aic_df, aes(outcome, spec, fill = log10(er_trunc))) +
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")
   ) +
   labs(
-    title = "Height-adjustment sensitivity of the evidence-ratio heatmap",
+    title = "Over-adjusting for height (a non-confounder): collinearity diagnostic",
     subtitle = paste0(site_name,
-      " — if adding height collapses the VT/PBW + PFVC advantage, the >1000 was ",
-      "largely omitted size adjustment"),
+      " — height is NOT a confounder (no path to mortality except via lung size), so ",
+      "the +height panel is over-adjustment that removes the PFVC mechanism, not a ",
+      "better model"),
     x = "Outcome", y = "Exposure specification"
   ) +
   theme_minimal(base_size = 10) +
@@ -160,5 +169,46 @@ heat <- ggplot(aic_df, aes(outcome, spec, fill = log10(er_trunc))) +
 ggsave(file.path(final_dir, paste0("height_sensitivity_", site_name, ".pdf")),
        heat, width = 13, height = 6)
 
-message("Height-sensitivity outputs written.")
-message("Exploratory height-sensitivity analysis complete.")
+# =============================================================================
+# Height-mediation test: does height predict mortality CONDITIONAL on strain?
+# =============================================================================
+# Under the DAG (height -> lung size -> strain -> mortality), height should add
+# nothing once strain (VT/PFVC) and severity are in the model. If it does add,
+# either absolute lung size matters beyond the strain ratio, or there is a non-lung
+# height path the DAG is missing. Strain enters flexibly (ns). Tested in two
+# adjustment sets: minimal (strain + severity + sex) and + age + race.
+mort <- cross_sectional %>%
+  filter(!is.na(deceased), is.finite(vtpfvc), is.finite(sofa_total), is.finite(sf_ratio)) %>%
+  mutate(
+    sex_category  = factor(sex_category,  levels = c("Male", "Female")),
+    race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
+    age10 = age_at_admission / 10, height10 = height_cm / 10, sf10 = sf_ratio / 10
+  )
+
+height_test <- function(label, base_rhs) {
+  m0 <- glm(as.formula(paste("deceased ~", base_rhs)), data = mort, family = binomial)
+  m1 <- glm(as.formula(paste("deceased ~", base_rhs, "+ height10")), data = mort, family = binomial)
+  lrt <- anova(m0, m1, test = "LRT")
+  ht  <- broom::tidy(m1, conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "height10")
+  tibble(site = site_name, adjustment = label, n_obs = stats::nobs(m1),
+         height_OR_per10cm = ht$estimate, conf_low = ht$conf.low, conf_high = ht$conf.high,
+         p_height = ht$p.value, lrt_p = lrt$`Pr(>Chi)`[2],
+         er_add_height = exp(-0.5 * (AIC(m1) - AIC(m0))))
+}
+height_mediation <- bind_rows(
+  height_test("strain + severity + sex",
+              "ns(vtpfvc, 4) + sofa_total + sf10 + sex_category"),
+  height_test("+ age + race",
+              "ns(vtpfvc, 4) + sofa_total + sf10 + sex_category + age10 + race_category")
+)
+write_csv(height_mediation, file.path(final_dir, paste0("height_mediation_", site_name, ".csv")))
+
+message("Height conditional on strain (VT/PFVC) + severity -- does height still predict mortality?")
+pwalk(height_mediation, function(adjustment, height_OR_per10cm, p_height, er_add_height, ...) {
+  message("  [", adjustment, "] height OR/10cm = ", round(height_OR_per10cm, 2),
+          " (p = ", signif(p_height, 2), "), evidence ratio for adding height = ",
+          signif(er_add_height, 3))
+})
+
+message("Height diagnostics written.")
+message("Exploratory height diagnostic complete.")

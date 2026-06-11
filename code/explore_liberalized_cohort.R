@@ -25,6 +25,13 @@
 # remains -- the liberalized estimate is the strain dose-response, NOT a clean
 # "PBW-mis-sizing" effect.
 #
+# NOTE (causal): the covariate ladder below includes height and spline-height as a
+# COLLINEARITY diagnostic. Height is NOT a confounder (no path to mortality except
+# via lung size), so adjusting for it is over-adjustment, not a preferred model; the
+# VIF/ER "with height/spline" columns show what over-adjustment does, not the right
+# specification. The dose-response model adjusts for age/height flexibly for the same
+# diagnostic reason -- it is conservative (likely biased toward the null).
+#
 # Inputs : output/<site>/intermediate/analysis_all_eligible_timepoints.parquet (script 03)
 #          output/<site>/intermediate/cohort_weights.parquet                    (script 01)
 # Outputs: final/liberalized_cohort_<site>.csv     (VIF / evidence ratios, both cohorts)

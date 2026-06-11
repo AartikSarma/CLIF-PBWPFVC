@@ -4,22 +4,29 @@
 # =============================================================================
 # Exploratory, standalone analysis (NOT part of the 00 pipeline runner).
 #
-# The height-sensitivity check showed that "VT/PBW + PFVC"'s huge fit advantage was
-# an omitted-height artifact (it collapsed once height was adjusted), while the
-# "VT/PBW + PBW/PFVC" ratio survived. But PBW/PFVC is itself a deterministic function
-# of age, height, sex, and race, entered into the base model only linearly (age10)
-# and categorically (race). So the ratio's surviving signal could be (1) the specific
-# PBW-mis-sizing mechanism, or (2) just better NONLINEAR demographic risk adjustment.
+# IMPORTANT (causal framing): this is an IDENTIFIABILITY / collinearity diagnostic,
+# NOT a sequence of better-specified models. Two things to keep straight:
+#   * HEIGHT is NOT a confounder (no path to mortality except via lung size), so
+#     adjusting for it is OVER-ADJUSTMENT that removes the lung-size mechanism. The
+#     "+ height" and spline-height steps are diagnostic, not preferred models.
+#   * AGE and RACE are the genuine confounders (they have non-lung paths to
+#     mortality), but they are ALSO determinants of lung size -- i.e. they sit on
+#     BOTH the confounding path and the causal (size) path. So flexibly adjusting for
+#     them simultaneously removes confounding AND removes the age/race-driven size
+#     mechanism. The collapse below therefore OVERSTATES confounding; you cannot
+#     separate the two by adjustment, because the confounders ARE the size mechanism.
+#
+# The height-sensitivity check showed "VT/PBW + PFVC"'s advantage was largely height,
+# while "VT/PBW + PBW/PFVC" (which cancels height) survived. PBW/PFVC is itself a
+# deterministic function of age/height/sex/race, entered only linearly/categorically.
 #
 # This walks a covariate-flexibility ladder and re-checks the evidence ratios:
 #   1. Linear (base)        -- race + age10 + sex + SOFA + SF
-#   2. + height             -- add linear height
+#   2. + height             -- add linear height (OVER-adjustment; diagnostic only)
 #   3. + spline age & height-- ns(age,4) + ns(height,4) + sex + race + SOFA + SF
-# If "VT/PBW + PBW/PFVC" shrinks toward 1 as the demographic adjustment becomes
-# flexible, its signal is largely demographic risk that the ratio merely repackages;
-# if it persists, the parsimonious ratio outperforms a flexible demographic model.
-# (Note: with a fully saturated demographic model PBW/PFVC MUST be absorbed, since it
-# is a function of those demographics -- so read this as a robustness gradient.)
+# With a fully flexible demographic model PBW/PFVC MUST be absorbed (it is a function
+# of those demographics), so read this as a robustness/identifiability gradient, not
+# a test of whether the ratio is "real".
 #
 # Also includes a quick elastance-anomaly check: refit the lone surviving >1000 cell
 # (VT/PBW + PFVC for Elastance) on the log scale to test whether it was a heavy-tail
@@ -151,10 +158,10 @@ heat <- ggplot(aic_df, aes(outcome, spec, fill = log10(er_trunc))) +
     midpoint = 0, limits = c(log10(0.001), log10(1000)),
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")) +
   labs(
-    title = "Evidence ratios across a covariate-flexibility ladder",
+    title = "Identifiability diagnostic: evidence ratios vs covariate flexibility",
     subtitle = paste0(site_name,
-      " — if VT/PBW + PBW/PFVC shrinks toward 1 with flexible age/height, its signal ",
-      "is repackaged demographics; if it persists, the ratio beats flexible demographics"),
+      " — height is over-adjustment (not a confounder); age/race are confounders that ",
+      "ALSO carry the size mechanism, so the collapse overstates confounding, not a model"),
     x = "Outcome", y = "Exposure specification") +
   theme_minimal(base_size = 10) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
