@@ -191,6 +191,18 @@ if (has_mortality_variation) {
     ers_mortality_models[[v]] <- glm(as.formula(fstr), data = cross_sectional,
                                       family = binomial)
   }
+
+  message("Logistic regression (elastance-normalized mortality) — AIC:")
+  iwalk(ers_mortality_models,
+        ~ message("  ", ers_mortality_specs[.y], ": ", round(AIC(.x), 1)))
+
+  # Standalone merged table, mirroring the primary mortality regression output.
+  ers_mortality_tables <- map(ers_mortality_models,
+                              ~ tbl_regression(.x, exponentiate = TRUE) %>% bold_p())
+  tbl_merge(ers_mortality_tables,
+            tab_spanner = unname(ers_mortality_specs[names(ers_mortality_models)])) %>%
+    as_gt() %>%
+    gt::gtsave(file.path(final_dir, paste0("regression_ers_mortality_", site_name, ".html")))
 }
 
 # =============================================================================
@@ -242,7 +254,8 @@ aic_results <- list()
 if (!is.null(mortality_models)) {
   aic_results[["Mortality"]] <- tibble(
     exposure = exposure_labels,
-    AIC = map_dbl(mortality_models, AIC)
+    AIC = map_dbl(mortality_models, AIC),
+    is_reference = exposure == "VT/PBW"
   )
 }
 
@@ -250,7 +263,20 @@ if (!is.null(mortality_models)) {
 for (outcome_name in names(continuous_outcomes)) {
   aic_results[[continuous_outcomes[[outcome_name]]$label]] <- tibble(
     exposure = exposure_labels,
-    AIC = map_dbl(continuous_models[[outcome_name]], AIC)
+    AIC = map_dbl(continuous_models[[outcome_name]], AIC),
+    is_reference = exposure == "VT/PBW"
+  )
+}
+
+# Mortality, elastance-normalized exposures. Ers x PBW and Ers x PFVC are fit on
+# the same support (both require ers), so their AICs are mutually comparable. The
+# evidence ratio is referenced to the PBW-scaled model (Ers x PBW) — the same
+# PBW-reference convention used for the VT/PBW columns in the other outcomes.
+if (length(ers_mortality_models) > 0) {
+  aic_results[["Mortality (Ers-normalized)"]] <- tibble(
+    exposure = unname(ers_mortality_specs[names(ers_mortality_models)]),
+    AIC = map_dbl(ers_mortality_models, AIC),
+    is_reference = exposure == "Ers x PBW"
   )
 }
 
@@ -262,7 +288,7 @@ ER_CEIL  <- 1000
 aic_all <- bind_rows(aic_results, .id = "outcome") %>%
   group_by(outcome) %>%
   mutate(
-    aic_ref = AIC[exposure == "VT/PBW"][1],
+    aic_ref = AIC[is_reference][1],
     delta_AIC = AIC - aic_ref,
     evidence_ratio = exp(-0.5 * delta_AIC),
     evidence_ratio_trunc = pmin(pmax(evidence_ratio, ER_FLOOR), ER_CEIL),
@@ -274,7 +300,7 @@ aic_all <- bind_rows(aic_results, .id = "outcome") %>%
   ) %>%
   ungroup()
 
-message("AIC comparison (evidence ratios vs VT/PBW-alone):")
+message("AIC comparison (evidence ratios vs the PBW-scaled reference within each outcome):")
 print(aic_all)
 
 write_csv(aic_all, file.path(final_dir, paste0("aic_comparison_all_", site_name, ".csv")))
@@ -287,14 +313,14 @@ er_heatmap <- ggplot(aic_all,
   geom_tile(color = "grey80", linewidth = 0.5) +
   geom_text(aes(label = er_label), size = 3.5) +
   scale_fill_gradient2(
-    name = "Evidence ratio\n(vs VT/PBW)",
+    name = "Evidence ratio\n(vs PBW reference)",
     low = "#2166AC", mid = "white", high = "#B2182B",
     midpoint = 0, limits = c(log10(ER_FLOOR), log10(ER_CEIL)),
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")
   ) +
   labs(
     title = "Evidence ratios across models and outcomes",
-    subtitle = "Each cell vs the VT/PBW-alone model within that outcome; truncated to [0.001, 1000]",
+    subtitle = "Each cell vs the PBW-scaled reference within that outcome (VT/PBW; Ers x PBW for the elastance-normalized mortality models); truncated to [0.001, 1000]",
     x = "Outcome",
     y = "Exposure specification"
   ) +
