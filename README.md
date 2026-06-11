@@ -22,6 +22,9 @@ PBW and PFVC for each ventilated encounter, characterizes the PBW:PFVC
 relationship across demographic strata, and relates VT scaled by each metric to
 clinical outcomes.
 
+For a high-level walkthrough of the pipeline and a catalog of every output file,
+see [`EXECUTIVE_SUMMARY.md`](EXECUTIVE_SUMMARY.md).
+
 ## Required CLIF tables and fields
 
 CLIF version 2.1. The following tables are required:
