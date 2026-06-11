@@ -114,7 +114,10 @@ data and should **not** leave the site.
   VT/PBW, VT/PFVC, PBW/PFVC, driving pressure, compliance, elastance,
   `ers_pbw`/`ers_pfvc`, mechanical power and its scalings (`mp_pbw`/`mp_pfvc`),
   SOFA, SF/PF ratios, VFD-28, BMI, survival time and event, mortality flags, and
-  demographics.
+  demographics. The index timepoint is the first lung-protective (VT/PBW 6–8),
+  hypoxemic (SF < 315) timepoint with recorded pressures (so driving pressure /
+  elastance are observed) within the first 6 h of ventilation, falling back to the
+  first qualifying timepoint when no such early pressures exist.
 - **`analysis_all_timepoints.parquet`** — the longitudinal counterpart: one row
   per hospitalization × ventilator timepoint, for time-varying analyses.
 - **`analysis_broad_pfvc.parquet`** — a broader cohort (all eligible subjects with

@@ -727,22 +727,55 @@ analysis_with_completeness <- analysis_with_sf %>%
 # Apply the inclusion predicates BEFORE reducing to one row per patient, matching
 # the original analysis (filter qualifying timepoints, then distinct(subject_id)).
 # A patient is included if ANY complete-data IMV timepoint is simultaneously
-# lung-protective (VT/PBW 6-8) and hypoxemic (SF < threshold); the patient's FIRST
-# such qualifying timepoint becomes the index row. The previous behaviour required
-# each patient's *first* complete-data timepoint to itself meet the criteria, which
-# discarded patients whose later timepoints qualified and shrank the cohort
-# relative to the original.
+# lung-protective (VT/PBW 6-8) and hypoxemic (SF < threshold); the index timepoint
+# for that patient is then chosen by the two-tier rule below (preferring a
+# pressure-complete timepoint early in ventilation). The previous behaviour
+# required each patient's *first* complete-data timepoint to itself meet the
+# criteria, which discarded patients whose later timepoints qualified and shrank
+# the cohort relative to the original.
 qualifying_timepoints <- analysis_with_completeness %>%
   filter(has_all_data, vtpbw >= 6, vtpbw <= 8, sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 
 message("Patients with >=1 complete-data IMV timepoint: ",
         n_distinct(analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]))
 
-# Index timepoint = each qualifying patient's FIRST qualifying IMV timepoint
-cross_sectional <- qualifying_timepoints %>%
+# Index timepoint selection (two-tier, to reduce missing pressures in the
+# driving-pressure / elastance / mechanical-power analyses):
+#   1. PREFERRED: the patient's first qualifying timepoint that ALSO has recorded
+#      pressures (driving pressure computable, dp non-missing) within the first
+#      INDEX_WINDOW_HOURS of ventilation -- so dp/crs/ers (and MP, when peak
+#      pressure is also present) are observed at the index.
+#   2. FALLBACK: if no qualifying timepoint within that window has pressures, use
+#      the patient's first qualifying timepoint (the previous behaviour).
+# The cohort (set of included patients) is unchanged -- every patient with >= 1
+# qualifying timepoint is still included; only which timepoint represents them
+# changes, and the chosen index always satisfies the lung-protective + hypoxemic
+# eligibility criteria.
+INDEX_WINDOW_HOURS <- 6
+
+# t0 = each patient's first IMV timepoint ("first 6 hours on the ventilator").
+imv_start <- analysis_with_completeness %>%
+  group_by(hospitalization_id) %>%
+  summarise(imv_start_dttm = min(recorded_dttm), .groups = "drop")
+
+# Tier 1: first qualifying + pressure-complete timepoint within the window.
+index_tier1 <- qualifying_timepoints %>%
+  left_join(imv_start, by = "hospitalization_id") %>%
+  filter(!is.na(dp),
+         recorded_dttm <= imv_start_dttm + lubridate::hours(INDEX_WINDOW_HOURS)) %>%
   group_by(hospitalization_id) %>%
   slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
   ungroup() %>%
+  select(-imv_start_dttm)
+
+# Tier 2 (fallback): first qualifying timepoint for patients not covered by tier 1.
+index_tier2 <- qualifying_timepoints %>%
+  filter(!hospitalization_id %in% index_tier1$hospitalization_id) %>%
+  group_by(hospitalization_id) %>%
+  slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+cross_sectional <- bind_rows(index_tier1, index_tier2) %>%
   # Attach weight and BMI (needed as a covariate in the driving-pressure /
   # elastance demographic-bias models in script 04). Weight is extracted and
   # imputed in script 01 but is not otherwise carried downstream.
@@ -751,6 +784,12 @@ cross_sectional <- qualifying_timepoints %>%
                        weight_kg / (height_cm / 100)^2, NA_real_))
 
 eligible_patients <- cross_sectional$hospitalization_id
+
+message("Index timepoint: ", nrow(index_tier1), " patients used a pressure-complete ",
+        "qualifying timepoint within ", INDEX_WINDOW_HOURS, " h of ventilation; ",
+        nrow(index_tier2), " fell back to the first qualifying timepoint.")
+message("Index timepoints with driving pressure observed: ",
+        sum(!is.na(cross_sectional$dp)), " of ", nrow(cross_sectional))
 
 message("Included patients (VT/PBW 6-8 AND SF<", SF_HYPOXEMIA_THRESHOLD,
         " at any complete-data timepoint): ", length(eligible_patients))
