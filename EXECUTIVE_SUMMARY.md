@@ -31,9 +31,8 @@ subprocess.
   longitudinal analysis datasets plus the federated PBW:PFVC distribution (fixed
   bins, n >= 10 suppression).
 - **04 — Analysis (the main results).** Table 1 (stratified by PBW/PFVC tercile);
-  logistic mortality regressions across the exposure specifications; the
-  **elastance-normalized mortality models** (`ers_pbw` / `ers_pfvc`, z-scaled and
-  VT/PBW-adjusted); linear models for the mechanics outcomes — elastance,
+  logistic mortality regressions across the exposure specifications;
+  linear models for the mechanics outcomes — elastance,
   compliance, driving pressure, normalized elastance (Ers×PBW, Ers×PFVC),
   mechanical power, and normalized mechanical power (MP/PBW, MP/PFVC) — each
   regressed across the exposure specifications;
@@ -150,9 +149,8 @@ human-readable tables and figures for local review.
   `n_obs`. Script 05 stacks these across sites to build the forest plots.
 - **`aic_comparison_all_<site>.csv`** — model-fit comparison: per
   `outcome` × `exposure`, the `AIC`, `delta_AIC`, and `evidence_ratio` relative
-  to the PBW-scaled reference within that outcome (VT/PBW, or Ers×PBW for the
-  elastance-normalized mortality models), plus `is_reference` and the truncated
-  ratio / display label.
+  to the VT/PBW reference within that outcome, plus `is_reference` and the
+  truncated ratio / display label.
 - **`dist_histograms_<site>.csv`** — the federated PBW:PFVC distribution as
   histogram counts: one row per `group_type` (sex / race / age_bin / height_bin)
   × `group_value` × bin, with `bin_left`, `bin_right`, `count`. Fixed 0–50 bins
@@ -172,9 +170,6 @@ human-readable tables and figures for local review.
 - **`regression_mortality_<site>.html`** — merged logistic regression (odds
   ratios) for in-hospital mortality across the five exposure specifications
   (VT/PFVC; VT/PBW; VT/PFVC + VT/PBW; VT/PBW + PFVC; VT/PBW + PBW/PFVC).
-- **`regression_ers_mortality_<site>.html`** — the elastance-normalized mortality
-  models: in-hospital mortality on z-scaled Ers×PBW and Ers×PFVC (odds ratio per
-  1 SD), adjusted for VT/PBW and the standard covariates.
 - **`regression_ers_<site>.html`**, **`regression_crs_<site>.html`**,
   **`regression_dp_<site>.html`**, **`regression_ers_pbw_<site>.html`**,
   **`regression_ers_pfvc_<site>.html`**, **`regression_mp_<site>.html`**,

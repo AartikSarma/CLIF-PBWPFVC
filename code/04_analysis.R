@@ -189,51 +189,6 @@ if (has_mortality_variation) {
           unique(na.omit(cross_sectional$deceased)), ")")
 }
 
-# --- Mortality vs elastance normalized to PBW / PFVC -------------------------
-# Two additional logistic models with elastance-normalized exposures (Ers x PBW =
-# ers * pbw, Ers x PFVC = ers * pfvc), adjusted for the standard covariates plus
-# VT/PBW. VT/PBW is included here as a severity-of-illness adjustment (sicker
-# lungs receive lower set tidal volumes), so the elastance-normalized exposure is
-# not confounded by the delivered dose.
-#
-# The two exposures are z-scaled (mean 0, SD 1 over observed values) before
-# fitting so the odds ratios are expressed per 1 SD and are directly comparable
-# between the two models despite their different raw scales (ers x kg vs ers x L).
-# Standardizing a predictor is a linear rescaling, so model fit / AIC are
-# unchanged; only the coefficient scale changes.
-zscore <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
-cross_sectional <- cross_sectional %>%
-  mutate(ers_pbw_z = zscore(ers_pbw), ers_pfvc_z = zscore(ers_pfvc))
-
-ers_mortality_specs <- c(ers_pbw = "Ers x PBW", ers_pfvc = "Ers x PFVC")
-ers_mortality_models <- list()
-if (has_mortality_variation) {
-  for (v in names(ers_mortality_specs)) {
-    fstr <- paste("deceased ~", paste0(v, "_z"), "+ vtpbw +", model_covariates(v))
-    ers_mortality_models[[v]] <- glm(as.formula(fstr), data = cross_sectional,
-                                      family = binomial)
-  }
-
-  message("Logistic regression (elastance-normalized mortality) — AIC:")
-  iwalk(ers_mortality_models,
-        ~ message("  ", ers_mortality_specs[.y], ": ", round(AIC(.x), 1)))
-
-  # Standalone merged table, mirroring the primary mortality regression output.
-  # Label the standardized exposure row so the per-SD scale is explicit.
-  ers_mortality_tables <- imap(ers_mortality_models, ~ {
-    zname <- paste0(.y, "_z")
-    tbl_regression(
-      .x, exponentiate = TRUE,
-      label = c(setNames(list(paste0(ers_mortality_specs[[.y]], " (per SD)")), zname),
-                covar_labels)
-    ) %>% bold_p()
-  })
-  tbl_merge(ers_mortality_tables,
-            tab_spanner = unname(ers_mortality_specs[names(ers_mortality_models)])) %>%
-    as_gt() %>%
-    gt::gtsave(file.path(final_dir, paste0("regression_ers_mortality_", site_name, ".html")))
-}
-
 # =============================================================================
 # 4d. Linear regression — continuous outcomes (elastance, compliance, VFD-28, DP)
 # =============================================================================
@@ -352,18 +307,6 @@ aic_results[["28-day VFDs"]] <- tibble(
   AIC = map_dbl(vfd_cr_models, AIC),
   is_reference = exposure == "VT/PBW"
 )
-
-# Mortality, elastance-normalized exposures. Ers x PBW and Ers x PFVC are fit on
-# the same support (both require ers), so their AICs are mutually comparable. The
-# evidence ratio is referenced to the PBW-scaled model (Ers x PBW) — the same
-# PBW-reference convention used for the VT/PBW columns in the other outcomes.
-if (length(ers_mortality_models) > 0) {
-  aic_results[["Mortality (Ers-normalized)"]] <- tibble(
-    exposure = unname(ers_mortality_specs[names(ers_mortality_models)]),
-    AIC = map_dbl(ers_mortality_models, AIC),
-    is_reference = exposure == "Ers x PBW"
-  )
-}
 
 # Evidence ratios are all referenced to the VT/PBW-alone model WITHIN each
 # outcome: ER = exp(-0.5 * (AIC_model - AIC_VT/PBW)). ER > 1 means more support
@@ -711,15 +654,6 @@ if (exists("cox_model")) {
     extract_model_results(cox_model, "HR", "Survival",
                           "PBW/PFVC + VT/PBW", "cox", cox_formula)
   ))
-}
-
-# Mortality vs elastance normalized to PBW / PFVC (logistic -> odds ratios)
-if (length(ers_mortality_models) > 0) {
-  results_long <- c(results_long, imap(ers_mortality_models, ~ {
-    fstr <- paste("deceased ~", paste0(.y, "_z"), "+ vtpbw +", model_covariates(.y))
-    extract_model_results(.x, "OR", "Mortality",
-                          ers_mortality_specs[[.y]], "logistic", fstr)
-  }))
 }
 
 # Demographic-bias family (one analysis name per outcome, single "Demographics" spec)
