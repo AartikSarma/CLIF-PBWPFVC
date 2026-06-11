@@ -16,13 +16,21 @@
 # probe -- NOT a "better-specified" or preferred model. Do not read the +height
 # panel as the right adjustment.
 #
+# Strain IS height-dependent: Devine PBW is ~linear in height while true lung volume
+# scales ~height^2.5-3, so PBW/V0 falls with height and VT-to-PBW dosing delivers
+# higher strain to shorter patients -- the allometric mismatch at the core of the
+# prior bias work. So height's predictive signal here is the STRAIN MECHANISM
+# (height -> PBW mis-sizes the lung -> wrong strain -> mortality), and conditioning
+# on height removes that mechanism, not confounding.
+#
 # Refits the AIC comparison (Mortality, 28-day VFD competing-risks, Compliance,
 # Elastance, Static DP, Mechanical power x the five exposure specs) with vs without
 # height (same rows; height present for every subject). Also runs a height-mediation
-# test (below): does height predict mortality CONDITIONAL on strain (VT/PFVC) and
-# severity? If not, height's effect is fully via strain (DAG holds). If it persists,
-# either absolute lung size matters beyond the strain ratio, or there is a non-lung
-# height path the DAG is missing.
+# test (below): does height predict mortality CONDITIONAL on the strain estimate
+# (VT/PFVC) and severity? Because strain is height-dependent, conditioning on VT/PFVC
+# blocks the height -> strain path, so a RESIDUAL height effect would mean VT/PFVC
+# under-captures the height allometry of true lung size (PFVC is an imperfect V0
+# surrogate), or absolute size / a non-lung path -- NOT that height is a confounder.
 #
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/height_sensitivity_<site>.csv     (AIC / evidence ratios, both covsets)
@@ -172,11 +180,12 @@ ggsave(file.path(final_dir, paste0("height_sensitivity_", site_name, ".pdf")),
 # =============================================================================
 # Height-mediation test: does height predict mortality CONDITIONAL on strain?
 # =============================================================================
-# Under the DAG (height -> lung size -> strain -> mortality), height should add
-# nothing once strain (VT/PFVC) and severity are in the model. If it does add,
-# either absolute lung size matters beyond the strain ratio, or there is a non-lung
-# height path the DAG is missing. Strain enters flexibly (ns). Tested in two
-# adjustment sets: minimal (strain + severity + sex) and + age + race.
+# Strain is height-dependent (PBW's allometric mis-scaling), so conditioning on the
+# strain estimate (VT/PFVC, flexible ns) blocks the height -> strain path. Under the
+# DAG, height should then add little: a residual height effect means VT/PFVC
+# under-captures the true height allometry of lung size (PFVC imperfectly estimates
+# V0), or absolute size / a non-lung path -- it is NOT confounder control. Tested in
+# two adjustment sets: minimal (strain + severity + sex) and + age + race.
 mort <- cross_sectional %>%
   filter(!is.na(deceased), is.finite(vtpfvc), is.finite(sofa_total), is.finite(sf_ratio)) %>%
   mutate(
