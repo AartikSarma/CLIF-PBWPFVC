@@ -182,12 +182,15 @@ if (has_mortality_variation) {
 
 # --- Mortality vs elastance normalized to PBW / PFVC -------------------------
 # Two additional logistic models with elastance-normalized exposures (Ers x PBW =
-# ers * pbw, Ers x PFVC = ers * pfvc), adjusted for the standard covariates.
+# ers * pbw, Ers x PFVC = ers * pfvc), adjusted for the standard covariates plus
+# VT/PBW. VT/PBW is included here as a severity-of-illness adjustment (sicker
+# lungs receive lower set tidal volumes), so the elastance-normalized exposure is
+# not confounded by the delivered dose.
 ers_mortality_specs <- c(ers_pbw = "Ers x PBW", ers_pfvc = "Ers x PFVC")
 ers_mortality_models <- list()
 if (has_mortality_variation) {
   for (v in names(ers_mortality_specs)) {
-    fstr <- paste("deceased ~", v, "+", model_covariates(v))
+    fstr <- paste("deceased ~", v, "+ vtpbw +", model_covariates(v))
     ers_mortality_models[[v]] <- glm(as.formula(fstr), data = cross_sectional,
                                       family = binomial)
   }
@@ -614,7 +617,7 @@ if (exists("cox_model")) {
 # Mortality vs elastance normalized to PBW / PFVC (logistic -> odds ratios)
 if (length(ers_mortality_models) > 0) {
   results_long <- c(results_long, imap(ers_mortality_models, ~ {
-    fstr <- paste("deceased ~", .y, "+", model_covariates(.y))
+    fstr <- paste("deceased ~", .y, "+ vtpbw +", model_covariates(.y))
     extract_model_results(.x, "OR", "Mortality",
                           ers_mortality_specs[[.y]], "logistic", fstr)
   }))
