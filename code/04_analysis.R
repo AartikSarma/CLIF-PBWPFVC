@@ -33,14 +33,13 @@ analysis_all <- read_parquet(file.path(output_dir, "analysis_all_timepoints.parq
 message("Cross-sectional: ", nrow(cross_sectional), " observations")
 message("All timepoints: ", nrow(analysis_all), " observations")
 
-# Ensure VFR tercile is present
-if (!"vfr_tercile" %in% names(cross_sectional)) {
-  cross_sectional <- cross_sectional %>%
-    mutate(
-      vfr_tercile = ntile(vtpfvc, 3),
-      vfr_tercile = factor(vfr_tercile, labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
-    )
-}
+# Stratify Table 1 by PBW/PFVC tercile (the analysis now centers on the
+# PBW:PFVC discrepancy rather than delivered VT/PFVC).
+cross_sectional <- cross_sectional %>%
+  mutate(
+    pbwpfvc_tercile = ntile(pbwpfvc, 3),
+    pbwpfvc_tercile = factor(pbwpfvc_tercile, labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
+  )
 
 # Add age_group for downstream use
 cross_sectional <- cross_sectional %>%
@@ -63,14 +62,14 @@ cross_sectional <- cross_sectional %>%
 # =============================================================================
 
 table1_data <- cross_sectional %>%
-  select(vfr_tercile, age_at_admission, sex_category, race_category,
+  select(pbwpfvc_tercile, age_at_admission, sex_category, race_category,
          height_cm, pbw, pfvc, sofa_total, sf_ratio, deceased,
          vtpbw, vtpfvc, pbwpfvc, crs, ers, vfd_28) %>%
   mutate(deceased = factor(deceased, levels = c(0, 1), labels = c("Alive", "Deceased")))
 
 table1 <- table1_data %>%
   tbl_summary(
-    by = vfr_tercile,
+    by = pbwpfvc_tercile,
     statistic = list(
       all_continuous() ~ "{median} ({p25}, {p75})",
       all_categorical() ~ "{n} ({p}%)"
@@ -95,7 +94,16 @@ table1 <- table1_data %>%
     )
   ) %>%
   add_p() %>%
-  add_overall()
+  add_overall() %>%
+  # The stratifying columns are terciles of PBW/PFVC; without a spanning header
+  # the bare "T1 (Low) / T2 (Mid) / T3 (High)" labels don't say tercile of what.
+  modify_spanning_header(
+    all_stat_cols(stat_0 = FALSE) ~ "**Predicted body weight / predicted FVC (PBW/PFVC), tercile**"
+  ) %>%
+  modify_header(
+    label  ~ "**Characteristic**",
+    stat_0 ~ "**Overall**, N = {N}"
+  )
 
 message("Table 1 generated")
 
