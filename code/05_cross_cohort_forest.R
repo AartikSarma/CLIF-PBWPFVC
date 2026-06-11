@@ -66,12 +66,12 @@ write_parquet(all_results, file.path(cross_dir, "regression_results_all_cohorts.
 # per model specification; covariate (adjustment) coefficients are not plotted but
 # remain available in the aggregated CSV.
 exposure_term_labels <- c(
-  vtpfvc   = "VT/PFVC",
-  vtpbw    = "VT/PBW",
-  pfvc     = "PFVC",
-  pbwpfvc  = "PBW/PFVC",
-  ers_pbw  = "Ers x PBW",
-  ers_pfvc = "Ers x PFVC"
+  vtpfvc     = "VT/PFVC",
+  vtpbw      = "VT/PBW",
+  pfvc       = "PFVC",
+  pbwpfvc    = "PBW/PFVC",
+  ers_pbw_z  = "Ers x PBW",   # z-scaled in the mortality models (per-SD OR)
+  ers_pfvc_z = "Ers x PFVC"
 )
 
 # Row order (exposures) and column order (models, simplest to most complex).

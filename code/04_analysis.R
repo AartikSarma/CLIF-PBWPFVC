@@ -186,11 +186,21 @@ if (has_mortality_variation) {
 # VT/PBW. VT/PBW is included here as a severity-of-illness adjustment (sicker
 # lungs receive lower set tidal volumes), so the elastance-normalized exposure is
 # not confounded by the delivered dose.
+#
+# The two exposures are z-scaled (mean 0, SD 1 over observed values) before
+# fitting so the odds ratios are expressed per 1 SD and are directly comparable
+# between the two models despite their different raw scales (ers x kg vs ers x L).
+# Standardizing a predictor is a linear rescaling, so model fit / AIC are
+# unchanged; only the coefficient scale changes.
+zscore <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+cross_sectional <- cross_sectional %>%
+  mutate(ers_pbw_z = zscore(ers_pbw), ers_pfvc_z = zscore(ers_pfvc))
+
 ers_mortality_specs <- c(ers_pbw = "Ers x PBW", ers_pfvc = "Ers x PFVC")
 ers_mortality_models <- list()
 if (has_mortality_variation) {
   for (v in names(ers_mortality_specs)) {
-    fstr <- paste("deceased ~", v, "+ vtpbw +", model_covariates(v))
+    fstr <- paste("deceased ~", paste0(v, "_z"), "+ vtpbw +", model_covariates(v))
     ers_mortality_models[[v]] <- glm(as.formula(fstr), data = cross_sectional,
                                       family = binomial)
   }
@@ -200,8 +210,14 @@ if (has_mortality_variation) {
         ~ message("  ", ers_mortality_specs[.y], ": ", round(AIC(.x), 1)))
 
   # Standalone merged table, mirroring the primary mortality regression output.
-  ers_mortality_tables <- map(ers_mortality_models,
-                              ~ tbl_regression(.x, exponentiate = TRUE) %>% bold_p())
+  # Label the standardized exposure row so the per-SD scale is explicit.
+  ers_mortality_tables <- imap(ers_mortality_models, ~ {
+    zname <- paste0(.y, "_z")
+    tbl_regression(
+      .x, exponentiate = TRUE,
+      label = setNames(list(paste0(ers_mortality_specs[[.y]], " (per SD)")), zname)
+    ) %>% bold_p()
+  })
   tbl_merge(ers_mortality_tables,
             tab_spanner = unname(ers_mortality_specs[names(ers_mortality_models)])) %>%
     as_gt() %>%
@@ -617,7 +633,7 @@ if (exists("cox_model")) {
 # Mortality vs elastance normalized to PBW / PFVC (logistic -> odds ratios)
 if (length(ers_mortality_models) > 0) {
   results_long <- c(results_long, imap(ers_mortality_models, ~ {
-    fstr <- paste("deceased ~", .y, "+ vtpbw +", model_covariates(.y))
+    fstr <- paste("deceased ~", paste0(.y, "_z"), "+ vtpbw +", model_covariates(.y))
     extract_model_results(.x, "OR", "Mortality",
                           ers_mortality_specs[[.y]], "logistic", fstr)
   }))
