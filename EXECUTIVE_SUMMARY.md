@@ -40,6 +40,13 @@ subprocess.
   PFVC on PBW plus age, sex, and race to show that PBW alone does not capture
   predicted lung size); conditional-bias diagnostic plots; and the unified
   long-format effect-estimate table that feeds the cross-cohort step.
+- **04b — Normalized elastance × age interaction.** Because lung elastic recoil
+  changes with age independently of injury, age confounds normalized elastance as
+  a severity-of-injury surrogate. This script re-fits the mortality models with an
+  elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), tests it against the
+  no-interaction model by likelihood-ratio test, and uses `marginaleffects` to
+  express the result on the probability scale (the elastance slope on mortality at
+  representative ages).
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
   analysis + a combined PDF), covariate forests for the demographic-bias and
@@ -159,6 +166,20 @@ human-readable tables and figures for local review.
   explained by PBW, and the significant age / sex / race coefficients demonstrate
   that PBW alone does not capture predicted lung size — the core motivation for
   scaling tidal volume by PFVC instead.
+
+**Elastance × age interaction (script 04b):**
+
+- **`regression_ers_age_interaction_<site>.html`** — the two mortality models with
+  an elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), showing the main
+  effects and the interaction odds ratio.
+- **`ers_age_interaction_<site>.csv`** — poolable one-row-per-model summary: the
+  interaction odds ratio (per SD elastance × per 10 yr) with CI and p-value, plus
+  the likelihood-ratio test against the no-interaction model (chi-square, df, p)
+  and both models' AIC.
+- **`ers_age_interaction_slopes_<site>.csv` / `.pdf`** — the elastance effect on
+  mortality expressed on the probability scale (`marginaleffects`): the change in
+  predicted mortality per 1 SD of elastance at ages 40, 60, and 80, as a table and
+  a slope-by-age plot. A non-flat profile is the interaction in clinical terms.
 
 **Survival outputs:**
 

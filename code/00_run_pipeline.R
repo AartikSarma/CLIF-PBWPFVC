@@ -57,6 +57,7 @@ pipeline_scripts <- c(
   "02_quality_checks.R",
   "03_variable_derivation.R",
   "04_analysis.R",
+  "04b_elastance_age_interaction.R",
   "05_cross_cohort_forest.R"
 )
 

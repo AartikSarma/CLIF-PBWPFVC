@@ -111,6 +111,7 @@ Rscript code/01_cohort_identification.R   # Filter CLIF tables to the eligible c
 Rscript code/02_quality_checks.R          # Apply outlier thresholds, QC stats
 Rscript code/03_variable_derivation.R     # PBW, PFVC, SOFA, SF/PF, VT metrics
 Rscript code/04_analysis.R                # Regressions, survival, bias diagnostics
+Rscript code/04b_elastance_age_interaction.R  # Normalized elastance x age interaction
 Rscript code/05_cross_cohort_forest.R     # Cross-cohort forest plots (after 04)
 ```
 
