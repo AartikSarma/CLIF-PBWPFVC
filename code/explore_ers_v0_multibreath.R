@@ -25,7 +25,8 @@
 #          output/<site>/intermediate/cohort_hospitalization_ids.rds        (script 01)
 # Outputs: final/ers_v0_per_subject_<site>.csv   (per-subject; LOCAL ONLY, patient-level)
 #          final/ers_v0_summary_<site>.csv        (aggregate distribution; poolable)
-#          final/ers_v0_dp_vs_vt_<site>.pdf       (DP-vs-VT panels)
+#          final/ers_v0_dp_vs_vt_<site>.pdf       (DP-vs-VT panels, one per subject)
+#          final/ers_v0_dp_vs_vt_combined_<site>.pdf (all constant-PEEP subjects, one panel)
 # =============================================================================
 
 library(tidyverse)
@@ -179,4 +180,39 @@ ggsave(file.path(final_dir, paste0("ers_v0_dp_vs_vt_", site_name, ".pdf")),
        limitsize = FALSE)
 
 message("DP-vs-VT panel plot written for ", n_subj, " subjects.")
+
+# =============================================================================
+# Combined plot: all paired DP-VT values (constant-PEEP subjects) on one panel
+# =============================================================================
+# Restricted to PEEP-constant subjects, for whom the slope is an unconfounded
+# elastance estimate. Each faint line is one subject's paired (VT, DP) points; the
+# orange line is the pooled least-squares fit across all points.
+constant_peep_ids <- ers_v0 %>% filter(peep_constant) %>% pull(hospitalization_id)
+combined_data <- multibreath %>% filter(hospitalization_id %in% constant_peep_ids)
+
+if (nrow(combined_data) == 0) {
+  message("No constant-PEEP subjects; skipping combined DP-vs-VT plot.")
+} else {
+  combined_plot <- ggplot(combined_data, aes(x = tidal_volume_set, y = dp)) +
+    geom_line(aes(group = hospitalization_id),
+              color = "#0072B2", alpha = 0.35, linewidth = 0.4) +
+    geom_point(color = "#0072B2", alpha = 0.45, size = 1.3) +
+    geom_smooth(method = "lm", formula = y ~ x, se = TRUE,
+                color = "#E69F00", fill = "#E69F00", alpha = 0.15, linewidth = 1) +
+    labs(
+      title = "Driving pressure vs tidal volume — constant-PEEP subjects",
+      subtitle = paste0(site_name, " — each faint line is one subject (>= 2 paired ",
+                        "VT/DP points); orange line is the pooled fit (n = ",
+                        length(constant_peep_ids), " subjects)"),
+      x = "Set tidal volume (mL)",
+      y = "Driving pressure, Pplat - PEEP (cmH2O)"
+    ) +
+    theme_minimal(base_size = 11)
+
+  ggsave(file.path(final_dir, paste0("ers_v0_dp_vs_vt_combined_", site_name, ".pdf")),
+         combined_plot, width = 8, height = 6)
+  message("Combined DP-vs-VT plot written for ", length(constant_peep_ids),
+          " constant-PEEP subjects.")
+}
+
 message("Exploratory Ers/V0 analysis complete.")
