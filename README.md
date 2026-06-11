@@ -121,9 +121,3 @@ stacks them into cross-cohort forest plots.
 - Never commit patient data — only aggregated results belong in `output/`.
 - Minimum cell size of n >= 10 for any reported group.
 - `config/config.json` is site-specific and should not be committed with real paths.
-
-## Example repositories
-
-* [CLIF Adult Sepsis Events](https://github.com/08wparker/CLIF_sepsis) (R)
-* [CLIF Eligibility for mobilization](https://github.com/kaveriC/CLIF-eligibility-for-mobilization) (Python)
-* [CLIF Variation in Ventilation](https://github.com/ingra107/clif_vent_variation)
