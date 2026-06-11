@@ -8,8 +8,9 @@
 # volume at a fixed PEEP traces out the driving-pressure-vs-tidal-volume line
 # whose slope is the respiratory-system elastance (Ers = dDP/dVT). This script
 # finds subjects who happened to be ventilated at >= 2 distinct tidal volumes --
-# each with a recorded plateau pressure -- within the first 6 hours of ventilation,
-# and for each such subject:
+# each with a recorded plateau pressure, under a volume-targeted mode (AC-VC or
+# PRVC; pure pressure control is excluded) -- within the first 6 hours of
+# ventilation, and for each such subject:
 #   * collects the (VT, driving pressure) pairs,
 #   * fits the slope of DP vs VT (the "Ers/V0" estimate, = Ers), and
 #   * plots DP vs VT with the fitted line, one panel per subject.
@@ -50,9 +51,17 @@ WINDOW_HOURS <- 6  # "first six hours of ventilation" (anchored at first IMV tim
 # Keep IMV timepoints for cohort subjects that have a measured plateau pressure,
 # a set PEEP, and a set tidal volume, then restrict to the first 6 h of each
 # subject's ventilation and compute driving pressure (plateau - PEEP).
+#
+# Volume-targeted modes only: a "set tidal volume" is physiologically meaningful
+# only when the ventilator targets a volume. Both assist control-volume control
+# (AC-VC) and pressure-regulated volume control (PRVC) contain "volume control" in
+# the CLIF mode_category, whereas pure "pressure control" does not -- a
+# (forward-filled) set tidal volume recorded under pressure control is spurious.
+# mode_category is lowercased by the waterfall.
 imv_pressures <- resp_waterfall %>%
   filter(hospitalization_id %in% cohort_ids,
          tolower(device_category) == "imv",
+         str_detect(coalesce(mode_category, ""), "volume control"),
          !is.na(plateau_pressure_obs), !is.na(peep_set),
          !is.na(tidal_volume_set), tidal_volume_set > 0) %>%
   select(hospitalization_id, recorded_dttm, mode_category,
