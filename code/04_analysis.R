@@ -237,10 +237,12 @@ if (has_mortality_variation) {
 # 4d. Linear regression — continuous outcomes (elastance, compliance, VFD-28, DP)
 # =============================================================================
 
+# NOTE: 28-day VFDs are NOT modeled here as a continuous outcome. Per Yehya &
+# Harhay (AJRCCM 2019), VFDs are analyzed as a competing-risks outcome (extubation
+# vs death) in section 4d2 below; mortality (section 4c) is the other component.
 continuous_outcomes <- list(
   ers    = list(var = "ers",    label = "Elastance"),
   crs    = list(var = "crs",    label = "Compliance"),
-  vfd_28 = list(var = "vfd_28", label = "28-day VFDs"),
   dp     = list(var = "dp",     label = "Static DP")
 )
 
@@ -273,6 +275,47 @@ for (outcome_name in names(continuous_outcomes)) {
 }
 
 # =============================================================================
+# 4d2. 28-day VFDs — competing-risks (Fine-Gray) regression
+# =============================================================================
+# Per Yehya & Harhay (AJRCCM 2019), VFDs are analyzed as a competing-risks
+# outcome: event of interest = extubation (vfd_status 1), competing risk = death
+# within 28 days (vfd_status 2), censored at day 28 if still ventilated
+# (vfd_status 0). Each exposure specification is fit with a Fine-Gray
+# subdistribution hazard model (survival::finegray weights + coxph), so effects
+# are subdistribution hazard ratios for liberation (SHR > 1 = faster liberation).
+# The mortality component is modeled in section 4c.
+vfd_cr_covariates <- covariates  # VFD + these exposures are never DP-derived (no BMI)
+
+fit_vfd_finegray <- function(exposure_spec) {
+  model_rhs <- paste(exposure_spec, "+", vfd_cr_covariates)
+  rhs_vars  <- unique(trimws(unlist(strsplit(model_rhs, "\\+"))))
+  df <- cross_sectional %>%
+    mutate(vfd_status_f = factor(vfd_status, levels = c(0, 1, 2),
+                                 labels = c("censored", "extubation", "death"))) %>%
+    select(vfd_time, vfd_status_f, all_of(rhs_vars)) %>%
+    filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f))
+  fg <- survival::finegray(survival::Surv(vfd_time, vfd_status_f) ~ ., data = df,
+                           etype = "extubation")
+  survival::coxph(
+    as.formula(paste0("survival::Surv(fgstart, fgstop, fgstatus) ~ ", model_rhs)),
+    weights = fgwt, data = fg
+  )
+}
+
+vfd_cr_models <- map(exposure_specs, fit_vfd_finegray)
+
+vfd_cr_tables <- map(vfd_cr_models, ~ {
+  tbl_regression(.x, exponentiate = TRUE, label = covar_labels) %>% bold_p()
+})
+
+message("28-day VFDs (Fine-Gray, extubation SHR) — AIC:")
+iwalk(vfd_cr_models, ~ message("  ", exposure_labels[.y], ": ", round(AIC(.x), 1)))
+
+tbl_merge(vfd_cr_tables, tab_spanner = exposure_labels) %>%
+  as_gt() %>%
+  gt::gtsave(file.path(final_dir, paste0("regression_vfd28_", site_name, ".html")))
+
+# =============================================================================
 # 4e. AIC comparison across all models and outcomes
 # =============================================================================
 
@@ -295,6 +338,14 @@ for (outcome_name in names(continuous_outcomes)) {
     is_reference = exposure == "VT/PBW"
   )
 }
+
+# 28-day VFDs (competing-risks Fine-Gray models). AICs are comparable within the
+# outcome and referenced to the VT/PBW model, as elsewhere.
+aic_results[["28-day VFDs"]] <- tibble(
+  exposure = exposure_labels,
+  AIC = map_dbl(vfd_cr_models, AIC),
+  is_reference = exposure == "VT/PBW"
+)
 
 # Mortality, elastance-normalized exposures. Ers x PBW and Ers x PFVC are fit on
 # the same support (both require ers), so their AICs are mutually comparable. The
@@ -633,6 +684,16 @@ for (outcome_name in names(continuous_outcomes)) {
                           exposure_labels[[.y]], "linear", formula_str)
   }))
 }
+
+# 28-day VFDs (competing-risks Fine-Gray -> subdistribution hazard ratios for
+# extubation; estimate_type "HR" so the cross-cohort forest plots it on the log
+# scale, like the other ratio outcomes).
+results_long <- c(results_long, imap(vfd_cr_models, ~ {
+  formula_str <- paste("finegray(Surv(vfd_time, vfd_status) [extubation vs death]) ~",
+                       exposure_specs[[.y]], "+", vfd_cr_covariates)
+  extract_model_results(.x, "HR", "28-day VFDs",
+                        exposure_labels[[.y]], "finegray", formula_str)
+}))
 
 # Survival (Cox proportional hazards -> hazard ratios)
 if (exists("cox_model")) {

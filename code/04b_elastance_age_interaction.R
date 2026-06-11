@@ -5,15 +5,19 @@
 # Motivation: normalized elastance (Ers x PBW, Ers x PFVC) is used as a surrogate
 # for severity of lung injury, but the elastic recoil of lung tissue changes with
 # age independently of injury -- so age confounds elastance as a severity marker.
-# This script tests whether the elastance-mortality association differs by age by
-# adding an elastance x age interaction to the mortality models from script 04,
-# and uses marginaleffects to express the interaction on the interpretable
-# probability scale (the elastance slope at representative ages).
+# This script tests whether the elastance-outcome association differs by age by
+# adding an elastance x age interaction, for two outcomes:
+#   * in-hospital mortality (logistic; interaction on the probability scale via
+#     marginaleffects, the elastance slope at representative ages);
+#   * 28-day VFDs (competing risks, extubation vs death; Fine-Gray subdistribution
+#     models, interaction summarized by its SHR and a likelihood-ratio test).
 #
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
-# Outputs: final/regression_ers_age_interaction_<site>.html  (model table)
-#          final/ers_age_interaction_<site>.csv              (poolable summary)
-#          final/ers_age_interaction_slopes_<site>.pdf       (slope-by-age plot)
+# Outputs (mortality): final/regression_ers_age_interaction_<site>.html
+#                      final/ers_age_interaction_<site>.csv
+#                      final/ers_age_interaction_slopes_<site>.{csv,pdf}
+# Outputs (VFDs)     : final/regression_ers_age_interaction_vfd_<site>.html
+#                      final/ers_age_interaction_vfd_<site>.csv
 # =============================================================================
 
 library(tidyverse)
@@ -22,6 +26,7 @@ library(here)
 library(gtsummary)
 library(gt)
 library(broom)
+library(survival)
 library(marginaleffects)
 
 source("utils/config.R")
@@ -193,5 +198,71 @@ slopes_plot <- ggplot(slopes_by_age,
 ggsave(file.path(final_dir, paste0("ers_age_interaction_slopes_", site_name, ".pdf")),
        slopes_plot, width = 8, height = 5)
 
-message("Slope-by-age plot written")
+message("Slope-by-age plot written (mortality outcome)")
+
+# =============================================================================
+# Second outcome: 28-day VFDs (competing risks) x age interaction
+# =============================================================================
+# The same age-confounding concern applies to ventilator liberation. Repeat the
+# interaction test for the competing-risks VFD outcome (extubation = event, death
+# = competing risk; Yehya & Harhay 2019) using Fine-Gray subdistribution models.
+# Effects are subdistribution hazard ratios (SHR); the interaction is summarized by
+# its SHR and a likelihood-ratio test. Probability-scale slopes are not reported
+# for this outcome (the slopes plot above is the mortality, probability-scale view).
+vfd_status_levels <- c(0, 1, 2)
+vfd_status_labels <- c("censored", "extubation", "death")
+
+vfd_int_models  <- list()
+vfd_main_models <- list()
+for (z in names(ers_specs)) {
+  rhs_vars <- unique(trimws(unlist(strsplit(
+    paste(z, "age10", adjustment, sep = " + "), "\\+|\\*"))))
+  df <- model_data %>%
+    mutate(vfd_status_f = factor(vfd_status, levels = vfd_status_levels,
+                                 labels = vfd_status_labels)) %>%
+    select(vfd_time, vfd_status_f, all_of(rhs_vars)) %>%
+    filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f))
+  fg <- finegray(Surv(vfd_time, vfd_status_f) ~ ., data = df, etype = "extubation")
+  vfd_int_models[[z]] <- coxph(
+    as.formula(paste0("Surv(fgstart, fgstop, fgstatus) ~ ", z, " * age10 + ", adjustment)),
+    weights = fgwt, data = fg)
+  vfd_main_models[[z]] <- coxph(
+    as.formula(paste0("Surv(fgstart, fgstop, fgstatus) ~ ", z, " + age10 + ", adjustment)),
+    weights = fgwt, data = fg)
+}
+
+vfd_interaction_out <- imap_dfr(vfd_int_models, function(m_int, z) {
+  m_main <- vfd_main_models[[z]]
+  lrt <- anova(m_main, m_int)
+  shr <- broom::tidy(m_int, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == paste0(z, ":age10"))
+  tibble(
+    site = site_name, exposure = ers_specs[[z]], term = paste0(z, ":age10"),
+    n_obs = m_int$n,
+    interaction_shr = shr$estimate, conf_low = shr$conf.low, conf_high = shr$conf.high,
+    p_value = shr$p.value,
+    lrt_chisq = lrt$Chisq[2], lrt_df = lrt$Df[2], lrt_p = lrt$`Pr(>|Chi|)`[2]
+  )
+})
+
+write_csv(vfd_interaction_out,
+          file.path(final_dir, paste0("ers_age_interaction_vfd_", site_name, ".csv")))
+
+message("Elastance x age interaction on 28-day VFDs (SHR; LRT vs no-interaction):")
+pwalk(vfd_interaction_out, function(exposure, interaction_shr, lrt_p, ...) {
+  message("  ", exposure, ": interaction SHR = ", round(interaction_shr, 3),
+          ", LRT p = ", signif(lrt_p, 3))
+})
+
+vfd_interaction_tables <- imap(vfd_int_models, ~ {
+  tbl_regression(.x, exponentiate = TRUE,
+                 label = list(age10 ~ "Age (per 10 yr)", sf10 ~ "SF ratio (per 10)",
+                              vtpbw ~ "VT/PBW")) %>% bold_p()
+})
+tbl_merge(vfd_interaction_tables, tab_spanner = unname(ers_specs)) %>%
+  as_gt() %>%
+  gt::gtsave(file.path(final_dir,
+                       paste0("regression_ers_age_interaction_vfd_", site_name, ".html")))
+
+message("VFD interaction outputs written")
 message("Script 04b complete.")

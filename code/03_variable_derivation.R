@@ -831,9 +831,32 @@ vfd_data <- cohort_demographics %>%
     imv_days = replace_na(imv_days, 0),
     death_day = as.numeric(difftime(death_dttm, admission_dttm, units = "days")),
     died_within_28 = !is.na(death_day) & death_day >= 0 & death_day <= 28,
-    vfd_28 = if_else(died_within_28, 0, pmax(28 - imv_days, 0))
+    vfd_28 = if_else(died_within_28, 0, pmax(28 - imv_days, 0)),
+    # --- Competing-risks VFD outcome (Yehya & Harhay, AJRCCM 2019) -------------
+    # VFDs are best analyzed as a competing-risks outcome rather than a continuous
+    # value: event of interest = extubation (liberation from ventilation),
+    # competing risk = death within 28 days, censored at day 28 if still
+    # ventilated. Time to liberation is the cumulative ventilator days within 28 d
+    # (the duration component of the VFD construct); any death within 28 d is the
+    # competing event (consistent with the VFD convention that death -> 0 VFDs).
+    # vfd_status: 0 = censored (still ventilated at 28 d), 1 = extubation,
+    # 2 = death. vfd_time is floored at ~1 h so the survival models have time > 0.
+    vent_days_28 = pmin(imv_days, 28),
+    vfd_status = case_when(
+      died_within_28     ~ 2L,
+      vent_days_28 >= 28 ~ 0L,
+      TRUE               ~ 1L
+    ),
+    vfd_time = pmax(
+      case_when(
+        vfd_status == 2L ~ death_day,
+        vfd_status == 0L ~ 28,
+        TRUE             ~ vent_days_28
+      ),
+      1 / 24
+    )
   ) %>%
-  select(hospitalization_id, vfd_28)
+  select(hospitalization_id, vfd_28, vfd_time, vfd_status)
 
 # Attach VFDs to the cross-sectional cohort (one row per included patient)
 cross_sectional <- cross_sectional %>%

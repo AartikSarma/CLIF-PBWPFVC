@@ -22,6 +22,7 @@ library(here)
 library(gtsummary)
 library(gt)
 library(broom)
+library(survival)
 library(marginaleffects)
 
 source("utils/config.R")
@@ -252,4 +253,92 @@ ggsave(file.path(final_dir, paste0("mp_age_interaction_slopes_", site_name, ".pd
        slopes_plot, width = 8, height = 5)
 
 message("Mechanical power x age interaction outputs written")
+
+# =============================================================================
+# Second outcome: 28-day VFDs (competing risks)
+# =============================================================================
+# Repeat the MP/PBW-vs-MP/PFVC comparison and the MP x age interaction for the
+# competing-risks VFD outcome (extubation = event, death = competing risk; Yehya &
+# Harhay 2019), using Fine-Gray subdistribution models. Effects are subdistribution
+# hazard ratios for liberation (SHR > 1 = faster liberation).
+vfd_status_levels <- c(0, 1, 2)
+vfd_status_labels <- c("censored", "extubation", "death")
+
+fit_vfd_finegray <- function(rhs) {
+  rhs_vars <- unique(trimws(unlist(strsplit(rhs, "\\+|\\*"))))
+  df <- model_data %>%
+    mutate(vfd_status_f = factor(vfd_status, levels = vfd_status_levels,
+                                 labels = vfd_status_labels)) %>%
+    select(vfd_time, vfd_status_f, all_of(rhs_vars)) %>%
+    filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f))
+  fg <- finegray(Surv(vfd_time, vfd_status_f) ~ ., data = df, etype = "extubation")
+  coxph(as.formula(paste0("Surv(fgstart, fgstop, fgstatus) ~ ", rhs)),
+        weights = fgwt, data = fg)
+}
+
+# --- Main comparison: MP/PBW vs MP/PFVC (SHR per SD), referenced to MP/PBW ------
+mp_vfd_models <- map(names(mp_specs), ~ fit_vfd_finegray(paste(.x, "+", adjustment)))
+names(mp_vfd_models) <- names(mp_specs)
+aic_pbw_vfd <- AIC(mp_vfd_models[["mp_pbw_z"]])
+
+mp_vfd_summary <- imap_dfr(mp_vfd_models, function(m, v) {
+  shr_row <- broom::tidy(m, conf.int = TRUE, exponentiate = TRUE) %>% filter(term == v)
+  tibble(
+    site = site_name, exposure = mp_specs[[v]], n_obs = m$n,
+    shr_per_sd = shr_row$estimate, conf_low = shr_row$conf.low,
+    conf_high = shr_row$conf.high, p_value = shr_row$p.value,
+    aic = AIC(m), delta_aic = AIC(m) - aic_pbw_vfd,
+    evidence_ratio = exp(-0.5 * (AIC(m) - aic_pbw_vfd))
+  )
+})
+write_csv(mp_vfd_summary,
+          file.path(final_dir, paste0("mp_normalization_vfd_", site_name, ".csv")))
+
+mp_vfd_tables <- imap(mp_vfd_models, ~ {
+  tbl_regression(.x, exponentiate = TRUE,
+    label = c(setNames(list(mp_specs[[.y]]), .y),
+              list(age10 = "Age (per 10 yr)", sf10 = "SF ratio (per 10)",
+                   vtpbw = "VT/PBW"))) %>% bold_p()
+})
+tbl_merge(mp_vfd_tables, tab_spanner = unname(mp_specs)) %>%
+  as_gt() %>%
+  gt::gtsave(file.path(final_dir, paste0("regression_mp_normalization_vfd_", site_name, ".html")))
+
+message("Mechanical power normalization on 28-day VFDs (SHR per SD; ",
+        "evidence ratio vs MP/PBW):")
+pwalk(mp_vfd_summary, function(exposure, shr_per_sd, evidence_ratio, ...) {
+  message("  ", exposure, ": SHR = ", round(shr_per_sd, 3),
+          ", evidence ratio = ", signif(evidence_ratio, 3))
+})
+
+# --- MP x age interaction on the VFD outcome (SHR + LRT) ------------------------
+mp_vfd_int_models  <- list()
+mp_vfd_main_models <- list()
+for (v in names(mp_specs)) {
+  mp_vfd_int_models[[v]]  <- fit_vfd_finegray(paste0(v, " * age10 + ", adjustment_no_age))
+  mp_vfd_main_models[[v]] <- fit_vfd_finegray(paste0(v, " + age10 + ", adjustment_no_age))
+}
+
+mp_vfd_interaction <- imap_dfr(mp_vfd_int_models, function(m_int, v) {
+  lrt <- anova(mp_vfd_main_models[[v]], m_int)
+  shr <- broom::tidy(m_int, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == paste0(v, ":age10"))
+  tibble(
+    site = site_name, exposure = mp_specs[[v]], term = paste0(v, ":age10"),
+    n_obs = m_int$n,
+    interaction_shr = shr$estimate, conf_low = shr$conf.low, conf_high = shr$conf.high,
+    p_value = shr$p.value,
+    lrt_chisq = lrt$Chisq[2], lrt_df = lrt$Df[2], lrt_p = lrt$`Pr(>|Chi|)`[2]
+  )
+})
+write_csv(mp_vfd_interaction,
+          file.path(final_dir, paste0("mp_age_interaction_vfd_", site_name, ".csv")))
+
+message("Mechanical power x age interaction on 28-day VFDs (SHR; LRT):")
+pwalk(mp_vfd_interaction, function(exposure, interaction_shr, lrt_p, ...) {
+  message("  ", exposure, ": interaction SHR = ", round(interaction_shr, 3),
+          ", LRT p = ", signif(lrt_p, 3))
+})
+
+message("VFD competing-risks outputs written")
 message("Script 04c complete.")

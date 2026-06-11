@@ -33,8 +33,10 @@ subprocess.
 - **04 — Analysis (the main results).** Table 1 (stratified by PBW/PFVC tercile);
   logistic mortality regressions across the exposure specifications; the
   **elastance-normalized mortality models** (`ers_pbw` / `ers_pfvc`, z-scaled and
-  VT/PBW-adjusted); linear models for elastance, compliance, VFD-28, and driving
-  pressure; an AIC / evidence-ratio comparison; 60-day survival (Cox +
+  VT/PBW-adjusted); linear models for elastance, compliance, and driving pressure;
+  **28-day VFDs modeled as a competing-risks outcome** (extubation vs death, via
+  Fine–Gray subdistribution models, per Yehya & Harhay 2019) rather than a
+  continuous value; an AIC / evidence-ratio comparison; 60-day survival (Cox +
   Kaplan-Meier by PBW/PFVC tercile); demographic-bias models (each metric vs
   demographics); the predicted-FVC-vs-predicted-body-weight model (regressing
   PFVC on PBW plus age, sex, and race to show that PBW alone does not capture
@@ -46,7 +48,9 @@ subprocess.
   elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), tests it against the
   no-interaction model by likelihood-ratio test, and uses `marginaleffects` to
   express the result on the probability scale (the elastance slope on mortality at
-  representative ages).
+  representative ages). The interaction is tested for **two outcomes**: in-hospital
+  mortality (logistic) and 28-day VFDs (competing risks, Fine–Gray; interaction
+  reported as a subdistribution hazard ratio + LRT).
 - **04c — Mechanical power normalized to PBW vs PFVC.** Extends the PBW-vs-PFVC
   scaling question to mechanical power (MP). MP is derived per index timepoint in
   script 03 with a **mode-aware** simplified power equation — volume-control modes
@@ -59,7 +63,8 @@ subprocess.
   the PBW-scaled model. As in 04b, it also adds an MP × age interaction (since
   lung/chest-wall mechanics change with age), tested by likelihood-ratio test and
   summarized with `marginaleffects` as the MP slope on mortality at representative
-  ages.
+  ages. Both the MP/PBW-vs-MP/PFVC comparison and the MP × age interaction are run
+  for two outcomes — mortality and 28-day VFDs (competing risks, Fine–Gray, SHR).
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
   analysis + a combined PDF), covariate forests for the demographic-bias and
@@ -113,8 +118,9 @@ data and should **not** leave the site.
   row per index hospitalization carrying every derived variable — PBW, PFVC,
   VT/PBW, VT/PFVC, PBW/PFVC, driving pressure, compliance, elastance,
   `ers_pbw`/`ers_pfvc`, mechanical power and its scalings (`mp_pbw`/`mp_pfvc`),
-  SOFA, SF/PF ratios, VFD-28, BMI, survival time and event, mortality flags, and
-  demographics. The index timepoint is the first lung-protective (VT/PBW 6–8),
+  SOFA, SF/PF ratios, VFD-28 (`vfd_28`) plus its competing-risks form
+  (`vfd_time`/`vfd_status`: extubation vs death), BMI, survival time and event,
+  mortality flags, and demographics. The index timepoint is the first lung-protective (VT/PBW 6–8),
   hypoxemic (SF < 315) timepoint with recorded pressures (so driving pressure /
   elastance are observed) within the first 6 h of ventilation, falling back to the
   first qualifying timepoint when no such early pressures exist.
@@ -170,9 +176,15 @@ human-readable tables and figures for local review.
   models: in-hospital mortality on z-scaled Ers×PBW and Ers×PFVC (odds ratio per
   1 SD), adjusted for VT/PBW and the standard covariates.
 - **`regression_ers_<site>.html`**, **`regression_crs_<site>.html`**,
-  **`regression_vfd_28_<site>.html`**, **`regression_dp_<site>.html`** — linear
-  regressions of elastance, compliance, 28-day ventilator-free days, and static
-  driving pressure, each across the same five exposure specifications.
+  **`regression_dp_<site>.html`** — linear regressions of elastance, compliance,
+  and static driving pressure, each across the same five exposure specifications.
+- **`regression_vfd28_<site>.html`** — 28-day VFDs as a **competing-risks**
+  outcome (Yehya & Harhay 2019): Fine–Gray subdistribution models for extubation
+  (death as the competing risk), across the same five exposure specifications,
+  reporting subdistribution hazard ratios (SHR > 1 = faster liberation). In the
+  federated long table this analysis carries `estimate_type = HR`. Mortality (the
+  other component of the composite) is reported separately above; VFD-28 is also
+  shown descriptively in Table 1.
 - **`table_demographic_bias_<site>.html` / `.pdf`** — the algorithmic-bias view:
   how each metric (VT/PBW, VT/PFVC, Ers×PBW, Ers×PFVC, Static DP, and mortality)
   varies by demographics (age per 10 yr, sex, race, height per 10 cm, SF ratio
@@ -197,6 +209,11 @@ human-readable tables and figures for local review.
   mortality expressed on the probability scale (`marginaleffects`): the change in
   predicted mortality per 1 SD of elastance at ages 40, 60, and 80, as a table and
   a slope-by-age plot. A non-flat profile is the interaction in clinical terms.
+- **`regression_ers_age_interaction_vfd_<site>.html`** and
+  **`ers_age_interaction_vfd_<site>.csv`** — the same elastance × age interaction
+  for the **28-day VFD competing-risks** outcome (Fine–Gray): the interaction
+  subdistribution hazard ratio with CI/p and the likelihood-ratio test. (The
+  unsuffixed files above are the mortality outcome.)
 
 **Mechanical power normalization (script 04c):**
 
@@ -215,6 +232,11 @@ human-readable tables and figures for local review.
 - **`mp_age_interaction_slopes_<site>.csv` / `.pdf`** — the MP effect on mortality
   on the probability scale (`marginaleffects`): change in predicted mortality per
   1 SD of MP at ages 40, 60, and 80, as a table and a slope-by-age plot.
+- **`regression_mp_normalization_vfd_<site>.html`**,
+  **`mp_normalization_vfd_<site>.csv`**, and **`mp_age_interaction_vfd_<site>.csv`**
+  — the MP/PBW-vs-MP/PFVC comparison and the MP × age interaction repeated for the
+  **28-day VFD competing-risks** outcome (Fine–Gray): subdistribution hazard ratios
+  per SD with the AIC evidence ratio, and the interaction SHR + LRT.
 
 **Survival outputs:**
 
