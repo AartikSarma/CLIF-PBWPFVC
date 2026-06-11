@@ -28,6 +28,7 @@
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/spline_sensitivity_<site>.csv     (AIC / evidence ratios, all levels)
 #          final/spline_sensitivity_<site>.pdf      (heatmaps across the covariate ladder)
+#          final/spline_sensitivity_vif_<site>.csv  (VIF of the size terms per level)
 # =============================================================================
 
 library(tidyverse)
@@ -175,6 +176,33 @@ er_for <- function(response) {
 message("Elastance anomaly (VT/PBW + PFVC vs VT/PBW, +height covariates):")
 message("  raw elastance:  evidence ratio = ", signif(er_for("ers"), 3))
 message("  log elastance:  evidence ratio = ", signif(er_for("log(ers)"), 3))
+
+# =============================================================================
+# Variance inflation across the covariate-flexibility ladder
+# =============================================================================
+# The evidence-ratio collapse and variance inflation are the SAME phenomenon: as
+# the covariates capture a size term's functional form, that term becomes redundant
+# (collinear) and adds no independent information -- its evidence ratio falls AND its
+# VIF rises. VIF for a single continuous predictor = 1 / (1 - R^2) from the auxiliary
+# regression of that predictor on all the other predictors (clinical, no-BMI set;
+# the auxiliary regression does not involve the outcome).
+vif_term <- function(target, others) {
+  r2 <- summary(lm(as.formula(paste(target, "~", others)), data = mech))$r.squared
+  1 / (1 - r2)
+}
+vif_tbl <- map_dfr(covar_levels, function(lv) {
+  covs <- build_covars(list(bmi = FALSE), lv)
+  tibble(site = site_name, level = lv,
+         vif_PFVC    = vif_term("pfvc",    paste("vtpbw +", covs)),
+         vif_PBWPFVC = vif_term("pbwpfvc", paste("vtpbw +", covs)),
+         vif_VTPFVC  = vif_term("vtpfvc",  paste("vtpbw +", covs)))
+})
+write_csv(vif_tbl, file.path(final_dir, paste0("spline_sensitivity_vif_", site_name, ".csv")))
+message("Variance inflation (VIF) of the size terms across the ladder:")
+pwalk(vif_tbl, function(level, vif_PFVC, vif_PBWPFVC, vif_VTPFVC, ...) {
+  message("  ", level, ": PFVC=", round(vif_PFVC, 1),
+          ", PBW/PFVC=", round(vif_PBWPFVC, 1), ", VT/PFVC=", round(vif_VTPFVC, 1))
+})
 
 message("Spline-sensitivity outputs written.")
 message("Exploratory spline-sensitivity analysis complete.")
