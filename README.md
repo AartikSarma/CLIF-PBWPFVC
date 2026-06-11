@@ -112,6 +112,7 @@ Rscript code/02_quality_checks.R          # Apply outlier thresholds, QC stats
 Rscript code/03_variable_derivation.R     # PBW, PFVC, SOFA, SF/PF, VT metrics
 Rscript code/04_analysis.R                # Regressions, survival, bias diagnostics
 Rscript code/04b_elastance_age_interaction.R  # Normalized elastance x age interaction
+Rscript code/04c_mechanical_power_normalization.R  # Mechanical power scaled to PBW vs PFVC
 Rscript code/05_cross_cohort_forest.R     # Cross-cohort forest plots (after 04)
 ```
 

@@ -366,6 +366,7 @@ imv_timepoints <- resp_waterfall %>%
   filter(tolower(device_category) == "imv") %>%
   select(hospitalization_id, recorded_dttm, device_category, mode_category,
          fio2_set, tidal_volume_set, peep_set, plateau_pressure_obs,
+         resp_rate_set, peak_inspiratory_pressure_obs,
          any_of("minute_vent_obs"))
 
 # Join with PBW/PFVC data
@@ -391,7 +392,41 @@ analysis_data <- imv_timepoints %>%
     # ers_pbw / ers_pfvc (elastance normalized to PBW / PFVC) inherit this scale.
     ers = if_else(!is.na(crs) & crs > 0, 1000 / crs, NA_real_),
     ers_pbw = ers * pbw,
-    ers_pfvc = ers * pfvc
+    ers_pfvc = ers * pfvc,
+    # --- Mechanical power (J/min), simplified equation -------------------------
+    # The simplified power equation differs by inspiratory flow pattern, which is
+    # set by the ventilator mode:
+    #   * Volume control (constant / square flow): a resistive correction is
+    #     applied via the driving pressure --
+    #       MP = 0.098 * RR * VT(L) * (Ppeak - 1/2 * (Pplat - PEEP))   [Gattinoni 2016]
+    #   * Pressure-targeted modes (pressure control, PRVC; decelerating flow): the
+    #     pressure-volume loop is rectangular, so there is no -1/2*dP correction --
+    #       MP = 0.098 * RR * VT(L) * Ppeak                            [Becher 2019]
+    # Spontaneous / unclassifiable modes (pressure support/CPAP, SIMV, etc.) are
+    # left undefined (MP = NA). RR uses the set rate, consistent with the set
+    # tidal volume and PEEP used elsewhere; Ppeak and Pplat are observed values
+    # (never forward-filled), so MP is computable only where they were recorded.
+    # NOTE: the VCV/PCV mode_category sets below are the CLIF mCIDE strings as used
+    # elsewhere in the pipeline; extend them if a site reports other controlled modes.
+    mp_mode_class = case_when(
+      mode_category %in% c("assist control-volume control")                        ~ "vcv",
+      mode_category %in% c("pressure control", "pressure-regulated volume control") ~ "pcv",
+      TRUE ~ NA_character_
+    ),
+    mechanical_power = case_when(
+      mp_mode_class == "vcv" & !is.na(resp_rate_set) & !is.na(tidal_volume_set) &
+        !is.na(peak_inspiratory_pressure_obs) & !is.na(dp) & dp > 0 ~
+        0.098 * resp_rate_set * (tidal_volume_set / 1000) *
+          (peak_inspiratory_pressure_obs - 0.5 * dp),
+      mp_mode_class == "pcv" & !is.na(resp_rate_set) & !is.na(tidal_volume_set) &
+        !is.na(peak_inspiratory_pressure_obs) ~
+        0.098 * resp_rate_set * (tidal_volume_set / 1000) * peak_inspiratory_pressure_obs,
+      TRUE ~ NA_real_
+    ),
+    # Mechanical power normalized to predicted body weight (J/min/kg) vs predicted
+    # FVC (J/min/L) -- the PBW-vs-PFVC scaling comparison carried into script 04c.
+    mp_pbw  = mechanical_power / pbw,
+    mp_pfvc = mechanical_power / pfvc
   )
 
 message("Analysis timepoints: ", nrow(analysis_data), " rows, ",

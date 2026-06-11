@@ -47,6 +47,16 @@ subprocess.
   no-interaction model by likelihood-ratio test, and uses `marginaleffects` to
   express the result on the probability scale (the elastance slope on mortality at
   representative ages).
+- **04c — Mechanical power normalized to PBW vs PFVC.** Extends the PBW-vs-PFVC
+  scaling question to mechanical power (MP). MP is derived per index timepoint in
+  script 03 with a **mode-aware** simplified power equation — volume-control modes
+  use the Gattinoni form with the driving-pressure (resistive) correction,
+  `0.098·RR·VT·(Ppeak − ½·ΔP)`, while pressure-targeted modes (pressure control,
+  PRVC; decelerating flow) use the rectangular Becher form, `0.098·RR·VT·Ppeak`;
+  spontaneous/unclassifiable modes are left undefined. 04c then compares MP
+  normalized to PBW (J/min/kg) against MP normalized to PFVC (J/min/L), z-scaled,
+  as predictors of in-hospital mortality, with an AIC evidence ratio referenced to
+  the PBW-scaled model.
 - **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
   `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
   analysis + a combined PDF), covariate forests for the demographic-bias and
@@ -99,8 +109,9 @@ data and should **not** leave the site.
 - **`analysis_cross_sectional.parquet`** — the **primary analytic table**: one
   row per index hospitalization carrying every derived variable — PBW, PFVC,
   VT/PBW, VT/PFVC, PBW/PFVC, driving pressure, compliance, elastance,
-  `ers_pbw`/`ers_pfvc`, SOFA, SF/PF ratios, VFD-28, BMI, survival time and event,
-  mortality flags, and demographics.
+  `ers_pbw`/`ers_pfvc`, mechanical power and its scalings (`mp_pbw`/`mp_pfvc`),
+  SOFA, SF/PF ratios, VFD-28, BMI, survival time and event, mortality flags, and
+  demographics.
 - **`analysis_all_timepoints.parquet`** — the longitudinal counterpart: one row
   per hospitalization × ventilator timepoint, for time-varying analyses.
 - **`analysis_broad_pfvc.parquet`** — a broader cohort (all eligible subjects with
@@ -180,6 +191,16 @@ human-readable tables and figures for local review.
   mortality expressed on the probability scale (`marginaleffects`): the change in
   predicted mortality per 1 SD of elastance at ages 40, 60, and 80, as a table and
   a slope-by-age plot. A non-flat profile is the interaction in clinical terms.
+
+**Mechanical power normalization (script 04c):**
+
+- **`regression_mp_normalization_<site>.html`** — the two mortality models with
+  mechanical power scaled to PBW (J/min/kg) and to PFVC (J/min/L), z-scaled
+  (odds ratio per 1 SD), adjusted for VT/PBW and the standard covariates.
+- **`mp_normalization_<site>.csv`** — poolable one-row-per-model summary: the
+  odds ratio per SD with CI and p-value, AIC, and the AIC evidence ratio relative
+  to the PBW-scaled model (> 1 favors MP/PFVC), plus `n_obs` (the subset with a
+  computable, mode-appropriate mechanical power).
 
 **Survival outputs:**
 
