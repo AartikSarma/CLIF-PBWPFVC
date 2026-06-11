@@ -121,6 +121,15 @@ Script 05 aggregates the per-cohort regression tables produced by script 04 and
 is site-agnostic: it discovers every `regression_results_long_*.csv` on disk and
 stacks them into cross-cohort forest plots.
 
+### Exploratory analyses (standalone, not in the runner)
+
+```bash
+# Multi-breath Ers/V0: subjects with >= 2 distinct tidal volumes (each with a
+# measured plateau) in the first 6 h of ventilation; computes and plots the
+# driving-pressure-vs-tidal-volume slope per subject. Requires scripts 01-02.
+Rscript code/explore_ers_v0_multibreath.R
+```
+
 ## Data safety
 
 - Never commit patient data — only aggregated results belong in `output/`.
