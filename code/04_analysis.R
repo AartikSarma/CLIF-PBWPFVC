@@ -339,6 +339,19 @@ aic_all <- bind_rows(aic_results, .id = "outcome") %>%
       "Static DP", "Mechanical power"),
     unique(outcome))))
 
+# Row order: exposure specs by the strongest evidence ratio they reach in any
+# outcome (best at the top). Raw AIC is not comparable across outcomes, so the
+# AIC-based evidence ratio (truncated) is used; ties are broken by the summed
+# log10 ratio.
+exposure_order <- aic_all %>%
+  group_by(exposure) %>%
+  summarise(max_er = max(evidence_ratio_trunc, na.rm = TRUE),
+            sum_lr = sum(log10(evidence_ratio_trunc), na.rm = TRUE),
+            .groups = "drop") %>%
+  arrange(max_er, sum_lr) %>%
+  pull(exposure)
+aic_all <- aic_all %>% mutate(exposure = factor(exposure, levels = exposure_order))
+
 message("AIC comparison (evidence ratios vs VT/PBW-alone within each outcome):")
 print(aic_all)
 
