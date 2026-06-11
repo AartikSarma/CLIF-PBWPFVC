@@ -103,13 +103,20 @@ results <- list()  # collected scalar findings -> tidy summary CSV
 # =============================================================================
 # (A) Size axis: which predicted-size surrogate explains elastance variation?
 # =============================================================================
-size_data <- mech %>% filter(is.finite(pbw), is.finite(pfvc))
-r2_size_pbw  <- r2("ers ~ pbw",  size_data)
-r2_size_pfvc <- r2("ers ~ pfvc", size_data)
+size_data <- mech %>% filter(is.finite(pbw), is.finite(pfvc), pbw > 0, pfvc > 0)
+# Ers ~ E_spec/V0 ~ 1/V0, so the INVERSE-size parameterization is the
+# physiologically correct linear form; the raw-size fits are reported alongside to
+# show whether the parameterization changes the PBW-vs-PFVC ordering.
+r2_size_pbw      <- r2("ers ~ pbw",       size_data)
+r2_size_pfvc     <- r2("ers ~ pfvc",      size_data)
+r2_size_pbw_inv  <- r2("ers ~ I(1/pbw)",  size_data)
+r2_size_pfvc_inv <- r2("ers ~ I(1/pfvc)", size_data)
 results[["A_size_axis"]] <- tibble(
   fingerprint = "A: size axis (Ers ~ predicted size)",
-  metric = c("R2_Ers_on_PBW", "R2_Ers_on_PFVC", "n"),
-  value  = c(r2_size_pbw, r2_size_pfvc, nrow(size_data))
+  metric = c("R2_Ers_on_PBW", "R2_Ers_on_PFVC",
+             "R2_Ers_on_invPBW", "R2_Ers_on_invPFVC", "n"),
+  value  = c(r2_size_pbw, r2_size_pfvc, r2_size_pbw_inv, r2_size_pfvc_inv,
+             nrow(size_data))
 )
 
 # =============================================================================
@@ -200,20 +207,29 @@ results[["C2_predicted_recoil"]] <- tibble(
 # standalone axis (confounded); the size axis (PFVC / PBW) already carries its
 # demographic size effect, and the injury axis (oxygenation, SOFA) is the clean
 # error-1 probe. "Unique injury" variance is the cleanest recoil signal.
-vp_data <- mech %>% filter(is.finite(pbw), is.finite(pfvc),
+vp_data <- mech %>% filter(is.finite(pbw), is.finite(pfvc), pbw > 0, pfvc > 0,
                            is.finite(sf10), is.finite(sofa_total))
-partition <- function(size_var, data) {
-  r2_size   <- r2(paste("ers ~", size_var), data)
+partition <- function(size_expr, label, data) {
+  r2_size   <- r2(paste("ers ~", size_expr), data)
   r2_injury <- r2(paste("ers ~", injury_rhs), data)
-  r2_full   <- r2(paste("ers ~", size_var, "+", injury_rhs), data)
-  tibble(size_surrogate = size_var,
+  r2_full   <- r2(paste("ers ~", size_expr, "+", injury_rhs), data)
+  tibble(size_surrogate = label,
          unique_size   = r2_full - r2_injury,
          unique_injury = r2_full - r2_size,
          shared        = r2_size + r2_injury - r2_full,
          total_r2      = r2_full)
 }
-vp <- bind_rows(partition("pbw", vp_data), partition("pfvc", vp_data)) %>%
-  mutate(size_surrogate = recode(size_surrogate, pbw = "PBW", pfvc = "PFVC"))
+# Both parameterizations: raw size (mis-specified, since Ers ~ 1/V0) and inverse
+# size (physiologically correct). Shown side by side to see whether 1/x changes
+# the PBW-vs-PFVC ordering.
+vp <- bind_rows(
+  partition("pbw",       "PBW (linear)",  vp_data),
+  partition("pfvc",      "PFVC (linear)", vp_data),
+  partition("I(1/pbw)",  "PBW (1/x)",     vp_data),
+  partition("I(1/pfvc)", "PFVC (1/x)",    vp_data)
+) %>%
+  mutate(size_surrogate = factor(size_surrogate,
+           levels = c("PBW (linear)", "PFVC (linear)", "PBW (1/x)", "PFVC (1/x)")))
 results[["D_variance_partition"]] <- vp %>%
   pivot_longer(c(unique_size, unique_injury, shared, total_r2),
                names_to = "metric", values_to = "value") %>%
@@ -230,8 +246,10 @@ write_csv(summary_tbl,
           file.path(final_dir, paste0("elastance_fingerprints_summary_", site_name, ".csv")))
 
 message("Fingerprint summary:")
-message("  (A) Ers explained by size: R2(PBW)=", round(r2_size_pbw, 3),
-        ", R2(PFVC)=", round(r2_size_pfvc, 3))
+message("  (A) Ers ~ size R2 -- linear: PBW=", round(r2_size_pbw, 3),
+        ", PFVC=", round(r2_size_pfvc, 3),
+        " | 1/x: PBW=", round(r2_size_pbw_inv, 3),
+        ", PFVC=", round(r2_size_pfvc_inv, 3))
 message("  (B) Residual sex/race/height R2: ErsxPBW=", round(r2_sd_pbw, 3),
         ", ErsxPFVC=", round(r2_sd_pfvc, 3), " (error 2)")
 message("  (B2) Age slope per +10yr: Ers=", round(sl_ers, 2),
@@ -241,8 +259,11 @@ message("  (C) Residual ErsxPFVC vs injury R2=", round(r2_injury_pfvc, 3))
 message("  (C2) ErsxPFVC vs predicted FEV1/FVC: beta=", round(recoil_coef$estimate, 1),
         ", p=", signif(recoil_coef$p.value, 2),
         " (cor[PFVC,predFEV1FVC]=", round(cor_size_recoil, 2), ")")
-message("  (D) Unique injury variance of Ers (PFVC size axis)=",
-        round(vp$unique_injury[vp$size_surrogate == "PFVC"], 3))
+message("  (D) Unique size R2 (1/x form): PBW=",
+        round(vp$unique_size[vp$size_surrogate == "PBW (1/x)"], 3),
+        ", PFVC=", round(vp$unique_size[vp$size_surrogate == "PFVC (1/x)"], 3),
+        " | unique injury (1/x PFVC)=",
+        round(vp$unique_injury[vp$size_surrogate == "PFVC (1/x)"], 3))
 
 # =============================================================================
 # Figures
@@ -301,8 +322,10 @@ f2c <- ggplot(vp_long, aes(size_surrogate, variance, fill = component)) +
   geom_col(width = 0.6) +
   scale_fill_manual(values = c("Unique size" = "#0072B2", "Shared" = "#999999",
                                "Unique injury" = "#D55E00"), name = NULL) +
-  labs(x = "Size axis", y = "Share of Ers variance (R2)",
-       title = "Variance partition: size vs injury") + theme_minimal(base_size = 10)
+  labs(x = "Size axis (linear vs 1/x)", y = "Share of Ers variance (R2)",
+       title = "Variance partition: size vs injury") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
 fig_recoil <- (f2a | f2b | f2c) +
   plot_annotation(
     title = "Recoil signals (error 1): injury and predicted recoil, plus partition",
