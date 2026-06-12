@@ -408,8 +408,18 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
     data = surv_data
   )
 
-  message("Cox model:")
+  # Companion model with PFVC as the scaling exposure (mirrors the VT/PBW + PFVC
+  # mortality model), so the survival analysis carries both headline exposures.
+  cox_model_pfvc <- coxph(
+    Surv(surv_time, event) ~ pfvc + vtpbw + age10 +
+      sex_category + race_category + sf10 + sofa_total,
+    data = surv_data
+  )
+
+  message("Cox model (PBW/PFVC):")
   print(summary(cox_model))
+  message("Cox model (PFVC):")
+  print(summary(cox_model_pfvc))
 
   # Fit on the labelled pbwpfvc_tercile factor (not ntile()) so the strata carry
   # informative names instead of "ntile(pbwpfvc, 3)=1".
@@ -440,7 +450,10 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
   message("KM curves saved")
 
   sink(file.path(final_dir, paste0("cox_model_summary_", site_name, ".txt")))
+  cat("=== Cox model: PBW/PFVC + VT/PBW ===\n")
   print(summary(cox_model))
+  cat("\n=== Cox model: VT/PBW + PFVC ===\n")
+  print(summary(cox_model_pfvc))
   sink()
 } else {
   message("Skipping survival analysis: no mortality events in data")
@@ -670,17 +683,18 @@ results_long <- c(results_long, imap(vfd_cr_models, ~ {
                         exposure_labels[[.y]], "finegray", formula_str)
 }))
 
-# Survival (Cox proportional hazards -> hazard ratios)
+# 60-day death hazard (Cox proportional hazards -> hazard ratios). Two exposure
+# specs, mirroring the mortality models; HR > 1 = higher death hazard (worse), the
+# same direction as the mortality OR.
 if (exists("cox_model")) {
-  cox_formula <- paste(
-    "Surv(surv_time, event) ~ pbwpfvc + vtpbw + age10 +",
-    "sex_category + race_category + sf10 + sofa_total"
-  )
+  cox_covars  <- "vtpbw + age10 + sex_category + race_category + sf10 + sofa_total"
   results_long <- c(results_long, list(
     # Same vtpbw + pbwpfvc exposure spec as the mortality model — label it with
     # the shared convention so it collapses into one column cross-cohort.
-    extract_model_results(cox_model, "HR", "Survival",
-                          "VT/PBW + PBW/PFVC", "cox", cox_formula)
+    extract_model_results(cox_model, "HR", "Survival", "VT/PBW + PBW/PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ pbwpfvc +", cox_covars)),
+    extract_model_results(cox_model_pfvc, "HR", "Survival", "VT/PBW + PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ pfvc +", cox_covars))
   ))
 }
 
@@ -837,6 +851,10 @@ cox_model_spline <- if (exists("cox_model")) {
   coxph(Surv(surv_time, event) ~ pbwpfvc + vtpbw + ns(age_at_admission, 4) +
           sex_category + race_category + sf10 + sofa_total, data = surv_data)
 } else NULL
+cox_model_pfvc_spline <- if (exists("cox_model_pfvc")) {
+  coxph(Surv(surv_time, event) ~ pfvc + vtpbw + ns(age_at_admission, 4) +
+          sex_category + race_category + sf10 + sofa_total, data = surv_data)
+} else NULL
 
 # Fine-Gray refit with spline age (mirrors fit_vfd_finegray from section 4d2).
 fit_vfd_finegray_spline <- function(exposure_spec) {
@@ -867,10 +885,12 @@ if (!is.null(mortality_models)) {
                          "Mortality (in-hospital)", "OR", cross_sectional)))
 }
 
-# 60-day survival (Cox, HR) — the single multivariable model.
+# 60-day death hazard (Cox, HR) — PBW/PFVC and PFVC exposure specs.
 if (!is.null(cox_model_spline)) {
   residual_list <- c(residual_list, list(
     residual_conf_rows(cox_model, cox_model_spline, "VT/PBW + PBW/PFVC",
+                       "Survival (60-day)", "HR", surv_data),
+    residual_conf_rows(cox_model_pfvc, cox_model_pfvc_spline, "VT/PBW + PFVC",
                        "Survival (60-day)", "HR", surv_data)))
 }
 
@@ -1016,6 +1036,14 @@ ggsave(file.path(final_dir, paste0("bias_pbwpfvc_ratio_", site_name, ".pdf")),
        bias_pbwpfvc, width = 14, height = 18)
 
 message("All bias diagnostic plots saved")
+
+# NOTE: the federated per-percentile conditional-bias export that drives the POOLED
+# cross-cohort bias plots lives in a SEPARATE, deferred script — code/
+# cbias_federated_export.R — not this pipeline. After stratification some
+# (stratum x percentile) cells fall below n = 10, so those aggregates must be run
+# through the consortium's deterministic additive-masking pipeline before they can
+# leave a site, which is held until all sites confirm participation. The pooled
+# plots are likewise deferred in code/cbias_pooled_plots.R.
 
 # =============================================================================
 # 4i. Inclusion CONSORT diagram + PBW:PFVC-by-demographics figure (site QC)

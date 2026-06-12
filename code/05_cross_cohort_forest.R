@@ -83,13 +83,17 @@ term_order  <- c("VT/PFVC", "VT/PBW", "PFVC", "PBW/PFVC")
 model_order <- c("VT/PFVC", "VT/PBW", "VT/PFVC + VT/PBW", "VT/PBW + PFVC",
                  "VT/PBW + PBW/PFVC")
 
-# Reader-facing outcome labels (the regression tables store the terse mortality /
-# survival names; spell out the definition wherever an outcome is shown). The two
-# mortality endpoints differ: the logistic model is in-hospital mortality, the Cox
-# model is 60-day all-cause survival.
+# Reader-facing outcome labels. The regression tables store terse names; spell out
+# the definition wherever an outcome is shown. Both mortality endpoints point the
+# same direction (higher = worse): the logistic model is the in-hospital mortality
+# odds, and the Cox "Survival" model is really the 60-day death HAZARD (HR > 1 =
+# higher mortality) — so it is labelled as mortality, not survival, to avoid the
+# implication that higher = better. (The 28-day-VFD effect points the opposite way:
+# higher = more ventilator-free days = better.)
 outcome_display <- c(
-  "Mortality" = "Mortality (in-hospital)",
-  "Survival"  = "Survival (60-day)"
+  "Mortality"         = "Mortality (in-hospital)",
+  "Survival"          = "Mortality (60-day, HR)",
+  "Survival (60-day)" = "Mortality (60-day, HR)"
 )
 relabel_outcome <- function(x) unname(coalesce(outcome_display[as.character(x)], as.character(x)))
 
@@ -328,31 +332,32 @@ key_pooled <- pooled_coefs %>%
   transmute(analysis, term_label, estimate_type, group = "Pooled (RE)",
             estimate = pooled, conf_low = pooled_lo, conf_high = pooled_hi, kind = "Pooled")
 
-make_key_block <- function(outcomes, x_label, is_ratio) {
+# One block = one exposure across one set of outcomes (a single facet row of
+# outcome panels). PBW/PFVC and PFVC sit on very different coefficient scales, so
+# they are drawn on separate pages (below) rather than as shared-x facet rows.
+make_key_block <- function(exposure, outcomes, x_label, is_ratio) {
   null_value <- if (is_ratio) 1 else 0
-  site_b   <- key_site   %>% filter(analysis %in% outcomes)
-  pooled_b <- key_pooled %>% filter(analysis %in% outcomes)
+  site_b   <- key_site   %>% filter(analysis %in% outcomes, term_label == exposure)
+  pooled_b <- key_pooled %>% filter(analysis %in% outcomes, term_label == exposure)
   if (nrow(site_b) + nrow(pooled_b) == 0) return(NULL)
 
   # "Pooled (RE)" is the first y level → numeric position 1 (foot of each panel).
   group_levels <- c("Pooled (RE)", sort(setdiff(unique(site_b$group), "Pooled (RE)")))
   set_factors <- function(d) d %>% mutate(
-    group      = factor(group, levels = group_levels),
-    analysis   = factor(analysis, levels = outcomes, labels = relabel_outcome(outcomes)),
-    term_label = factor(term_label, levels = c("PBW/PFVC", "PFVC")))
+    group    = factor(group, levels = group_levels),
+    analysis = factor(analysis, levels = outcomes, labels = relabel_outcome(outcomes)))
   site_b   <- set_factors(site_b)
   pooled_b <- set_factors(pooled_b)
 
   # Pooled estimate as the classic forest-plot diamond: a horizontal diamond
   # spanning the 95% CI, centred on the pooled estimate, on the pooled row (y = 1).
-  # One polygon per facet cell (analysis x term_label).
+  # One polygon per outcome panel.
   yh <- 0.34
-  cell_id <- function(d) interaction(d$analysis, d$term_label, drop = TRUE)
   diamonds <- bind_rows(
-    transmute(pooled_b, analysis, term_label, cell = cell_id(pooled_b), x = conf_low,  y = 1),
-    transmute(pooled_b, analysis, term_label, cell = cell_id(pooled_b), x = estimate,  y = 1 + yh),
-    transmute(pooled_b, analysis, term_label, cell = cell_id(pooled_b), x = conf_high, y = 1),
-    transmute(pooled_b, analysis, term_label, cell = cell_id(pooled_b), x = estimate,  y = 1 - yh)
+    transmute(pooled_b, analysis, x = conf_low,  y = 1),
+    transmute(pooled_b, analysis, x = estimate,  y = 1 + yh),
+    transmute(pooled_b, analysis, x = conf_high, y = 1),
+    transmute(pooled_b, analysis, x = estimate,  y = 1 - yh)
   )
 
   pal <- c(site_colors, `Pooled (RE)` = "#000000")
@@ -360,37 +365,42 @@ make_key_block <- function(outcomes, x_label, is_ratio) {
     geom_vline(xintercept = null_value, linetype = "dashed", color = "grey50") +
     geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2) +
     geom_point(size = 2.3) +
-    geom_polygon(data = diamonds, aes(x = x, y = y, group = cell),
+    geom_polygon(data = diamonds, aes(x = x, y = y, group = analysis),
                  inherit.aes = FALSE, fill = "black", color = "black") +
-    facet_grid(term_label ~ analysis, scales = "free_x") +
+    facet_wrap(~ analysis, nrow = 1, scales = "free_x") +
     scale_color_manual(values = pal, guide = "none") +
     scale_y_discrete(limits = group_levels) +
     labs(x = x_label, y = "Cohort") +
     theme_minimal(base_size = 11) +
-    theme(strip.text.x = element_text(face = "bold"),
-          strip.text.y = element_text(face = "bold", angle = 0),
+    theme(strip.text = element_text(face = "bold"),
           panel.spacing = unit(0.6, "lines"),
           panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.5))
   if (is_ratio) p <- p + scale_x_log10()
   p
 }
 
-key_blocks <- list(
-  make_key_block(ratio_outcomes,  "OR / HR (95% CI), log scale", TRUE),
-  make_key_block(linear_outcomes, "Beta (95% CI)", FALSE)
-)
-key_blocks <- key_blocks[!map_lgl(key_blocks, is.null)]
-if (length(key_blocks) > 0) {
-  key_fig <- wrap_plots(key_blocks, ncol = 1) +
-    plot_annotation(
-      title = "Key scaling exposures across outcomes: PBW/PFVC and PFVC",
-      subtitle = paste0("Each exposure from its dose-adjusted model; per-site points + ",
-                        "black random-effects pooled diamond; dashed line = null"),
-      theme = theme(plot.title = element_text(face = "bold")))
-  ggsave(file.path(forest_dir, "forest_key_exposures.pdf"), key_fig,
-         width = 11, height = 7, limitsize = FALSE)
-  message("Key-exposure summary figure saved: forest_key_exposures.pdf")
+# One page per exposure: ratio outcomes (log OR/HR) above, linear mechanics
+# (Beta) below, each on its own free x-scale.
+key_exposure_rows <- c("PBW/PFVC", "PFVC")
+pdf(file.path(forest_dir, "forest_key_exposures.pdf"), width = 11, height = 5.5)
+for (exposure in key_exposure_rows) {
+  blocks <- list(
+    make_key_block(exposure, ratio_outcomes,  "OR / HR (95% CI), log scale", TRUE),
+    make_key_block(exposure, linear_outcomes, "Beta (95% CI)", FALSE)
+  )
+  blocks <- blocks[!map_lgl(blocks, is.null)]
+  if (length(blocks) == 0) next
+  print(
+    wrap_plots(blocks, ncol = 1) +
+      plot_annotation(
+        title = paste0("Key scaling exposure across outcomes: ", exposure),
+        subtitle = paste0("From its dose-adjusted model; per-site points + black ",
+                          "random-effects pooled diamond; dashed line = null"),
+        theme = theme(plot.title = element_text(face = "bold")))
+  )
 }
+invisible(dev.off())
+message("Key-exposure summary figure saved (one page per exposure): forest_key_exposures.pdf")
 
 # =============================================================================
 # Covariate forests for the demographic-bias and PFVC-vs-PBW analyses
@@ -573,7 +583,7 @@ if (length(evalue_files) == 0) {
     ) %>%
     arrange(analysis, model_spec, term_label) %>%
     transmute(
-      analysis = as.character(analysis),
+      analysis = relabel_outcome(analysis),
       Model = model_spec, Exposure = term_label, Type = estimate_type,
       Sites = k_sites,
       `Pooled (linear age)` = sprintf("%.2f (%.2f, %.2f)",
@@ -610,6 +620,7 @@ if (length(evalue_files) == 0) {
   # and the pooled E-value annotated. One panel per analysis; ratio scale (log x).
   forest_df <- pooled_ev %>%
     mutate(
+      analysis_lab = relabel_outcome(analysis),
       row_label = paste0(model_spec, " · ", term_label),
       ev_label  = sprintf("E %.2f / %.2f",
                           pooled_evalue_point,
@@ -628,7 +639,7 @@ if (length(evalue_files) == 0) {
     geom_errorbarh(aes(xmin = pooled_lin_lo, xmax = pooled_lin_hi), height = 0.22) +
     geom_point(size = 2.6, shape = 18) +
     geom_text(aes(label = ev_label), vjust = -0.9, size = 2.6) +
-    facet_wrap(~ analysis, scales = "free", ncol = 1) +
+    facet_wrap(~ analysis_lab, scales = "free", ncol = 1) +
     scale_x_log10() +
     labs(
       title = "Pooled per-SD estimates with meta-analytic E-values",
@@ -757,5 +768,11 @@ if (length(hist_files) > 0) {
     message("Pooled PBW:PFVC distribution figure saved")
   }
 }
+
+# NOTE: the pooled conditional-bias plots are DEFERRED to a separate script —
+# code/cbias_pooled_plots.R — because their per-site percentile exports include
+# (stratum x percentile) cells with n < 10 that must pass through the consortium's
+# additive-masking pipeline first (held until all sites confirm). That script
+# reads the masked cbias_export_<site>.csv files and is not part of this pipeline.
 
 message("Script 05 complete. Aggregated results and figures in: ", cross_dir)
