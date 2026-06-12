@@ -10,9 +10,11 @@ library(gtsummary)
 library(gt)
 library(survival)
 library(survminer)
+library(splines)
 library(patchwork)
 library(broom)
 library(algorithmDiagnostics)
+library(EValue)
 
 source("utils/config.R")
 source("utils/consort_diagram.R")
@@ -675,8 +677,10 @@ if (exists("cox_model")) {
     "sex_category + race_category + sf10 + sofa_total"
   )
   results_long <- c(results_long, list(
+    # Same vtpbw + pbwpfvc exposure spec as the mortality model — label it with
+    # the shared convention so it collapses into one column cross-cohort.
     extract_model_results(cox_model, "HR", "Survival",
-                          "PBW/PFVC + VT/PBW", "cox", cox_formula)
+                          "VT/PBW + PBW/PFVC", "cox", cox_formula)
   ))
 }
 
@@ -707,6 +711,223 @@ write_parquet(regression_results_long,
 message("Unified regression results table: ", nrow(regression_results_long),
         " rows across ", n_distinct(regression_results_long$analysis), " analyses; saved to ",
         file.path(final_dir, paste0("regression_results_long_", site_name, ".csv")))
+
+# =============================================================================
+# 4g2. Residual confounding: E-values + age functional-form (spline) sensitivity
+# =============================================================================
+# Because PBW and PFVC are DETERMINISTIC functions of {height, age, sex, race},
+# those four variables are the complete parent set of every PBW/PFVC-derived
+# exposure, and the parents of treatment are a sufficient backdoor adjustment set.
+# The confounder space is therefore closed (not open-ended), and residual
+# confounding can only enter through the gap between that full parent set and what
+# the models actually adjust for. Height is NOT in that gap: in the DAG it reaches
+# mortality only through predicted lung size (height -> lung size -> strain ->
+# mortality), so it lies on the causal pathway / is the identifying variation in
+# the exposure, not a backdoor — conditioning on it is over-adjustment. The single
+# enumerable residual confounder is therefore the FUNCTIONAL FORM of age (a genuine
+# confounder, entered linearly in the main models). Anything beyond that would have
+# to be a truly unmeasured common cause acting outside this deterministic structure
+# — exactly what the E-value bounds.
+#
+# This section reports, for every ratio-scale exposure estimate (mortality OR,
+# 60-day survival HR, 28-day liberation Fine-Gray SHR):
+#   1. the per-1-SD estimate under LINEAR age (the main-model specification),
+#   2. the per-1-SD estimate under SPLINE age (race + ns(age, 4) + sex + SOFA + SF):
+#      the direct bound on nonlinear-age confounding — an estimate unchanged under
+#      flexible age is robust to it; one that collapses was carrying age, and
+#   3. the E-value (point and CI-limit) for the linear-age estimate: the minimum
+#      association, on the risk-ratio scale, an unmeasured confounder would need
+#      with BOTH the exposure and the outcome to explain the estimate (or, for the
+#      CI E-value, to move the CI to include the null).
+#
+# Estimates are rescaled to a 1-SD increase in the exposure (E-values on the raw
+# per-unit scale would sit artificially close to 1). Mortality and liberation are
+# common outcomes, so each OR/HR is converted to an approximate risk ratio before
+# the E-value (rare = FALSE; VanderWeele & Ding, Ann Intern Med 2017); the
+# Fine-Gray subdistribution HR uses the same common-outcome HR conversion.
+
+EXPOSURE_TERMS <- c("vtpfvc", "vtpbw", "pfvc", "pbwpfvc")
+exposure_term_labels_ev <- c(vtpfvc = "VT/PFVC", vtpbw = "VT/PBW",
+                             pfvc = "PFVC", pbwpfvc = "PBW/PFVC")
+
+# Spline-age covariate set (mirrors the linear-age set, age10 -> ns(age, 4)).
+# Reused for the mortality and Fine-Gray refits below; the Cox refit is spelled
+# out separately because it carries its own exposure terms.
+spline_covars <- "race_category + ns(age_at_admission, 4) + sex_category + sofa_total + sf10"
+
+# Per-SD-rescaled ratio estimate + 95% CI from a fitted model. beta and its SE
+# are the log-OR / log-HR (link scale); multiplying by the exposure SD gives the
+# per-SD log-ratio, exponentiated back to the ratio scale.
+persd_ratio <- function(model, term, exposure_sd) {
+  beta <- coef(model)[[term]]
+  se   <- sqrt(diag(vcov(model)))[[term]]
+  list(
+    estimate  = exp(beta * exposure_sd),
+    conf_low  = exp((beta - 1.96 * se) * exposure_sd),
+    conf_high = exp((beta + 1.96 * se) * exposure_sd)
+  )
+}
+
+# Per-SD estimate + CI for every exposure term in a model (no E-value). The SD is
+# the marginal, patient-level SD of the exposure in sd_data, so the linear- and
+# spline-age fits are compared on an identical contrast.
+persd_terms <- function(model, sd_data, terms = EXPOSURE_TERMS) {
+  present <- intersect(terms, names(coef(model)))
+  map_dfr(present, function(tm) {
+    exposure_sd <- sd(sd_data[[tm]], na.rm = TRUE)
+    pr <- persd_ratio(model, tm, exposure_sd)
+    tibble(term = tm, exposure_sd = exposure_sd,
+           estimate = pr$estimate, conf_low = pr$conf_low, conf_high = pr$conf_high)
+  })
+}
+
+# Point and CI E-values for one per-SD ratio estimate. type is "OR" or "HR";
+# both use rare = FALSE (common outcomes). The CI E-value is the non-NA bound
+# the package returns (the limit nearest the null; 1 if the CI crosses it).
+evalue_for <- function(est, lo, hi, type) {
+  ev_mat <- switch(type,
+    OR = EValue::evalues.OR(est, lo, hi, rare = FALSE),
+    HR = EValue::evalues.HR(est, lo, hi, rare = FALSE)
+  )
+  ev    <- ev_mat["E-values", ]
+  ci_ev <- ev[c("lower", "upper")]
+  ci_ev <- ci_ev[!is.na(ci_ev)]
+  list(evalue_point = unname(ev[["point"]]),
+       evalue_ci    = if (length(ci_ev)) unname(ci_ev[1]) else NA_real_)
+}
+
+# One model's exposure rows: per-SD estimate under linear age (model_lin) and
+# under spline age (model_spl) side by side, plus the E-value for the linear-age
+# estimate. Both fits use the same sd_data so the per-SD contrast is identical.
+residual_conf_rows <- function(model_lin, model_spl, model_spec, analysis, type, sd_data) {
+  lin <- persd_terms(model_lin, sd_data)
+  spl <- persd_terms(model_spl, sd_data)
+  if (nrow(lin) == 0) return(tibble())
+  ev  <- pmap_dfr(list(lin$estimate, lin$conf_low, lin$conf_high),
+                  function(e, l, h) as_tibble(evalue_for(e, l, h, type)))
+  spl_i <- match(lin$term, spl$term)
+  tibble(
+    analysis      = analysis,
+    model_spec    = model_spec,
+    term          = lin$term,
+    term_label    = unname(exposure_term_labels_ev[lin$term]),
+    estimate_type = type,
+    exposure_sd   = lin$exposure_sd,
+    est_linage    = lin$estimate,
+    lo_linage     = lin$conf_low,
+    hi_linage     = lin$conf_high,
+    est_splineage = spl$estimate[spl_i],
+    lo_splineage  = spl$conf_low[spl_i],
+    hi_splineage  = spl$conf_high[spl_i],
+    evalue_point  = ev$evalue_point,
+    evalue_ci     = ev$evalue_ci
+  )
+}
+
+# --- Spline-age refits of each ratio model (age10 -> ns(age_at_admission, 4)) ---
+# The exposure specs are dosing ratios, never DP-derived, so no BMI is added.
+
+mortality_models_spline <- if (!is.null(mortality_models)) {
+  map(exposure_specs, ~ glm(
+    as.formula(paste("deceased ~", .x, "+", spline_covars)),
+    data = cross_sectional, family = binomial))
+} else NULL
+
+cox_model_spline <- if (exists("cox_model")) {
+  coxph(Surv(surv_time, event) ~ pbwpfvc + vtpbw + ns(age_at_admission, 4) +
+          sex_category + race_category + sf10 + sofa_total, data = surv_data)
+} else NULL
+
+# Fine-Gray refit with spline age (mirrors fit_vfd_finegray from section 4d2).
+fit_vfd_finegray_spline <- function(exposure_spec) {
+  model_rhs <- paste(exposure_spec, "+", spline_covars)
+  rhs_vars  <- all.vars(as.formula(paste("~", model_rhs)))
+  df <- cross_sectional %>%
+    mutate(vfd_status_f = factor(vfd_status, levels = c(0, 1, 2),
+                                 labels = c("censored", "extubation", "death"))) %>%
+    select(vfd_time, vfd_status_f, all_of(rhs_vars)) %>%
+    filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f)) %>%
+    drop_na(all_of(rhs_vars))
+  fg <- survival::finegray(survival::Surv(vfd_time, vfd_status_f) ~ ., data = df,
+                           etype = "extubation")
+  survival::coxph(
+    as.formula(paste0("survival::Surv(fgstart, fgstop, fgstatus) ~ ", model_rhs)),
+    weights = fgwt, data = fg
+  )
+}
+vfd_cr_models_spline <- map(exposure_specs, fit_vfd_finegray_spline)
+
+# --- Assemble residual-confounding rows across all ratio models ----------------
+residual_list <- list()
+
+# In-hospital mortality (logistic, OR) — one model per exposure specification.
+if (!is.null(mortality_models)) {
+  residual_list <- c(residual_list, imap(mortality_models,
+    ~ residual_conf_rows(.x, mortality_models_spline[[.y]], exposure_labels[[.y]],
+                         "Mortality (in-hospital)", "OR", cross_sectional)))
+}
+
+# 60-day survival (Cox, HR) — the single multivariable model.
+if (!is.null(cox_model_spline)) {
+  residual_list <- c(residual_list, list(
+    residual_conf_rows(cox_model, cox_model_spline, "VT/PBW + PBW/PFVC",
+                       "Survival (60-day)", "HR", surv_data)))
+}
+
+# 28-day ventilator liberation (Fine-Gray subdistribution HR). The finegray()
+# expansion duplicates rows per subject, so the per-SD contrast uses the
+# patient-level SD from the cross-sectional cohort (rows with a valid VFD time),
+# not the expanded risk set.
+vfd_sd_data <- cross_sectional %>% filter(!is.na(vfd_time), vfd_time > 0)
+residual_list <- c(residual_list, imap(vfd_cr_models,
+  ~ residual_conf_rows(.x, vfd_cr_models_spline[[.y]], exposure_labels[[.y]],
+                       "28-day VFDs (liberation)", "HR", vfd_sd_data)))
+
+residual_confounding <- bind_rows(residual_list) %>%
+  mutate(analysis = factor(analysis, levels = c(
+    "Survival (60-day)", "Mortality (in-hospital)", "28-day VFDs (liberation)"))) %>%
+  arrange(analysis) %>%               # stable: preserves model & term order within analysis
+  mutate(analysis = as.character(analysis)) %>%
+  mutate(site = site_name, .before = 1)
+
+# Filename kept as `evalues_<site>` for continuity; the table now also carries the
+# linear- vs spline-age estimates alongside the E-values.
+write_csv(residual_confounding, file.path(final_dir, paste0("evalues_", site_name, ".csv")))
+
+# Rendered table: grouped by analysis, one row per (model spec, exposure).
+evalue_gt <- residual_confounding %>%
+  transmute(
+    analysis,
+    Model                 = model_spec,
+    Exposure              = term_label,
+    Type                  = estimate_type,
+    `Linear-age estimate` = sprintf("%.2f (%.2f, %.2f)", est_linage, lo_linage, hi_linage),
+    `Spline-age estimate` = sprintf("%.2f (%.2f, %.2f)",
+                                    est_splineage, lo_splineage, hi_splineage),
+    `E-value (estimate)`  = sprintf("%.2f", evalue_point),
+    `E-value (95% CI)`    = ifelse(is.na(evalue_ci), "—", sprintf("%.2f", evalue_ci))
+  ) %>%
+  gt::gt(groupname_col = "analysis") %>%
+  gt::tab_header(
+    title = "Residual confounding: per-SD estimates, age functional-form sensitivity, and E-values",
+    subtitle = paste0(
+      site_name,
+      " — per-1-SD exposure contrasts. Linear- vs spline-age estimates bound the ",
+      "only enumerable residual confounder (nonlinear age); the exposures are ",
+      "deterministic in {height, age, sex, race} and height lies on the causal ",
+      "pathway, not a backdoor. The E-value is the minimum risk-ratio association ",
+      "an unmeasured confounder would need with both the exposure and the outcome ",
+      "to explain the estimate (CI E-value: to move the CI to include the null).")
+  ) %>%
+  gt::cols_align("left", columns = c(Model, Exposure)) %>%
+  gt::sub_missing(missing_text = "—")
+
+gt::gtsave(evalue_gt, file.path(final_dir, paste0("table_evalues_", site_name, ".html")))
+gt::gtsave(evalue_gt, file.path(final_dir, paste0("table_evalues_", site_name, ".pdf")))
+message("Residual-confounding table written (", nrow(residual_confounding),
+        " ratio-scale exposure estimates across ",
+        n_distinct(residual_confounding$analysis),
+        " analyses; linear/spline age + E-values)")
 
 # =============================================================================
 # 4h. Conditional bias diagnostic plots (algorithmDiagnostics)
