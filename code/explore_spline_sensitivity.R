@@ -21,12 +21,15 @@
 # deterministic function of age/height/sex/race, entered only linearly/categorically.
 #
 # This walks a covariate-flexibility ladder and re-checks the evidence ratios:
-#   1. Linear (base)        -- race + age10 + sex + SOFA + SF
-#   2. + height             -- add linear height (OVER-adjustment; diagnostic only)
-#   3. + spline age & height-- ns(age,4) + ns(height,4) + sex + race + SOFA + SF
-# With a fully flexible demographic model PBW/PFVC MUST be absorbed (it is a function
-# of those demographics), so read this as a robustness/identifiability gradient, not
-# a test of whether the ratio is "real".
+#   1. Linear (base)             -- race + age10 + sex + SOFA + SF
+#   2. + spline age (NO height)  -- race + ns(age,4) + sex + SOFA + SF   <-- KEY rung
+#   3. + spline age & height     -- ...+ ns(height,4)   (over-adjusted contrast only)
+# Rung 2 is the causally-correct specification: it flexibly adjusts the genuine
+# confounder (age) without over-adjusting for height (a non-confounder on the causal
+# path -- height -> lung size -> strain -> mortality, with no other path). If the
+# PFVC / PBW-PFVC signal SURVIVES rung 2, it is robust to nonlinear age confounding
+# (the real concern). Rung 3 is included only to show that adding height collapses it
+# via over-adjustment, NOT to argue the signal is spurious.
 #
 # Also includes a quick elastance-anomaly check: refit the lone surviving >1000 cell
 # (VT/PBW + PFVC for Elastance) on the log scale to test whether it was a heavy-tail
@@ -78,13 +81,19 @@ outcomes <- list(
   list(key = "Mechanical power", var = "mechanical_power", type = "linear",   bmi = TRUE)
 )
 
-covar_levels <- c("Linear (base)", "+ height", "+ spline age & height")
+# The KEY rung is "+ spline age (no height)": it flexibly adjusts the genuine
+# confounder (age, which has non-lung paths to mortality) WITHOUT over-adjusting for
+# height (a non-confounder on the causal path). "+ spline age & height" is shown only
+# as the over-adjusted contrast -- the combined panel cannot tell whether a collapse
+# is due to proper age adjustment or improper height over-adjustment.
+covar_levels <- c("Linear (base)", "+ spline age (no height)", "+ spline age & height")
 build_covars <- function(outcome, level) {
   base <- switch(level,
-    "Linear (base)"         = "race_category + age10 + sex_category + sofa_total + sf10",
-    "+ height"              = "race_category + age10 + sex_category + sofa_total + sf10 + height10",
-    "+ spline age & height" = paste("race_category + ns(age_at_admission, 4) + sex_category +",
-                                    "sofa_total + sf10 + ns(height_cm, 4)"))
+    "Linear (base)"            = "race_category + age10 + sex_category + sofa_total + sf10",
+    "+ spline age (no height)" = paste("race_category + ns(age_at_admission, 4) +",
+                                       "sex_category + sofa_total + sf10"),
+    "+ spline age & height"    = paste("race_category + ns(age_at_admission, 4) + sex_category +",
+                                       "sofa_total + sf10 + ns(height_cm, 4)"))
   if (outcome$bmi) base <- paste(base, "+ bmi")
   base
 }
@@ -158,10 +167,10 @@ heat <- ggplot(aic_df, aes(outcome, spec, fill = log10(er_trunc))) +
     midpoint = 0, limits = c(log10(0.001), log10(1000)),
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")) +
   labs(
-    title = "Identifiability diagnostic: evidence ratios vs covariate flexibility",
+    title = "Flexible age adjustment without height over-adjustment",
     subtitle = paste0(site_name,
-      " — height is over-adjustment (not a confounder); age/race are confounders that ",
-      "ALSO carry the size mechanism, so the collapse overstates confounding, not a model"),
+      " — middle panel (spline age, NO height) is the causally-correct adjustment: if ",
+      "the PFVC/ratio signal survives there, it is robust to nonlinear age confounding"),
     x = "Outcome", y = "Exposure specification") +
   theme_minimal(base_size = 10) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -170,10 +179,9 @@ ggsave(file.path(final_dir, paste0("spline_sensitivity_", site_name, ".pdf")),
        heat, width = 16, height = 6)
 
 # =============================================================================
-# Elastance anomaly: raw vs log scale (with the +height covariate set)
+# Elastance anomaly: raw vs log scale (linear + height covariate set)
 # =============================================================================
-el_outcome <- list(key = "Elastance", var = "ers", type = "linear", bmi = TRUE)
-el_covars  <- build_covars(el_outcome, "+ height")
+el_covars  <- "race_category + age10 + sex_category + sofa_total + sf10 + height10 + bmi"
 el_data    <- mech %>% filter(is.finite(ers), ers > 0)
 er_for <- function(response) {
   aic_full <- AIC(lm(as.formula(paste(response, "~ vtpbw + pfvc +", el_covars)), data = el_data))
