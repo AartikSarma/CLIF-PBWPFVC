@@ -19,6 +19,7 @@
 # Outputs (mortality): final/regression_ers_age_interaction_<site>.html
 #                      final/ers_age_interaction_<site>.csv
 #                      final/ers_age_interaction_slopes_<site>.{csv,pdf}
+#                      final/ers_age_interaction_flexage_<site>.csv  (spline-age re-test)
 # Outputs (VFDs)     : final/regression_ers_age_interaction_vfd_<site>.html
 #                      final/ers_age_interaction_vfd_<site>.csv
 # =============================================================================
@@ -30,6 +31,7 @@ library(gtsummary)
 library(gt)
 library(broom)
 library(survival)
+library(splines)
 library(marginaleffects)
 
 source("utils/config.R")
@@ -202,6 +204,39 @@ ggsave(file.path(final_dir, paste0("ers_age_interaction_slopes_", site_name, ".p
        slopes_plot, width = 8, height = 5)
 
 message("Slope-by-age plot written (mortality outcome)")
+
+# =============================================================================
+# Flexible-age re-test: does the interaction survive a SPLINE age main effect?
+# =============================================================================
+# The interaction above enters age only LINEARLY (z * age10), so a nonlinear
+# age-mortality relationship could be absorbed by the interaction term rather than
+# reflecting true effect modification. Re-test with a flexible (spline) age main
+# effect: the null is exposure + ns(age, 4); the interaction adds exposure:age10.
+# A non-significant LRT here means the original interaction was largely the linear-
+# age misspecification, not effect modification. Mortality outcome.
+ers_flex_retest <- imap_dfr(ers_specs, function(label, z) {
+  f0 <- as.formula(paste0("deceased ~ ", z, " + ns(age_at_admission, 4) + ", adjustment))
+  f1 <- as.formula(paste0("deceased ~ ", z, " + ns(age_at_admission, 4) + ",
+                          z, ":age10 + ", adjustment))
+  m0 <- glm(f0, data = model_data, family = binomial)
+  m1 <- glm(f1, data = model_data, family = binomial)
+  lrt <- anova(m0, m1, test = "LRT")
+  or  <- broom::tidy(m1, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == paste0(z, ":age10"))
+  tibble(site = site_name, exposure = label, term = paste0(z, ":age10"),
+         n_obs = stats::nobs(m1),
+         interaction_or_flexage = or$estimate, conf_low = or$conf.low,
+         conf_high = or$conf.high, p_value = or$p.value,
+         lrt_chisq = lrt$Deviance[2], lrt_df = lrt$Df[2], lrt_p = lrt$`Pr(>Chi)`[2])
+})
+write_csv(ers_flex_retest,
+          file.path(final_dir, paste0("ers_age_interaction_flexage_", site_name, ".csv")))
+message("Flexible-age (spline main effect) re-test of the elastance x age interaction:")
+pwalk(ers_flex_retest, function(exposure, interaction_or_flexage, lrt_p, ...) {
+  message("  ", exposure, ": interaction OR (flex age) = ", round(interaction_or_flexage, 3),
+          ", LRT p = ", signif(lrt_p, 3),
+          if (lrt_p > 0.05) "  -> not robust to nonlinear age" else "")
+})
 
 # =============================================================================
 # Second outcome: 28-day VFDs (competing risks) x age interaction
