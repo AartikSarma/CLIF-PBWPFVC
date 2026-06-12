@@ -20,6 +20,7 @@
 #                      final/ers_age_interaction_<site>.csv
 #                      final/ers_age_interaction_slopes_<site>.{csv,pdf}
 #                      final/ers_age_interaction_flexage_<site>.csv  (spline-age re-test)
+#                      final/ers_age_interaction_flexage_slopes_<site>.{csv,pdf}
 # Outputs (VFDs)     : final/regression_ers_age_interaction_vfd_<site>.html
 #                      final/ers_age_interaction_vfd_<site>.csv
 # =============================================================================
@@ -237,6 +238,48 @@ pwalk(ers_flex_retest, function(exposure, interaction_or_flexage, lrt_p, ...) {
           ", LRT p = ", signif(lrt_p, 3),
           if (lrt_p > 0.05) "  -> not robust to nonlinear age" else "")
 })
+
+# =============================================================================
+# Marginal-effects plot from the FLEXIBLE-age interaction model
+# =============================================================================
+# The elastance slope on mortality (change in predicted probability per 1 SD) across
+# age, from the model with a SPLINE age main effect (ns(age10, 4)) plus the linear
+# exposure:age10 interaction. Because the age main effect is flexible, the curve is
+# not forced linear and the modification is credible (it survives the spline-age LRT,
+# at least for the PFVC normalization). age10 is used in both the spline and the
+# interaction so marginaleffects can vary age consistently.
+ers_flex_slopes <- imap_dfr(ers_specs, function(label, z) {
+  m <- glm(as.formula(paste0("deceased ~ ", z, " + ns(age10, 4) + ", z, ":age10 + ", adjustment)),
+           data = model_data, family = binomial)
+  age_grid <- seq(quantile(model_data$age10, 0.05, na.rm = TRUE),
+                  quantile(model_data$age10, 0.95, na.rm = TRUE), length.out = 40)
+  slopes(m, variables = z, newdata = datagrid(model = m, age10 = age_grid)) %>%
+    as_tibble() %>%
+    transmute(exposure = label, age_years = age10 * 10, slope = estimate,
+              conf_low = conf.low, conf_high = conf.high)
+})
+write_csv(ers_flex_slopes,
+          file.path(final_dir, paste0("ers_age_interaction_flexage_slopes_", site_name, ".csv")))
+
+okabe_ito <- c("#E69F00", "#0072B2")
+ers_flex_plot <- ggplot(ers_flex_slopes,
+                        aes(age_years, slope, color = exposure, fill = exposure)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_ribbon(aes(ymin = conf_low, ymax = conf_high), alpha = 0.15, color = NA) +
+  geom_line(linewidth = 0.8) +
+  scale_color_manual(values = okabe_ito, name = "Normalized elastance") +
+  scale_fill_manual(values = okabe_ito, guide = "none") +
+  labs(
+    title = "Elastance effect on mortality across age (flexible age main effect)",
+    subtitle = paste0(site_name,
+      " — change in predicted mortality per 1 SD elastance; spline age main effect, ",
+      "so the modification is not an artifact of forcing age linear"),
+    x = "Age (years)",
+    y = "Marginal effect on mortality probability (per SD)") +
+  theme_minimal(base_size = 11)
+ggsave(file.path(final_dir, paste0("ers_age_interaction_flexage_slopes_", site_name, ".pdf")),
+       ers_flex_plot, width = 8, height = 5)
+message("Flexible-age marginal-effects plot written.")
 
 # =============================================================================
 # Second outcome: 28-day VFDs (competing risks) x age interaction
