@@ -23,9 +23,11 @@
 # side (a term's signal vanishes as it becomes collinear with the flexible age basis).
 #
 # Inputs : output/<site>/intermediate/analysis_cross_sectional.parquet (script 03)
-# Outputs: final/spline_sensitivity_<site>.csv     (AIC / evidence ratios, both age forms)
-#          final/spline_sensitivity_<site>.pdf      (heatmaps: linear vs spline age)
-#          final/spline_sensitivity_vif_<site>.csv  (VIF of the size terms per age form)
+# Outputs: final/spline_sensitivity_<site>.csv        (AIC / evidence ratios, both age forms)
+#          final/spline_sensitivity_<site>.pdf         (heatmaps: linear vs spline age)
+#          final/spline_sensitivity_vif_<site>.csv     (VIF of the size terms per age form)
+#          final/spline_sensitivity_coefs_<site>.csv   (exposure coefficients, both age forms)
+#          final/spline_sensitivity_coefs_<site>.html  (formatted side-by-side coef table)
 # =============================================================================
 
 library(tidyverse)
@@ -33,6 +35,7 @@ library(arrow)
 library(here)
 library(survival)
 library(splines)
+library(gt)
 
 source("utils/config.R")
 site_name <- config$site_name
@@ -79,12 +82,21 @@ build_covars <- function(outcome, level) {
   base
 }
 
-aic_one <- function(outcome, spec_rhs, level) {
+# Exposure terms to report in the regression table (the size / dosing terms; the
+# covariates are not tabulated).
+EXPOSURE_TERMS <- c("vtpfvc", "vtpbw", "pfvc", "pbwpfvc")
+TERM_LABELS <- c(vtpfvc = "VT/PFVC", vtpbw = "VT/PBW",
+                 pfvc = "PFVC", pbwpfvc = "PBW/PFVC")
+
+# Fit one model and return its AIC plus the tidy exposure coefficients (OR for
+# mortality, subdistribution HR for VFDs, beta for the linear mechanics outcomes).
+fit_one <- function(outcome, spec_rhs, level) {
   rhs <- paste(spec_rhs, "+", build_covars(outcome, level))
+  exponentiate <- outcome$type %in% c("logistic", "finegray")
   if (outcome$type == "logistic") {
-    AIC(glm(as.formula(paste("deceased ~", rhs)), data = mech, family = binomial))
+    m <- glm(as.formula(paste("deceased ~", rhs)), data = mech, family = binomial)
   } else if (outcome$type == "linear") {
-    AIC(lm(as.formula(paste(outcome$var, "~", rhs)), data = mech))
+    m <- lm(as.formula(paste(outcome$var, "~", rhs)), data = mech)
   } else { # competing-risks Fine-Gray for 28-day VFDs
     needed <- all.vars(as.formula(paste("~", rhs)))
     df <- mech %>%
@@ -94,22 +106,31 @@ aic_one <- function(outcome, spec_rhs, level) {
       filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f)) %>%
       drop_na(all_of(needed))
     fg <- finegray(Surv(vfd_time, vfd_status_f) ~ ., data = df, etype = "extubation")
-    AIC(coxph(as.formula(paste0("Surv(fgstart, fgstop, fgstatus) ~ ", rhs)),
-              weights = fgwt, data = fg))
+    m <- coxph(as.formula(paste0("Surv(fgstart, fgstop, fgstatus) ~ ", rhs)),
+               weights = fgwt, data = fg)
   }
+  est_type <- switch(outcome$type, logistic = "OR", finegray = "SHR", linear = "Beta")
+  coefs <- broom::tidy(m, conf.int = TRUE, exponentiate = exponentiate) %>%
+    filter(term %in% EXPOSURE_TERMS) %>%
+    transmute(term, estimate, conf_low = conf.low, conf_high = conf.high, p_value = p.value)
+  list(aic = AIC(m), n_obs = stats::nobs(m), est_type = est_type, coefs = coefs)
 }
 
 # =============================================================================
-# Evidence ratios across the covariate-flexibility ladder
+# Fit every outcome x spec x age-form once; derive evidence ratios and a coef table
 # =============================================================================
-aic_df <- expand_grid(level = covar_levels, outcome_i = seq_along(outcomes),
-                      spec = names(specs)) %>%
+grid <- expand_grid(level = covar_levels, outcome_i = seq_along(outcomes),
+                    spec = names(specs)) %>%
   mutate(
     outcome = map_chr(outcome_i, ~ outcomes[[.x]]$key),
-    aic = pmap_dbl(list(outcome_i, spec, level), function(oi, sp, lv) {
-      aic_one(outcomes[[oi]], specs[[sp]], lv)
+    res = pmap(list(outcome_i, spec, level), function(oi, sp, lv) {
+      fit_one(outcomes[[oi]], specs[[sp]], lv)
     })
-  ) %>%
+  )
+
+aic_df <- grid %>%
+  mutate(aic = map_dbl(res, "aic")) %>%
+  select(-res) %>%
   group_by(level, outcome) %>%
   mutate(
     evidence_ratio = exp(-0.5 * (aic - aic[spec == "VT/PBW"])),
@@ -129,6 +150,44 @@ aic_df <- expand_grid(level = covar_levels, outcome_i = seq_along(outcomes),
   select(-outcome_i)
 
 write_csv(aic_df, file.path(final_dir, paste0("spline_sensitivity_", site_name, ".csv")))
+
+# =============================================================================
+# Regression results table: exposure coefficients, linear vs spline age
+# =============================================================================
+# Effect sizes (not just fit): the exposure-term estimates from every model -- OR
+# (mortality), subdistribution HR (28-day VFDs), beta (linear mechanics outcomes) --
+# so the sensitivity can be read as "do the exposure estimates change when age is
+# entered flexibly?", alongside the AIC evidence ratios above.
+reg_df <- grid %>%
+  mutate(est_type = map_chr(res, "est_type"),
+         n_obs    = map_int(res, "n_obs"),
+         coefs    = map(res, "coefs")) %>%
+  select(level, outcome, spec, est_type, n_obs, coefs) %>%
+  unnest(coefs) %>%
+  mutate(
+    term    = recode(term, !!!TERM_LABELS),
+    outcome = factor(outcome, levels = c("Mortality", "28-day VFDs", "Compliance",
+                                         "Elastance", "Static DP", "Mechanical power")),
+    spec    = factor(spec, levels = names(specs)),
+    level   = factor(level, levels = covar_levels)
+  ) %>%
+  arrange(outcome, spec, term, level)
+write_csv(reg_df, file.path(final_dir, paste0("spline_sensitivity_coefs_", site_name, ".csv")))
+
+# Formatted side-by-side table: estimate (95% CI) under linear vs spline age.
+reg_wide <- reg_df %>%
+  mutate(cell = sprintf("%.2f (%.2f, %.2f)", estimate, conf_low, conf_high)) %>%
+  select(outcome, spec, term, est_type, level, cell) %>%
+  pivot_wider(names_from = level, values_from = cell)
+
+reg_gt <- reg_wide %>%
+  gt(groupname_col = "outcome") %>%
+  cols_label(spec = "Exposure model", term = "Term", est_type = "Estimate") %>%
+  tab_header(
+    title = "Exposure coefficients: linear vs spline age (no height)",
+    subtitle = paste0(site_name,
+      " — OR (mortality), SHR (28-day VFDs), beta (mechanics outcomes); 95% CI"))
+gtsave(reg_gt, file.path(final_dir, paste0("spline_sensitivity_coefs_", site_name, ".html")))
 
 message("Evidence ratio (vs VT/PBW) for VT/PBW + PBW/PFVC, linear vs spline age:")
 aic_df %>%
