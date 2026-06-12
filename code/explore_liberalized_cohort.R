@@ -25,12 +25,11 @@
 # remains -- the liberalized estimate is the strain dose-response, NOT a clean
 # "PBW-mis-sizing" effect.
 #
-# NOTE (causal): the covariate ladder below includes height and spline-height as a
-# COLLINEARITY diagnostic. Height is NOT a confounder (no path to mortality except
-# via lung size), so adjusting for it is over-adjustment, not a preferred model; the
-# VIF/ER "with height/spline" columns show what over-adjustment does, not the right
-# specification. The dose-response model adjusts for age/height flexibly for the same
-# diagnostic reason -- it is conservative (likely biased toward the null).
+# NOTE (causal): height is NOT adjusted for anywhere here. In the DAG it has no path
+# to mortality except through lung size (height -> lung size -> strain -> mortality),
+# so it is a determinant of the exposure on the causal path, and conditioning on it
+# is over-adjustment that removes the mechanism. Age is the genuine confounder and is
+# adjusted flexibly (linear vs spline) in the ladder and the dose-response.
 #
 # Inputs : output/<site>/intermediate/analysis_all_eligible_timepoints.parquet (script 03)
 #          output/<site>/intermediate/cohort_weights.parquet                    (script 01)
@@ -89,12 +88,13 @@ walk2(cohort_list, names(cohort_list), function(d, nm) {
 # =============================================================================
 # VIF and mortality evidence ratio across the covariate-flexibility ladder
 # =============================================================================
-covar_levels <- c("Linear (base)", "+ height", "+ spline age & height")
+# Two age specifications, both without height (height is over-adjustment, not a
+# confounder -- see header).
+covar_levels <- c("Linear age", "Spline age")
 build_covars <- function(level) switch(level,
-  "Linear (base)"         = "race_category + age10 + sex_category + sofa_total + sf10",
-  "+ height"              = "race_category + age10 + sex_category + sofa_total + sf10 + height10",
-  "+ spline age & height" = paste("race_category + ns(age_at_admission, 4) + sex_category +",
-                                  "sofa_total + sf10 + ns(height_cm, 4)"))
+  "Linear age" = "race_category + age10 + sex_category + sofa_total + sf10",
+  "Spline age" = paste("race_category + ns(age_at_admission, 4) + sex_category +",
+                       "sofa_total + sf10"))
 
 vif_term <- function(d, target, others)
   1 / (1 - summary(lm(as.formula(paste(target, "~", others)), data = d))$r.squared)
@@ -133,8 +133,11 @@ pwalk(results, function(cohort, level, vif_VTPFVC, er_VTPFVC, ...) {
 # Flexible strain dose-response on mortality (liberalized cohort)
 # =============================================================================
 lib <- cohort_list[["Liberalized (4-12)"]]
+# No height adjustment: height is on the causal path (height -> lung size -> strain),
+# not a confounder, so conditioning on it would remove the mechanism. Age is the
+# genuine confounder and is adjusted flexibly (spline).
 dr <- glm(deceased ~ ns(vtpfvc, 4) + ns(age_at_admission, 4) + sex_category +
-            race_category + sofa_total + sf10 + ns(height_cm, 4),
+            race_category + sofa_total + sf10,
           data = lib, family = binomial)
 vtpfvc_grid <- seq(quantile(lib$vtpfvc, 0.05), quantile(lib$vtpfvc, 0.95), length.out = 50)
 dr_preds <- predictions(dr, newdata = datagrid(model = dr, vtpfvc = vtpfvc_grid)) %>%
