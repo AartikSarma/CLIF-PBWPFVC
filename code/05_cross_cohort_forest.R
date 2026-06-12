@@ -769,6 +769,114 @@ if (length(hist_files) > 0) {
   }
 }
 
+# =============================================================================
+# Pooled evidence ratios (AIC) across cohorts
+# =============================================================================
+# Each cohort's aic_comparison_all_<site>.csv gives, within every outcome, each
+# exposure model's AIC referenced to the VT/PBW-alone model: delta_AIC and the
+# evidence ratio ER = exp(-delta_AIC / 2). Because the models are fit independently
+# per site, log-likelihoods — and hence delta_AIC — ADD across cohorts: the pooled
+# delta_AIC is the per-site sum, so the pooled ER is the PRODUCT of the per-site
+# ERs (equivalently, per-site log-ERs add). That is the total Akaike evidence for
+# each model over VT/PBW across the consortium, and it correctly carries the
+# per-site complexity penalty (parameters are estimated separately at each site).
+# A single heatmap can't show many sites, so the per-site ratios are drawn as a dot
+# plot with the pooled estimate; a pooled-only heatmap is kept as a compact summary.
+aic_files <- Sys.glob(here("output", "*_output", "final", "aic_comparison_all_*.csv"))
+if (length(aic_files) == 0) {
+  message("No per-site aic_comparison_all_*.csv found; skipping pooled evidence ratios.")
+} else {
+  aic_all_sites <- map_dfr(aic_files, function(f) {
+    read_csv(f, show_col_types = FALSE) %>%
+      mutate(site = str_match(basename(f), "aic_comparison_all_(.*)\\.csv")[, 2])
+  })
+
+  ER_FLOOR <- 0.001; ER_CEIL <- 1000
+  ln10 <- log(10)
+
+  # Per-site log evidence ratios (recomputed from delta_AIC for a clean log scale).
+  per_site_er <- aic_all_sites %>%
+    transmute(site, outcome, exposure, delta_AIC, log10_er = -delta_AIC / (2 * ln10))
+
+  # Pooled = summed delta_AIC (so log-ERs add / ERs multiply across cohorts).
+  pooled_er <- per_site_er %>%
+    group_by(outcome, exposure) %>%
+    summarise(k_sites = n_distinct(site), pooled_delta_AIC = sum(delta_AIC),
+              .groups = "drop") %>%
+    mutate(pooled_log10_er = -pooled_delta_AIC / (2 * ln10),
+           pooled_er       = 10^pooled_log10_er,
+           pooled_er_trunc = pmin(pmax(pooled_er, ER_FLOOR), ER_CEIL),
+           er_label = case_when(pooled_er > ER_CEIL  ~ ">1000",
+                                pooled_er < ER_FLOOR ~ "<0.001",
+                                TRUE ~ formatC(pooled_er, format = "g", digits = 2)))
+
+  write_csv(pooled_er, file.path(cross_dir, "evidence_ratios_pooled.csv"))
+
+  # Ordering mirrors script 04: clinical outcomes first; exposures by pooled support.
+  outcome_lv <- intersect(c("Mortality", "28-day VFDs", "Compliance", "Elastance",
+                            "Static DP", "Mechanical power"), unique(pooled_er$outcome))
+  exposure_lv <- pooled_er %>% group_by(exposure) %>%
+    summarise(m = max(pooled_log10_er), .groups = "drop") %>% arrange(m) %>% pull(exposure)
+  fct <- function(d) d %>% mutate(outcome  = factor(outcome, outcome_lv),
+                                  exposure = factor(exposure, exposure_lv))
+  pooled_er <- fct(pooled_er); per_site_er <- fct(per_site_er)
+
+  aic_sites <- sort(unique(per_site_er$site))
+  aic_site_colors <- if (length(aic_sites) > length(okabe_ito)) {
+    setNames(grDevices::colorRampPalette(okabe_ito)(length(aic_sites)), aic_sites)
+  } else setNames(okabe_ito[seq_along(aic_sites)], aic_sites)
+
+  # --- Pooled-only heatmap (compact summary, same look as the per-site one) ---
+  er_heat <- ggplot(pooled_er, aes(outcome, exposure, fill = log10(pooled_er_trunc))) +
+    geom_tile(color = "grey80", linewidth = 0.5) +
+    geom_text(aes(label = er_label), size = 3) +
+    scale_fill_gradient2(name = "Pooled ER\n(vs VT/PBW)", low = "#2166AC", mid = "white",
+                         high = "#B2182B", midpoint = 0,
+                         limits = c(log10(ER_FLOOR), log10(ER_CEIL)), breaks = -3:3,
+                         labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")) +
+    labs(title = "Pooled evidence ratios across cohorts",
+         subtitle = paste0("delta_AIC summed across ", length(aic_sites),
+                           " cohort(s); truncated to [0.001, 1000]"),
+         x = "Outcome", y = "Exposure specification") +
+    theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(file.path(cross_dir, "evidence_ratio_heatmap_pooled.pdf"), er_heat,
+         width = 10, height = 7)
+
+  # --- Per-cohort dot plot + pooled diamond, on the delta-AIC scale ---
+  # delta_AIC is plotted directly (negative favours the model over VT/PBW). With
+  # thousands of patients the evidence ratio saturates past +/-1000, so the ER
+  # itself is uninformative across sites; delta_AIC keeps both per-site and pooled
+  # magnitudes visible. The pooled diamond sits at the per-site SUM, so it is
+  # further from zero than any one cohort. Dotted guides mark the conventional
+  # |delta_AIC| = 10 "strong evidence" threshold; ER = exp(-delta_AIC / 2).
+  er_dot <- ggplot() +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_vline(xintercept = c(-10, 10), linetype = "dotted", color = "grey80") +
+    geom_point(data = per_site_er %>% filter(exposure != "VT/PBW"),
+               aes(delta_AIC, exposure, color = site, group = site),
+               position = position_dodge(width = 0.6), size = 1.9, alpha = 0.85) +
+    geom_point(data = pooled_er %>% filter(exposure != "VT/PBW"),
+               aes(pooled_delta_AIC, exposure), shape = 18, size = 3.4) +
+    facet_wrap(~ outcome, scales = "free_x") +
+    scale_color_manual(values = aic_site_colors, name = "Cohort") +
+    labs(title = "Model support vs VT/PBW: per cohort and pooled",
+         subtitle = paste0("delta_AIC referenced to VT/PBW (negative favours the model; ",
+                           "ER = exp(-delta_AIC/2)). Coloured = per-cohort, black diamond ",
+                           "= pooled (summed delta_AIC). Dotted = |delta_AIC| = 10."),
+         x = "delta_AIC vs VT/PBW (negative = stronger support)",
+         y = "Exposure specification") +
+    theme_minimal() +
+    theme(strip.text = element_text(face = "bold"),
+          panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.4))
+  ggsave(file.path(cross_dir, "evidence_ratio_dotplot_pooled.pdf"), er_dot,
+         width = 12, height = 7)
+
+  message("Pooled evidence ratios written for ", n_distinct(pooled_er$outcome),
+          " outcomes x ", n_distinct(pooled_er$exposure), " exposures across ",
+          length(aic_sites), " cohort(s); see ",
+          file.path(cross_dir, "evidence_ratios_pooled.csv"))
+}
+
 # NOTE: the pooled conditional-bias plots are DEFERRED to a separate script —
 # code/cbias_pooled_plots.R — because their per-site percentile exports include
 # (stratum x percentile) cells with n < 10 that must pass through the consortium's
