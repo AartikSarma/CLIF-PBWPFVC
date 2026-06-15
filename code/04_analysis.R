@@ -115,10 +115,6 @@ message("Table 1 generated")
 
 table1 %>%
   as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table1_", site_name, ".pdf")))
-
-table1 %>%
-  as_gt() %>%
   gt::gtsave(file.path(final_dir, paste0("table1_", site_name, ".html")))
 
 # =============================================================================
@@ -578,7 +574,6 @@ demo_gt <- demo_table %>%
   gt::sub_missing(missing_text = "")
 
 gt::gtsave(demo_gt, file.path(final_dir, paste0("table_demographic_bias_", site_name, ".html")))
-gt::gtsave(demo_gt, file.path(final_dir, paste0("table_demographic_bias_", site_name, ".pdf")))
 message("Demographic-bias table written (", length(demo_models), " outcome models)")
 
 # =============================================================================
@@ -615,9 +610,6 @@ pfvc_vs_pbw_gt <- tbl_regression(
 pfvc_vs_pbw_gt %>%
   as_gt() %>%
   gt::gtsave(file.path(final_dir, paste0("table_pfvc_vs_pbw_", site_name, ".html")))
-pfvc_vs_pbw_gt %>%
-  as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table_pfvc_vs_pbw_", site_name, ".pdf")))
 message("PFVC-vs-PBW table written (N = ", nrow(broad_pfvc), ")")
 
 # =============================================================================
@@ -1022,7 +1014,6 @@ evalue_gt <- residual_confounding %>%
   gt::sub_missing(missing_text = "—")
 
 gt::gtsave(evalue_gt, file.path(final_dir, paste0("table_evalues_", site_name, ".html")))
-gt::gtsave(evalue_gt, file.path(final_dir, paste0("table_evalues_", site_name, ".pdf")))
 message("Residual-confounding table written (", nrow(residual_confounding),
         " ratio-scale exposure estimates across ",
         n_distinct(residual_confounding$analysis),
