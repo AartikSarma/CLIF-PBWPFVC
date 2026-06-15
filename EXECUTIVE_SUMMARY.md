@@ -12,8 +12,8 @@ cell-suppressed results (n >= 10) designed to be pooled across the consortium.
 
 ## What the code does
 
-The pipeline is five R scripts run in order by `code/00_run_pipeline.R`, which
-first restores the `renv` environment, then runs 01 -> 05 each as a clean
+The pipeline is six R scripts run in order by `code/00_run_pipeline.R`, which
+first restores the `renv` environment, then runs 01 -> 06 each as a clean
 subprocess.
 
 - **01 — Cohort identification.** Loads the eight required CLIF tables; selects
@@ -43,31 +43,27 @@ subprocess.
   demographics); the predicted-FVC-vs-predicted-body-weight model (regressing
   PFVC on PBW plus age, sex, and race to show that PBW alone does not capture
   predicted lung size); conditional-bias diagnostic plots; and the unified
-  long-format effect-estimate table that feeds the cross-cohort step.
-- **05 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
-  `regression_results_long_*.csv`, stacks them, and renders forest plots (one per
-  analysis + a combined PDF), covariate forests for the demographic-bias and
-  PFVC-vs-PBW analyses, and pooled consort and PBW:PFVC distribution figures.
-
-### Exploratory analyses (standalone — not in the pipeline runner)
-
-These read the script 03 cross-sectional dataset and refit their own models. They
-are run individually (not via `00_run_pipeline.R`) and are not consortium
-deliverables. Mechanical power (`mp_pbw`/`mp_pfvc`) is still derived in script 03
-with the mode-aware simplified power equation; the modeling lives here.
-
-- **`explore_elastance_age_interaction.R`** — refits the mortality (and 28-day VFD
-  competing-risks) models with an elastance × age interaction (Ers×PBW and Ers×PFVC,
-  per SD), since recoil changes with age independently of injury; LRT + probability-
-  scale slopes via `marginaleffects`.
-- **`explore_mechanical_power_normalization.R`** — compares mechanical power scaled
-  to PBW (J/min/kg) vs PFVC (J/min/L), z-scaled, as predictors of mortality and
-  28-day VFDs, with an AIC evidence ratio and an MP × age interaction.
-- **`explore_elastance_fingerprints.R`** — probes the statistical fingerprints that
-  distinguish the size-surrogate error from non-constant recoil (size vs injury
-  axes, predicted FEV1/FVC as a recoil surrogate, variance partition).
-- **`explore_stress_strain_mortality.R`** — predicted-mortality surfaces over the
-  strain (VT/PFVC) × stress/elastance plane, with a model-fit comparison.
+  long-format effect-estimate table that feeds the cross-cohort step. Every
+  exposure-to-outcome model (mortality, mechanics, 28-day VFD, 60-day survival) is
+  reported both **demographic-adjusted** (+ age/sex/race) and **unadjusted**
+  (demographics dropped, illness severity retained), tagged by an `adjustment`
+  column in the long table.
+- **05 — Normalization analysis.** A systematic PBW-vs-PFVC comparison of the
+  physiologic injury metrics whose landmark papers use PBW or no size reference —
+  Goligher's normalized elastance (Ers x PBW), Gattinoni's MP/PBW, and Amato's
+  driving pressure. It reports the physiologic **discordance** between the PBW- and
+  PFVC-normalized metrics and injury-tertile **reclassification** (with direct
+  age-interaction tests), the **prognostic head-to-head** with a form-vs-physiology
+  decomposition, an **encompassing test** of whether PFVC adds information PBW
+  misses, and age/lung-size **interaction ladders**. Every model is reported
+  demographic-adjusted and unadjusted; a `dp <= 0` QC filter and centered
+  predictors control collinearity. Writes per-site `norm_*` outputs.
+- **06 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
+  `regression_results_long_*.csv` (script 04) and `norm_*.csv` (script 05),
+  stacks/pools them, and renders forest plots (one per analysis + a combined PDF),
+  the adjusted-vs-unadjusted comparison forest, covariate forests, pooled evidence
+  ratios and E-values, the pooled normalization summaries, and pooled consort and
+  PBW:PFVC distribution figures.
 
 ## What the output files are
 
@@ -133,7 +129,7 @@ data and should **not** leave the site.
   values and total). **`sofa_daily.parquet`** — the per-encounter-day components
   and totals.
 
-### `final/` (scripts 03–04) — per-site results
+### `final/` (scripts 03–05) — per-site results
 
 These are the deliverables. The first group is aggregated and cell-suppressed
 (n >= 10) and is what each site returns to the consortium; the rest are
@@ -145,8 +141,16 @@ human-readable tables and figures for local review.
   artifact. One row per model term across **every** model in script 04, with
   columns: `site`, `term`, `estimate`, `conf_low`, `conf_high`, `std_error`,
   `statistic`, `p_value`, `estimate_type` (OR / HR / Beta), `analysis`,
-  `model_spec` (the exposure specification), `model_family`, `formula`, and
-  `n_obs`. Script 05 stacks these across sites to build the forest plots.
+  `model_spec` (the exposure specification), `model_family`, `adjustment`
+  (demographic-`adjusted` / `unadjusted`), `formula`, and `n_obs`. Script 06 stacks
+  these across sites to build the forest plots (the adjusted estimates are primary,
+  with an adjusted-vs-unadjusted comparison).
+- **`norm_*_<site>.csv`** (script 05) — the normalization analysis outputs:
+  discordance summary + demographics (`norm_discordance_*`), injury-tertile
+  reclassification (`norm_reclassification_*`), prognostic fit and form-vs-physiology
+  (`norm_prognostic_fit_*`, `norm_form_vs_physiology_*`), the encompassing test
+  (`norm_encompassing_*`), and the age/size interaction ladder
+  (`norm_age_interaction_*`). Script 06 pools these across cohorts.
 - **`aic_comparison_all_<site>.csv`** — model-fit comparison: per
   `outcome` × `exposure`, the `AIC`, `delta_AIC`, and `evidence_ratio` relative
   to the VT/PBW reference within that outcome, plus `is_reference` and the
@@ -197,47 +201,20 @@ human-readable tables and figures for local review.
   that PBW alone does not capture predicted lung size — the core motivation for
   scaling tidal volume by PFVC instead.
 
-**Elastance × age interaction (exploratory — `explore_elastance_age_interaction.R`):**
+**Normalization analysis (script 05) — `norm_*_<site>.csv` / `.pdf`:**
 
-- **`regression_ers_age_interaction_<site>.html`** — the two mortality models with
-  an elastance × age interaction (Ers×PBW and Ers×PFVC, per SD), showing the main
-  effects and the interaction odds ratio.
-- **`ers_age_interaction_<site>.csv`** — poolable one-row-per-model summary: the
-  interaction odds ratio (per SD elastance × per 10 yr) with CI and p-value, plus
-  the likelihood-ratio test against the no-interaction model (chi-square, df, p)
-  and both models' AIC.
-- **`ers_age_interaction_slopes_<site>.csv` / `.pdf`** — the elastance effect on
-  mortality expressed on the probability scale (`marginaleffects`): the change in
-  predicted mortality per 1 SD of elastance at ages 40, 60, and 80, as a table and
-  a slope-by-age plot. A non-flat profile is the interaction in clinical terms.
-- **`regression_ers_age_interaction_vfd_<site>.html`** and
-  **`ers_age_interaction_vfd_<site>.csv`** — the same elastance × age interaction
-  for the **28-day VFD competing-risks** outcome (Fine–Gray): the interaction
-  subdistribution hazard ratio with CI/p and the likelihood-ratio test. (The
-  unsuffixed files above are the mortality outcome.)
-
-**Mechanical power normalization (exploratory — `explore_mechanical_power_normalization.R`):**
-
-- **`regression_mp_normalization_<site>.html`** — the two mortality models with
-  mechanical power scaled to PBW (J/min/kg) and to PFVC (J/min/L), z-scaled
-  (odds ratio per 1 SD), adjusted for VT/PBW and the standard covariates.
-- **`mp_normalization_<site>.csv`** — poolable one-row-per-model summary: the
-  odds ratio per SD with CI and p-value, AIC, and the AIC evidence ratio relative
-  to the PBW-scaled model (> 1 favors MP/PFVC), plus `n_obs` (the subset with a
-  computable, mode-appropriate mechanical power).
-- **`regression_mp_age_interaction_<site>.html`** — the two mortality models with
-  an MP × age interaction (MP/PBW and MP/PFVC, per SD).
-- **`mp_age_interaction_<site>.csv`** — poolable summary of the interaction odds
-  ratio (per SD MP × per 10 yr) with CI and p-value, the likelihood-ratio test
-  against the no-interaction model (chi-square, df, p), and both models' AIC.
-- **`mp_age_interaction_slopes_<site>.csv` / `.pdf`** — the MP effect on mortality
-  on the probability scale (`marginaleffects`): change in predicted mortality per
-  1 SD of MP at ages 40, 60, and 80, as a table and a slope-by-age plot.
-- **`regression_mp_normalization_vfd_<site>.html`**,
-  **`mp_normalization_vfd_<site>.csv`**, and **`mp_age_interaction_vfd_<site>.csv`**
-  — the MP/PBW-vs-MP/PFVC comparison and the MP × age interaction repeated for the
-  **28-day VFD competing-risks** outcome (Fine–Gray): subdistribution hazard ratios
-  per SD with the AIC evidence ratio, and the interaction SHR + LRT.
+- **`norm_discordance_summary_*`, `norm_discordance_demographics_*`,
+  `norm_discordance_age_*`** — distribution of the PBW/PFVC size discordance and its
+  demographic / age patterning.
+- **`norm_reclassification_*`** — fraction of patients changing injury tertile when
+  switching PBW->PFVC, by demographic group and by age.
+- **`norm_prognostic_fit_*`, `norm_form_vs_physiology_*`** — the PBW-vs-PFVC
+  prognostic head-to-head (AIC, C-statistic) and the decomposition into model-form
+  vs physiology effects, each demographic-adjusted and unadjusted.
+- **`norm_encompassing_*`** — the encompassing test: does PFVC add prognostic
+  information beyond PBW (and vice versa), by AIC and LRT.
+- **`norm_age_interaction_ladder_*`, `norm_age_interaction_slopes_*`** — whether each
+  mechanic's (DP / Ers / MP) effect is modified by age (recoil) and lung volume.
 
 **Survival outputs:**
 
@@ -260,29 +237,35 @@ human-readable tables and figures for local review.
   bias diagnostic plots (via `algorithmDiagnostics`) showing how each outcome and
   the PBW/PFVC ratio vary conditionally across demographic strata.
 
-### `output/cross_cohort/` (script 05) — pooled across sites
+### `output/cross_cohort/` (script 06) — pooled across sites
 
-Produced after each site's `regression_results_long_*.csv` files are collected
-into the local `output/` tree.
+Produced after each site's `regression_results_long_*.csv` (script 04) and
+`norm_*.csv` (script 05) files are collected into the local `output/` tree.
 
 - **`regression_results_all_cohorts.csv` / `.parquet`** — every site's long
   results table stacked into one file (same columns, with `site` distinguishing
   cohorts).
 - **`forest_plots/forest_<analysis>.pdf`** — one forest plot per analysis
-  (Mortality, Elastance, Compliance, 28-day VFDs, Static DP, Survival, …): rows
-  are exposures, columns are model specifications, and each point is a cohort's
-  estimate with 95% CI.
+  (Mortality, Elastance, Compliance, 28-day VFDs, Static DP, Survival, …), at the
+  demographic-adjusted (primary) estimate: rows are exposures, columns are model
+  specifications, and each point is a cohort's estimate with 95% CI.
 - **`forest_plots/forest_all_analyses.pdf`** — all analyses combined into a
   single multi-page PDF.
+- **`forest_plots/forest_adjusted_vs_unadjusted.pdf`** + **`adjusted_vs_unadjusted_pooled.csv`**
+  — the headline exposures with both adjustment levels side by side.
 - **`forest_plots/covforest_*.pdf`** — covariate forests for the
   demographic-bias and PFVC-vs-PBW analyses (the demographic coefficients
   across cohorts, rather than the exposures).
+- **`norm_encompassing_pooled.{csv,pdf}`, `norm_form_vs_physiology_pooled.csv`,
+  `norm_prognostic_fit_pooled.csv`, `norm_discordance_pooled.csv`** — the pooled
+  normalization analyses (summed delta-AIC across cohorts).
 - **`consort_diagram_pooled.pdf`** — the CONSORT funnel pooled across sites.
 - **`distribution_pbwpfvc_pooled.pdf`** — the pooled PBW:PFVC distribution built
   by summing the per-site histogram exports.
 
 ---
 
-The key cross-site artifact is **`regression_results_long_<site>.csv`** — the
-file each site returns and that script 05 consumes to build the pooled forest
-plots.
+The key cross-site artifacts are **`regression_results_long_<site>.csv`** (outcome
+analyses, script 04) and **`norm_*_<site>.csv`** (normalization analyses, script
+05) — the files each site returns and that script 06 consumes to build the pooled
+forest plots and summaries.
