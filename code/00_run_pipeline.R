@@ -56,8 +56,9 @@ pipeline_scripts <- c(
   "01_cohort_identification.R",
   "02_quality_checks.R",
   "03_variable_derivation.R",
-  "04_analysis.R",
-  "05_cross_cohort_forest.R"
+  "04_analysis.R",                 # outcome analyses (replication, survival, bias)
+  "05_normalization_analysis.R",   # PBW vs PFVC normalization discordance + prognostics
+  "06_cross_cohort_forest.R"       # cross-cohort pooling + forest plots
 )
 
 rscript_bin <- file.path(R.home("bin"), "Rscript")

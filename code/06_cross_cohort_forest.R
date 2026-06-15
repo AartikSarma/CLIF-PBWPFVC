@@ -1,15 +1,15 @@
 # =============================================================================
-# Script 05: Cross-cohort aggregation and forest plots
+# Script 06: Cross-cohort aggregation and forest plots
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
-# Aggregates the per-cohort long-format regression tables written by script 04
-# (one `regression_results_long_<site>.csv` per cohort, under each site's
-# output/<site>_output/final/ directory) and produces, for each analysis, a
-# forest plot comparing effect estimates across cohorts.
+# Aggregates per-cohort results written by the outcome analyses (script 04,
+# `regression_results_long_<site>.csv`) and the normalization analyses (script 05,
+# `norm_*_<site>.csv`), under each site's output/<site>_output/final/ directory,
+# and produces cross-cohort forest plots and pooled summaries.
 #
-# Unlike scripts 01-04, this script is intentionally site-agnostic: it discovers
-# every cohort's results table on disk and stacks them. Run it after script 04
-# has been run for each cohort whose results you want to compare (the tables can
+# Unlike scripts 01-05, this script is intentionally site-agnostic: it discovers
+# every cohort's results on disk and stacks/pools them. Run it after scripts 04 and
+# 05 have been run for each cohort whose results you want to compare (the tables can
 # be collected from multiple sites into the local output/ tree).
 
 library(tidyverse)
@@ -877,10 +877,74 @@ if (length(aic_files) == 0) {
           file.path(cross_dir, "evidence_ratios_pooled.csv"))
 }
 
+# =============================================================================
+# Normalization analyses (script 05): cross-cohort pooling
+# =============================================================================
+# Pool the per-site normalization outputs. As with the evidence ratios above, AIC
+# improvements add across cohorts, so SUMMED delta-AIC is the consortium-level
+# measure of how much each size reference improves fit. The headline is the
+# encompassing test: PFVC adds prognostic information beyond PBW (summed dAIC > 0)
+# while PBW adds little beyond PFVC.
+norm_pool <- function(pattern, group_cols, sum_cols) {
+  files <- Sys.glob(here("output", "*_output", "final", pattern))
+  if (length(files) == 0) return(NULL)
+  map_dfr(files, read_csv, show_col_types = FALSE) %>%
+    group_by(across(all_of(group_cols))) %>%
+    summarise(n_sites = dplyr::n(),
+              across(all_of(sum_cols), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+}
+
+enc_pooled <- norm_pool("norm_encompassing_*.csv", c("family", "adjusted"),
+                        c("daic_pfvc_beyond_pbw", "daic_pbw_beyond_pfvc"))
+if (is.null(enc_pooled)) {
+  message("No per-site normalization outputs (norm_encompassing_*.csv) found; ",
+          "skipping normalization pooling. Run script 05 per cohort first.")
+} else {
+  write_csv(enc_pooled, file.path(cross_dir, "norm_encompassing_pooled.csv"))
+  enc_long <- enc_pooled %>%
+    pivot_longer(c(daic_pfvc_beyond_pbw, daic_pbw_beyond_pfvc),
+                 names_to = "direction", values_to = "dAIC") %>%
+    mutate(direction = recode(direction,
+             daic_pfvc_beyond_pbw = "PFVC beyond PBW",
+             daic_pbw_beyond_pfvc = "PBW beyond PFVC"))
+  p_enc_pool <- ggplot(enc_long, aes(dAIC, family, fill = direction)) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+    facet_wrap(~ adjusted) +
+    scale_fill_manual(values = c("PFVC beyond PBW" = "#009E73",
+                                 "PBW beyond PFVC" = "#D55E00"), name = NULL) +
+    labs(title = "Pooled: does PFVC add prognostic information that PBW misses?",
+         subtitle = paste0("Summed delta-AIC across ", max(enc_pooled$n_sites),
+                           " cohort(s) (>0 = improves fit). PFVC adds beyond PBW; ",
+                           "PBW does not beyond PFVC."),
+         x = "Summed delta-AIC from adding the size term", y = NULL) +
+    theme_minimal(base_size = 11) + theme(legend.position = "top")
+  ggsave(file.path(cross_dir, "norm_encompassing_pooled.pdf"), p_enc_pool,
+         width = 10, height = 4.5)
+
+  phys_pooled <- norm_pool("norm_form_vs_physiology_*.csv", c("family", "adjusted"),
+                           c("phys_locked_dAIC", "phys_separate_dAIC"))
+  if (!is.null(phys_pooled))
+    write_csv(phys_pooled, file.path(cross_dir, "norm_form_vs_physiology_pooled.csv"))
+
+  prog_pooled <- norm_pool("norm_prognostic_fit_*.csv", c("family", "spec", "adjusted"),
+                           c("delta_aic"))
+  if (!is.null(prog_pooled))
+    write_csv(prog_pooled, file.path(cross_dir, "norm_prognostic_fit_pooled.csv"))
+
+  disc_files <- Sys.glob(here("output", "*_output", "final", "norm_discordance_summary_*.csv"))
+  if (length(disc_files) > 0)
+    write_csv(map_dfr(disc_files, read_csv, show_col_types = FALSE),
+              file.path(cross_dir, "norm_discordance_pooled.csv"))
+
+  message("Pooled normalization analyses across ", max(enc_pooled$n_sites),
+          " cohort(s); see ", file.path(cross_dir, "norm_encompassing_pooled.csv"))
+}
+
 # NOTE: the pooled conditional-bias plots are DEFERRED to a separate script —
 # code/cbias_pooled_plots.R — because their per-site percentile exports include
 # (stratum x percentile) cells with n < 10 that must pass through the consortium's
 # additive-masking pipeline first (held until all sites confirm). That script
 # reads the masked cbias_export_<site>.csv files and is not part of this pipeline.
 
-message("Script 05 complete. Aggregated results and figures in: ", cross_dir)
+message("Script 06 complete. Aggregated results and figures in: ", cross_dir)
