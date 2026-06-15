@@ -125,8 +125,12 @@ table1 %>%
 # 4b. Model specifications
 # =============================================================================
 
-# Common covariates for all models
-covariates <- "race_category + age10 + sex_category + sofa_total + sf10"
+# Common covariates for all models. The unadjusted set drops the demographics
+# (age/sex/race) -- deterministic parents of the PBW/PFVC exposures -- and keeps
+# illness severity; both adjusted and unadjusted estimates are reported per the
+# adjusted+unadjusted convention.
+covariates       <- "race_category + age10 + sex_category + sofa_total + sf10"
+covariates_unadj <- "sofa_total + sf10"
 
 # Readable labels for the per-10-unit covariates in the rendered regression
 # tables (age10 / sf10 appear in every model's covariate set).
@@ -142,8 +146,9 @@ uses_dp <- function(...) {
   vars <- trimws(unlist(strsplit(paste(c(...), collapse = " + "), "\\+")))
   any(vars %in% DP_DERIVED)
 }
-model_covariates <- function(...) {
-  if (uses_dp(...)) paste(covariates, "+ bmi") else covariates
+model_covariates <- function(..., adjusted = TRUE) {
+  base <- if (adjusted) covariates else covariates_unadj
+  if (uses_dp(...)) paste(base, "+ bmi") else base
 }
 
 # Define all exposure specifications
@@ -626,10 +631,13 @@ message("PFVC-vs-PBW table written (N = ", nrow(broad_pfvc), ")")
 # stable across sites.
 
 extract_model_results <- function(model, estimate_type, analysis,
-                                  model_spec, model_family, formula_str) {
+                                  model_spec, model_family, formula_str,
+                                  adjustment = "adjusted") {
   # OR / HR are reported on the exponentiated (ratio) scale; Beta is the raw
   # linear coefficient. broom::tidy applies the matching transform to estimate
-  # and CI together so they stay internally consistent.
+  # and CI together so they stay internally consistent. `adjustment` flags whether
+  # the model is demographic-adjusted (age/sex/race) or unadjusted; both are
+  # reported and script 06 plots the adjusted as primary plus a comparison.
   exponentiate <- estimate_type %in% c("OR", "HR")
   broom::tidy(model, conf.int = TRUE, exponentiate = exponentiate) %>%
     transmute(
@@ -644,6 +652,7 @@ extract_model_results <- function(model, estimate_type, analysis,
       analysis      = analysis,
       model_spec    = model_spec,
       model_family  = model_family,
+      adjustment    = adjustment,
       formula       = formula_str,
       n_obs         = stats::nobs(model)
     )
@@ -695,6 +704,76 @@ if (exists("cox_model")) {
                           paste("Surv(surv_time, event) ~ pbwpfvc +", cox_covars)),
     extract_model_results(cox_model_pfvc, "HR", "Survival", "VT/PBW + PFVC", "cox",
                           paste("Surv(surv_time, event) ~ pfvc +", cox_covars))
+  ))
+}
+
+# --- Demographic-UNADJUSTED variants of the exposure->outcome models -----------
+# Drop age/sex/race; keep illness severity (SOFA + SF) and BMI for DP-derived.
+# Reported alongside the adjusted estimates (adjustment = "unadjusted"); script 06
+# plots the adjusted as primary and adds an adjusted-vs-unadjusted comparison. The
+# rendered tables, E-values, and evidence ratios above use the adjusted models.
+make_formula_unadj <- function(lhs, exposure, determinant) {
+  cov <- model_covariates(determinant, adjusted = FALSE)
+  rhs <- if (cov == "") exposure else paste(exposure, "+", cov)
+  as.formula(paste(lhs, "~", rhs))
+}
+fit_vfd_finegray_unadj <- function(exposure_spec) {
+  model_rhs <- paste(exposure_spec, "+", covariates_unadj)
+  rhs_vars  <- unique(trimws(unlist(strsplit(model_rhs, "\\+"))))
+  df <- cross_sectional %>%
+    mutate(vfd_status_f = factor(vfd_status, levels = c(0, 1, 2),
+                                 labels = c("censored", "extubation", "death"))) %>%
+    select(vfd_time, vfd_status_f, all_of(rhs_vars)) %>%
+    filter(!is.na(vfd_time), vfd_time > 0, !is.na(vfd_status_f))
+  fg <- survival::finegray(survival::Surv(vfd_time, vfd_status_f) ~ ., data = df,
+                           etype = "extubation")
+  survival::coxph(
+    as.formula(paste0("survival::Surv(fgstart, fgstop, fgstatus) ~ ", model_rhs)),
+    weights = fgwt, data = fg)
+}
+
+if (!is.null(mortality_models)) {
+  results_long <- c(results_long, imap(exposure_specs, ~ {
+    m <- glm(make_formula_unadj("deceased", .x, .x), data = cross_sectional,
+             family = binomial)
+    fstr <- paste("deceased ~", .x, "+", model_covariates(.x, adjusted = FALSE))
+    extract_model_results(m, "OR", "Mortality", exposure_labels[[.y]], "logistic",
+                          fstr, adjustment = "unadjusted")
+  }))
+}
+
+for (outcome_name in names(continuous_outcomes)) {
+  outcome_var   <- continuous_outcomes[[outcome_name]]$var
+  outcome_label <- continuous_outcomes[[outcome_name]]$label
+  results_long <- c(results_long, imap(exposure_specs, ~ {
+    m <- lm(make_formula_unadj(outcome_var, .x, outcome_var), data = cross_sectional)
+    fstr <- paste(outcome_var, "~", .x, "+", model_covariates(outcome_var, adjusted = FALSE))
+    extract_model_results(m, "Beta", outcome_label, exposure_labels[[.y]], "linear",
+                          fstr, adjustment = "unadjusted")
+  }))
+}
+
+results_long <- c(results_long, imap(exposure_specs, ~ {
+  m <- fit_vfd_finegray_unadj(.x)
+  fstr <- paste("finegray(Surv(vfd_time, vfd_status) [extubation vs death]) ~",
+                .x, "+", covariates_unadj)
+  extract_model_results(m, "HR", "28-day VFDs", exposure_labels[[.y]], "finegray",
+                        fstr, adjustment = "unadjusted")
+}))
+
+if (exists("cox_model")) {
+  cox_covars_unadj <- "vtpbw + sf10 + sofa_total"   # demographics dropped
+  cox_unadj      <- coxph(Surv(surv_time, event) ~ pbwpfvc + vtpbw + sf10 + sofa_total,
+                          data = surv_data)
+  cox_pfvc_unadj <- coxph(Surv(surv_time, event) ~ pfvc + vtpbw + sf10 + sofa_total,
+                          data = surv_data)
+  results_long <- c(results_long, list(
+    extract_model_results(cox_unadj, "HR", "Survival", "VT/PBW + PBW/PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ pbwpfvc +", cox_covars_unadj),
+                          adjustment = "unadjusted"),
+    extract_model_results(cox_pfvc_unadj, "HR", "Survival", "VT/PBW + PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ pfvc +", cox_covars_unadj),
+                          adjustment = "unadjusted")
   ))
 }
 

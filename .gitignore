@@ -45,3 +45,7 @@ docs/
 utils/pediatric_pbw.R
 utils/psofa.R
 outlier-thresholds/outlier_thresholds_pediatric_vitals.csv
+
+# archived exploratory scratch scripts (kept locally, not part of the deliverable)
+code/archive/
+code/explore_*.R

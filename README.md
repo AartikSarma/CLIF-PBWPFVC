@@ -100,38 +100,37 @@ order. From the repository root:
 Rscript code/00_run_pipeline.R
 ```
 
-This restores packages from `renv.lock`, then runs scripts 01–05 sequentially,
+This restores packages from `renv.lock`, then runs scripts 01–06 sequentially,
 each as a clean subprocess. If any step fails, the runner stops and reports which
 script errored.
 
 To run a single step (e.g. while debugging), run it directly from the repo root:
 
 ```bash
-Rscript code/01_cohort_identification.R   # Filter CLIF tables to the eligible cohort
-Rscript code/02_quality_checks.R          # Apply outlier thresholds, QC stats
-Rscript code/03_variable_derivation.R     # PBW, PFVC, SOFA, SF/PF, VT metrics
-Rscript code/04_analysis.R                # Regressions, survival, bias diagnostics
-Rscript code/05_cross_cohort_forest.R     # Cross-cohort forest plots (after 04)
+Rscript code/01_cohort_identification.R    # Filter CLIF tables to the eligible cohort
+Rscript code/02_quality_checks.R           # Apply outlier thresholds, QC stats
+Rscript code/03_variable_derivation.R      # PBW, PFVC, SOFA, SF/PF, VT metrics
+Rscript code/04_analysis.R                 # Outcome analyses: regressions, survival, bias
+Rscript code/05_normalization_analysis.R   # PBW vs PFVC normalization discordance + prognostics
+Rscript code/06_cross_cohort_forest.R      # Cross-cohort pooling + forest plots (after 04, 05)
 ```
 
 Scripts must be run in order — each reads the outputs of the previous step.
-Script 05 aggregates the per-cohort regression tables produced by script 04 and
-is site-agnostic: it discovers every `regression_results_long_*.csv` on disk and
-stacks them into cross-cohort forest plots.
+Script 06 aggregates the per-cohort outputs from scripts 04 and 05 and is
+site-agnostic: it discovers every cohort's `regression_results_long_*.csv` and
+`norm_*.csv` on disk and pools them into cross-cohort forest plots and summaries.
 
-### Exploratory analyses (standalone, not in the runner)
+Scripts 04 and 05 report every exposure→outcome estimate both **demographic-
+adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped, illness
+severity retained). Script 06 plots the adjusted estimate as primary and adds an
+adjusted-vs-unadjusted comparison forest.
 
-These read the script 03 cross-sectional dataset and refit their own models;
-they are not part of the consortium pipeline. Run individually after scripts 01–03.
+### Exploratory analyses (archived)
 
-```bash
-Rscript code/explore_elastance_age_interaction.R       # Normalized elastance x age interaction
-Rscript code/explore_mechanical_power_normalization.R  # Mechanical power scaled to PBW vs PFVC
-Rscript code/explore_elastance_fingerprints.R          # Disentangling recoil vs size-surrogate error
-Rscript code/explore_stress_strain_mortality.R         # Predicted-mortality stress-strain surfaces
-Rscript code/explore_spline_sensitivity.R              # Age functional-form sensitivity (linear vs spline age)
-Rscript code/explore_liberalized_cohort.R              # Does a wider VT/PBW band rescue the strain signal?
-```
+Standalone exploratory scratch scripts (`explore_*.R`) that read the script 03
+dataset and refit their own models have been archived under `code/archive/` and
+are gitignored — they are kept locally for reference but are not part of the
+consortium deliverable or the runner.
 
 ## Data safety
 
