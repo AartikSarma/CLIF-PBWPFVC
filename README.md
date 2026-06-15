@@ -125,18 +125,12 @@ adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped, illness
 severity retained). Script 06 plots the adjusted estimate as primary and adds an
 adjusted-vs-unadjusted comparison forest.
 
-### Exploratory analyses (standalone, not in the runner)
+### Exploratory analyses (archived)
 
-These read the script 03 cross-sectional dataset and refit their own models;
-they are not part of the consortium pipeline. Run individually after scripts 01–03.
-
-```bash
-Rscript code/explore_elastance_age_interaction.R       # Normalized elastance x age interaction
-Rscript code/explore_elastance_fingerprints.R          # Disentangling recoil vs size-surrogate error
-Rscript code/explore_stress_strain_mortality.R         # Predicted-mortality stress-strain surfaces
-Rscript code/explore_spline_sensitivity.R              # Age functional-form sensitivity (linear vs spline age)
-Rscript code/explore_liberalized_cohort.R              # Does a wider VT/PBW band rescue the strain signal?
-```
+Standalone exploratory scratch scripts (`explore_*.R`) that read the script 03
+dataset and refit their own models have been archived under `code/archive/` and
+are gitignored — they are kept locally for reference but are not part of the
+consortium deliverable or the runner.
 
 ## Data safety
 
