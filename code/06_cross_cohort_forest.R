@@ -43,6 +43,14 @@ if (!"site" %in% names(all_results)) {
        "regenerate them with the current schema.")
 }
 
+# Adjustment split. Script 04 reports demographic-adjusted and unadjusted estimates
+# (adjustment column); older tables lack it. The existing forests/pooling below use
+# the ADJUSTED estimates (primary); all_results_both retains both levels for the
+# adjusted-vs-unadjusted comparison at the foot of this script.
+if (!"adjustment" %in% names(all_results)) all_results$adjustment <- "adjusted"
+all_results_both <- all_results
+all_results      <- all_results %>% filter(adjustment == "adjusted")
+
 # The Cox survival model is the same vtpbw + pbwpfvc spec as the mortality model,
 # but older script-04 versions labelled it with the operands reversed. Canonicalise
 # so it collapses into a single "VT/PBW + PBW/PFVC" column across cohorts.
@@ -875,6 +883,46 @@ if (length(aic_files) == 0) {
           " outcomes x ", n_distinct(pooled_er$exposure), " exposures across ",
           length(aic_sites), " cohort(s); see ",
           file.path(cross_dir, "evidence_ratios_pooled.csv"))
+}
+
+# =============================================================================
+# Adjusted vs unadjusted comparison (headline exposures)
+# =============================================================================
+# The per-analysis forests above use the demographic-ADJUSTED estimate (primary).
+# Here both adjustment levels are reported side by side for the headline exposures
+# (ratio outcomes), pooled across cohorts, so demographic adjustment's effect on
+# each exposure estimate is visible.
+adj_compare <- all_results_both %>%
+  filter(term %in% names(exposure_term_labels),
+         adjustment %in% c("adjusted", "unadjusted"),
+         estimate_type %in% c("OR", "HR")) %>%
+  mutate(term_label = factor(recode(term, !!!exposure_term_labels), levels = term_order),
+         analysis   = relabel_outcome(analysis))
+if (n_distinct(adj_compare$adjustment) < 2) {
+  message("Only one adjustment level present; skipping adjusted-vs-unadjusted comparison.")
+} else {
+  n_coh <- dplyr::n_distinct(adj_compare$site)
+  adj_pooled <- adj_compare %>%
+    group_by(analysis, model_spec, term, term_label, adjustment) %>%
+    group_modify(~ pool_estimates(.x)) %>% ungroup()
+  write_csv(adj_pooled, file.path(cross_dir, "adjusted_vs_unadjusted_pooled.csv"))
+  p_adj <- ggplot(adj_pooled, aes(pooled, term_label, color = adjustment)) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "grey60") +
+    geom_pointrange(aes(xmin = pooled_lo, xmax = pooled_hi),
+                    position = position_dodge(width = 0.5)) +
+    facet_wrap(~ analysis, scales = "free_x") +
+    scale_x_log10() +
+    scale_color_manual(values = c("adjusted" = "#0072B2", "unadjusted" = "#D55E00"),
+                       name = NULL) +
+    labs(title = "Exposure effects: demographic-adjusted vs unadjusted",
+         subtitle = paste0("Pooled OR/HR across ", n_coh, " cohort(s). ",
+                           "Adjusted = + age/sex/race; unadjusted = demographics dropped."),
+         x = "Pooled OR / HR (log scale)", y = NULL) +
+    theme_minimal(base_size = 11) + theme(legend.position = "top")
+  ggsave(file.path(forest_dir, "forest_adjusted_vs_unadjusted.pdf"), p_adj,
+         width = 11, height = 6)
+  message("Adjusted-vs-unadjusted comparison written for ", n_coh, " cohort(s); see ",
+          file.path(forest_dir, "forest_adjusted_vs_unadjusted.pdf"))
 }
 
 # =============================================================================

@@ -120,6 +120,11 @@ Script 06 aggregates the per-cohort outputs from scripts 04 and 05 and is
 site-agnostic: it discovers every cohort's `regression_results_long_*.csv` and
 `norm_*.csv` on disk and pools them into cross-cohort forest plots and summaries.
 
+Scripts 04 and 05 report every exposure→outcome estimate both **demographic-
+adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped, illness
+severity retained). Script 06 plots the adjusted estimate as primary and adds an
+adjusted-vs-unadjusted comparison forest.
+
 ### Exploratory analyses (standalone, not in the runner)
 
 These read the script 03 cross-sectional dataset and refit their own models;
