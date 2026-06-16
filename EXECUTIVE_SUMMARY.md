@@ -77,7 +77,8 @@ of the per-site runner.
 Per-site output lands under `output/<site_name>_output/`. The whole `output/` tree
 is gitignored — only aggregated, n >= 10-suppressed results are written. Pooled
 cross-cohort output is written by `code/pooled_estimates.R` to an `All sites/`
-subfolder of the central results root (the Box project folder).
+subfolder of the central results root (by default the local, gitignored `results/`
+folder into which each site's results are copied).
 
 ### `intermediate/` (scripts 01–03) — working data, not for sharing
 
@@ -247,8 +248,9 @@ human-readable tables and figures for local review.
 
 ### `All sites/` (`pooled_estimates.R`, run centrally) — pooled across sites
 
-Produced after each site returns its `final/` folder (renamed to the site name)
-into the central results root; written to the `All sites/` subfolder there.
+Produced after each site's `final/` folder (renamed to the site name) is copied
+into the central results root (by default the local `results/` folder); written to
+the `All sites/` subfolder there.
 
 - **`regression_results_all_cohorts.csv` / `.parquet`** — every site's long
   results table stacked into one file (same columns, with `site` distinguishing

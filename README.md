@@ -129,10 +129,11 @@ results. It is site-agnostic: it discovers each cohort's
 `regression_results_long_*.csv` and `norm_*.csv` and pools them into cross-cohort
 forest plots and summaries (adjusted estimate primary, plus an
 adjusted-vs-unadjusted comparison forest). It expects a results root containing
-one subfolder per site (each site's `final/` folder renamed to the site name) and
-writes pooled outputs to an `All sites/` subfolder there. Set the root via the
-`PBWPFVC_RESULTS_ROOT` environment variable. This script is kept local and is not
-part of the repository.
+one subfolder per site (each site's `final/` folder renamed to the site name) —
+by default the local `results/` folder, into which each site's results are copied —
+and writes pooled outputs to an `All sites/` subfolder there. Override the root via
+the `PBWPFVC_RESULTS_ROOT` environment variable. Both this script and the local
+`results/` folder are gitignored and not part of the repository.
 
 ### Exploratory analyses (archived)
 

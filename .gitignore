@@ -34,6 +34,9 @@ initialize_renv.R
 # ignore all generated analysis outputs
 output/
 
+# ignore collected per-site results for central pooling (read by pooled_estimates.R)
+results/
+
 # ignore Claude Code project files
 CLAUDE.md
 .claude/
