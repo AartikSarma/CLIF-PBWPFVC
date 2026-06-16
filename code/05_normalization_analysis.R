@@ -368,6 +368,33 @@ prog_tbl <- bind_rows(map(prog_fits, "meta")) %>%
 write_csv(prog_tbl,
           file.path(final_dir, paste0("norm_prognostic_fit_", site_name, ".csv")))
 
+# Effect sizes behind the fit: the mortality OR (point estimate + 95% CI) for each
+# normalization's exposure term(s), at BOTH adjustment levels. The AIC/AUC above say
+# which spec fits best; these give the actual association with uncertainty so the
+# point estimates and CIs can be pooled and plotted across cohorts. ORs are reported
+# per log-unit (the model coefficient) and per 1 SD of the log-exposure (comparable
+# across normalizations, since log(ers_pbw) and log(ers_pfvc) have different spreads).
+z975 <- qnorm(0.975)                              # Wald CIs (stable/fast at these N)
+prog_coefs <- map_dfr(prog_fits, function(f) {
+  d <- family_data[[f$meta$family]]
+  broom::tidy(f$model) %>%
+    filter(str_detect(term, "^log\\(")) %>%       # exposure terms only (not covariates)
+    rowwise() %>%
+    mutate(sd_log = sd(log(d[[gsub("^log\\((.*)\\)$", "\\1", term)]]), na.rm = TRUE)) %>%
+    ungroup() %>%
+    transmute(family = f$meta$family, spec = as.character(f$meta$spec),
+              adjusted = f$meta$adjusted, term,
+              or_per_log    = exp(estimate),
+              or_per_log_lo = exp(estimate - z975 * std.error),
+              or_per_log_hi = exp(estimate + z975 * std.error),
+              or_per_sd     = exp(estimate * sd_log),
+              or_per_sd_lo  = exp((estimate - z975 * std.error) * sd_log),
+              or_per_sd_hi  = exp((estimate + z975 * std.error) * sd_log),
+              std_error, n = f$meta$n)
+}) %>% mutate(site = site_name, .before = 1)
+write_csv(prog_coefs,
+          file.path(final_dir, paste0("norm_prognostic_coefs_", site_name, ".csv")))
+
 message("\nPART 2 -- prognostic fit (lower AIC = better; dAIC vs best within family x adjustment):")
 prog_tbl %>% arrange(family, adjusted, delta_aic) %>%
   pwalk(function(family, spec, adjusted, delta_aic, auc, ...)

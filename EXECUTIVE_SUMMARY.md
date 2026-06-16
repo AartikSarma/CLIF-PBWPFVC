@@ -156,9 +156,11 @@ human-readable tables and figures for local review.
   adjusted estimates are primary, with an adjusted-vs-unadjusted comparison).
 - **`norm_*_<site>.csv`** (script 05) — the normalization analysis outputs:
   discordance summary + demographics (`norm_discordance_*`), injury-tertile
-  reclassification (`norm_reclassification_*`), prognostic fit and form-vs-physiology
-  (`norm_prognostic_fit_*`, `norm_form_vs_physiology_*`), the encompassing test
-  (`norm_encompassing_*`), and the age/size interaction ladder
+  reclassification (`norm_reclassification_*`), prognostic fit and the per-spec
+  mortality-OR effect sizes (`norm_prognostic_fit_*` with AIC/AUC,
+  `norm_prognostic_coefs_*` with the OR point estimate + 95% CI per normalization,
+  both adjustment levels), form-vs-physiology (`norm_form_vs_physiology_*`), the
+  encompassing test (`norm_encompassing_*`), and the age/size interaction ladder
   (`norm_age_interaction_*`). `pooled_estimates.R` pools these across cohorts.
 - **`aic_comparison_all_<site>.csv`** — model-fit comparison: per
   `outcome` × `exposure`, the `AIC`, `delta_AIC`, and `evidence_ratio` relative
