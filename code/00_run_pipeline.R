@@ -7,6 +7,9 @@
 #   1. Restores the project environment from renv.lock.
 #   2. Runs scripts 01-05 in order, each as a clean R subprocess.
 #
+# Cross-cohort pooling is a separate, centrally-run step (code/pooled_estimates.R)
+# and is intentionally not invoked here.
+#
 # Usage (from the project root, or anywhere — the script locates the repo):
 #   Rscript code/00_run_pipeline.R
 #
@@ -57,9 +60,11 @@ pipeline_scripts <- c(
   "02_quality_checks.R",
   "03_variable_derivation.R",
   "04_analysis.R",                 # outcome analyses (replication, survival, bias)
-  "05_normalization_analysis.R",   # PBW vs PFVC normalization discordance + prognostics
-  "06_cross_cohort_forest.R"       # cross-cohort pooling + forest plots
+  "05_normalization_analysis.R"    # PBW vs PFVC normalization discordance + prognostics
 )
+# NOTE: cross-cohort pooling (code/pooled_estimates.R) is NOT part of the per-site
+# pipeline. It is run centrally by the study coordinator after every site returns
+# its `final/` outputs, and is kept local (not in the repository).
 
 rscript_bin <- file.path(R.home("bin"), "Rscript")
 

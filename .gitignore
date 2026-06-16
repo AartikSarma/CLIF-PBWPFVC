@@ -49,3 +49,7 @@ outlier-thresholds/outlier_thresholds_pediatric_vitals.csv
 # archived exploratory scratch scripts (kept locally, not part of the deliverable)
 code/archive/
 code/explore_*.R
+
+# cross-cohort pooling: run centrally by the coordinator, kept local (not a
+# per-site deliverable)
+code/pooled_estimates.R

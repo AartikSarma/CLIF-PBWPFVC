@@ -100,7 +100,7 @@ order. From the repository root:
 Rscript code/00_run_pipeline.R
 ```
 
-This restores packages from `renv.lock`, then runs scripts 01–06 sequentially,
+This restores packages from `renv.lock`, then runs scripts 01–05 sequentially,
 each as a clean subprocess. If any step fails, the runner stops and reports which
 script errored.
 
@@ -112,18 +112,27 @@ Rscript code/02_quality_checks.R           # Apply outlier thresholds, QC stats
 Rscript code/03_variable_derivation.R      # PBW, PFVC, SOFA, SF/PF, VT metrics
 Rscript code/04_analysis.R                 # Outcome analyses: regressions, survival, bias
 Rscript code/05_normalization_analysis.R   # PBW vs PFVC normalization discordance + prognostics
-Rscript code/06_cross_cohort_forest.R      # Cross-cohort pooling + forest plots (after 04, 05)
 ```
 
-Scripts must be run in order — each reads the outputs of the previous step.
-Script 06 aggregates the per-cohort outputs from scripts 04 and 05 and is
-site-agnostic: it discovers every cohort's `regression_results_long_*.csv` and
-`norm_*.csv` on disk and pools them into cross-cohort forest plots and summaries.
+Scripts must be run in order — each reads the outputs of the previous step. Each
+site runs 01–05 and returns its `output/<site>_output/final/` folder.
 
 Scripts 04 and 05 report every exposure→outcome estimate both **demographic-
 adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped, illness
-severity retained). Script 06 plots the adjusted estimate as primary and adds an
-adjusted-vs-unadjusted comparison forest.
+severity retained).
+
+### Cross-cohort pooling (run centrally)
+
+Pooling across cohorts is **not** part of the per-site pipeline. The study
+coordinator runs `code/pooled_estimates.R` after every site has returned its
+results. It is site-agnostic: it discovers each cohort's
+`regression_results_long_*.csv` and `norm_*.csv` and pools them into cross-cohort
+forest plots and summaries (adjusted estimate primary, plus an
+adjusted-vs-unadjusted comparison forest). It expects a results root containing
+one subfolder per site (each site's `final/` folder renamed to the site name) and
+writes pooled outputs to an `All sites/` subfolder there. Set the root via the
+`PBWPFVC_RESULTS_ROOT` environment variable. This script is kept local and is not
+part of the repository.
 
 ### Exploratory analyses (archived)
 

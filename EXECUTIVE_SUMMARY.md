@@ -12,9 +12,11 @@ cell-suppressed results (n >= 10) designed to be pooled across the consortium.
 
 ## What the code does
 
-The pipeline is six R scripts run in order by `code/00_run_pipeline.R`, which
-first restores the `renv` environment, then runs 01 -> 06 each as a clean
-subprocess.
+The per-site pipeline is five R scripts run in order by `code/00_run_pipeline.R`,
+which first restores the `renv` environment, then runs 01 -> 05 each as a clean
+subprocess. Cross-cohort pooling (`code/pooled_estimates.R`) is a separate step run
+centrally by the coordinator after every site returns its results — it is not part
+of the per-site runner.
 
 - **01 — Cohort identification.** Loads the eight required CLIF tables; selects
   the index hospitalization for adults who received invasive ventilation with a
@@ -58,18 +60,24 @@ subprocess.
   misses, and age/lung-size **interaction ladders**. Every model is reported
   demographic-adjusted and unadjusted; a `dp <= 0` QC filter and centered
   predictors control collinearity. Writes per-site `norm_*` outputs.
-- **06 — Cross-cohort aggregation.** Site-agnostic: discovers every site's
-  `regression_results_long_*.csv` (script 04) and `norm_*.csv` (script 05),
+- **Cross-cohort aggregation (`code/pooled_estimates.R`, run centrally).**
+  Site-agnostic and run by the coordinator after every site returns its `final/`
+  folder — not part of the per-site runner, and kept out of the repository. It
+  discovers every site's `regression_results_long_*.csv` (script 04) and
+  `norm_*.csv` (script 05) under a results root (one subfolder per site, each site's
+  `final/` renamed to the site name; root set via `PBWPFVC_RESULTS_ROOT`),
   stacks/pools them, and renders forest plots (one per analysis + a combined PDF),
   the adjusted-vs-unadjusted comparison forest, covariate forests, pooled evidence
   ratios and E-values, the pooled normalization summaries, and pooled consort and
-  PBW:PFVC distribution figures.
+  PBW:PFVC distribution figures. Pooled outputs are written to an `All sites/`
+  subfolder of the results root (excluded from discovery on re-run).
 
 ## What the output files are
 
-Everything lands under `output/<site_name>_output/` (and a shared
-`output/cross_cohort/`). The whole `output/` tree is gitignored — only
-aggregated, n >= 10-suppressed results are written.
+Per-site output lands under `output/<site_name>_output/`. The whole `output/` tree
+is gitignored — only aggregated, n >= 10-suppressed results are written. Pooled
+cross-cohort output is written by `code/pooled_estimates.R` to an `All sites/`
+subfolder of the central results root (the Box project folder).
 
 ### `intermediate/` (scripts 01–03) — working data, not for sharing
 
@@ -142,15 +150,15 @@ human-readable tables and figures for local review.
   columns: `site`, `term`, `estimate`, `conf_low`, `conf_high`, `std_error`,
   `statistic`, `p_value`, `estimate_type` (OR / HR / Beta), `analysis`,
   `model_spec` (the exposure specification), `model_family`, `adjustment`
-  (demographic-`adjusted` / `unadjusted`), `formula`, and `n_obs`. Script 06 stacks
-  these across sites to build the forest plots (the adjusted estimates are primary,
-  with an adjusted-vs-unadjusted comparison).
+  (demographic-`adjusted` / `unadjusted`), `formula`, and `n_obs`.
+  `pooled_estimates.R` stacks these across sites to build the forest plots (the
+  adjusted estimates are primary, with an adjusted-vs-unadjusted comparison).
 - **`norm_*_<site>.csv`** (script 05) — the normalization analysis outputs:
   discordance summary + demographics (`norm_discordance_*`), injury-tertile
   reclassification (`norm_reclassification_*`), prognostic fit and form-vs-physiology
   (`norm_prognostic_fit_*`, `norm_form_vs_physiology_*`), the encompassing test
   (`norm_encompassing_*`), and the age/size interaction ladder
-  (`norm_age_interaction_*`). Script 06 pools these across cohorts.
+  (`norm_age_interaction_*`). `pooled_estimates.R` pools these across cohorts.
 - **`aic_comparison_all_<site>.csv`** — model-fit comparison: per
   `outcome` × `exposure`, the `AIC`, `delta_AIC`, and `evidence_ratio` relative
   to the VT/PBW reference within that outcome, plus `is_reference` and the
@@ -237,10 +245,10 @@ human-readable tables and figures for local review.
   bias diagnostic plots (via `algorithmDiagnostics`) showing how each outcome and
   the PBW/PFVC ratio vary conditionally across demographic strata.
 
-### `output/cross_cohort/` (script 06) — pooled across sites
+### `All sites/` (`pooled_estimates.R`, run centrally) — pooled across sites
 
-Produced after each site's `regression_results_long_*.csv` (script 04) and
-`norm_*.csv` (script 05) files are collected into the local `output/` tree.
+Produced after each site returns its `final/` folder (renamed to the site name)
+into the central results root; written to the `All sites/` subfolder there.
 
 - **`regression_results_all_cohorts.csv` / `.parquet`** — every site's long
   results table stacked into one file (same columns, with `site` distinguishing
@@ -267,5 +275,5 @@ Produced after each site's `regression_results_long_*.csv` (script 04) and
 
 The key cross-site artifacts are **`regression_results_long_<site>.csv`** (outcome
 analyses, script 04) and **`norm_*_<site>.csv`** (normalization analyses, script
-05) — the files each site returns and that script 06 consumes to build the pooled
-forest plots and summaries.
+05) — the files each site returns and that `pooled_estimates.R` consumes to build
+the pooled forest plots and summaries.
