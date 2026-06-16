@@ -390,7 +390,7 @@ prog_coefs <- map_dfr(prog_fits, function(f) {
               or_per_sd     = exp(estimate * sd_log),
               or_per_sd_lo  = exp((estimate - z975 * std.error) * sd_log),
               or_per_sd_hi  = exp((estimate + z975 * std.error) * sd_log),
-              std_error, n = f$meta$n)
+              std_error = std.error, n = f$meta$n)
 }) %>% mutate(site = site_name, .before = 1)
 write_csv(prog_coefs,
           file.path(final_dir, paste0("norm_prognostic_coefs_", site_name, ".csv")))
