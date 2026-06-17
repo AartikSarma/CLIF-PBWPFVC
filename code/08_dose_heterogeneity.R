@@ -343,26 +343,41 @@ rd_dat <- decomp_dat %>% mutate(.p0 = predict(rd_fit, ., type = "response"))
 rd_dat$.p1 <- predict(rd_fit, decomp_dat %>% mutate(log_vol = log_vol + sd_vol),
                       type = "response")
 rd_dat <- rd_dat %>% mutate(.rd = .p1 - .p0)         # absolute RD per +1 SD strain
+# SENSITIVITY (reviewers will ask): RD for each patient's ACTUAL over-dose -- the
+# de-escalation from their VT/PFVC down to the 11% target (over-dosed patients
+# only; under-dosed unchanged). Unlike the uniform +1 SD, this contrast is larger
+# in the more-over-dosed (older/bias-prone) patients, so it tests whether the
+# absolute strain-attributable mortality BURDEN rises with age via exposure
+# magnitude (not per-unit susceptibility).
+cf_od <- function(df) df %>% mutate(log_vol = log(pmin(vtpfvc, VTPFVC_TARGET)))
+rd_dat$.pod  <- predict(rd_fit, cf_od(decomp_dat), type = "response")
+rd_dat <- rd_dat %>% mutate(.rd_od = .p0 - .pod)     # mortality attributable to over-dose (>=0)
 win_mean <- function(d, col, a) mean(d[[col]][abs(d$age_at_admission - a) <= WIN])
 rd_curve <- tibble(age = age_grid) %>% rowwise() %>%
   mutate(rd_pp = 100 * win_mean(rd_dat, ".rd", age),
+         rd_overdose_pp = 100 * win_mean(rd_dat, ".rd_od", age),
          baseline_mort_pct = 100 * win_mean(rd_dat, "event", age)) %>% ungroup()
-boot_rd <- matrix(NA_real_, N_BOOT_RD, length(age_grid))
+boot_rd <- boot_od <- matrix(NA_real_, N_BOOT_RD, length(age_grid))
 for (b in seq_len(N_BOOT_RD)) {
   bd <- decomp_dat[sample.int(nrow(decomp_dat), replace = TRUE), , drop = FALSE]
   fb <- tryCatch(glm(f_rd, data = bd, family = binomial), error = function(e) NULL)
   if (is.null(fb)) next
-  bd$.rdb <- predict(fb, bd %>% mutate(log_vol = log_vol + sd_vol), type = "response") -
-             predict(fb, bd, type = "response")
+  p0b <- predict(fb, bd, type = "response")
+  bd$.rdb <- predict(fb, bd %>% mutate(log_vol = log_vol + sd_vol), type = "response") - p0b
+  bd$.odb <- p0b - predict(fb, cf_od(bd), type = "response")
   boot_rd[b, ] <- vapply(age_grid, function(a) 100 * win_mean(bd, ".rdb", a), numeric(1))
+  boot_od[b, ] <- vapply(age_grid, function(a) 100 * win_mean(bd, ".odb", a), numeric(1))
 }
 rd_curve <- rd_curve %>%
   mutate(rd_lo = apply(boot_rd, 2, quantile, 0.025, na.rm = TRUE),
-         rd_hi = apply(boot_rd, 2, quantile, 0.975, na.rm = TRUE))
+         rd_hi = apply(boot_rd, 2, quantile, 0.975, na.rm = TRUE),
+         rd_od_lo = apply(boot_od, 2, quantile, 0.025, na.rm = TRUE),
+         rd_od_hi = apply(boot_od, 2, quantile, 0.975, na.rm = TRUE))
 write_csv(rd_curve, file.path(final_dir, paste0("dose_strain_rd_by_age_", site_name, ".csv")))
-message(sprintf("Absolute strain RD per +1 SD (pp): young(%.0f)=%.2f  old(%.0f)=%.2f",
-                age_grid[1], rd_curve$rd_pp[1],
-                age_grid[length(age_grid)], rd_curve$rd_pp[length(age_grid)]))
+message(sprintf("Strain RD young(%.0f)/old(%.0f) pp: per-SD %.2f/%.2f | per-overdose %.2f/%.2f",
+                age_grid[1], age_grid[length(age_grid)],
+                rd_curve$rd_pp[1], rd_curve$rd_pp[length(age_grid)],
+                rd_curve$rd_overdose_pp[1], rd_curve$rd_overdose_pp[length(age_grid)]))
 
 # =============================================================================
 # 8h. Figures
@@ -447,16 +462,23 @@ if (nrow(decomp_curve) > 0) {
 
 # (8h-5) absolute-scale strain effect by age (the biotrauma-survival claim)
 if (nrow(rd_curve) > 0) {
-  p_rd <- ggplot(rd_curve, aes(age, rd_pp)) +
+  rd_long <- bind_rows(
+    rd_curve %>% transmute(age, contrast = "per +1 SD strain", rd = rd_pp, lo = rd_lo, hi = rd_hi),
+    rd_curve %>% transmute(age, contrast = "per actual over-dose (-> 11%)",
+                           rd = rd_overdose_pp, lo = rd_od_lo, hi = rd_od_hi))
+  p_rd <- ggplot(rd_long, aes(age, rd, colour = contrast, fill = contrast)) +
     geom_hline(yintercept = 0, linetype = 2, colour = "grey60") +
-    geom_ribbon(aes(ymin = rd_lo, ymax = rd_hi), alpha = 0.2, fill = okabe[3]) +
-    geom_line(colour = okabe[3], linewidth = 1) +
-    labs(x = "Age (years)", y = "Absolute mortality RD per +1 SD strain (pct points)",
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.18, colour = NA) +
+    geom_line(linewidth = 1) +
+    scale_colour_manual(values = c("per +1 SD strain" = okabe[3],
+                                   "per actual over-dose (-> 11%)" = okabe[5]),
+                        aesthetics = c("colour", "fill"), name = NULL) +
+    labs(x = "Age (years)", y = "Absolute mortality RD (pct points)",
          title = "Absolute-scale strain effect by age (biotrauma survival)",
          subtitle = paste0(site_name, if (is_synthetic) " (SYNTHETIC)" else "",
-           " - RD = beta_strain(age) x p(1-p); rises with age via baseline risk even if the OR is age-flat")) +
-    theme_minimal(base_size = 10)
-  ggsave(pdf_path("dose_strain_rd_by_age"), p_rd, width = 8, height = 4.5)
+           " - uniform +1 SD is age-flat; the actual over-dose contrast rises with age (exposure magnitude)")) +
+    theme_minimal(base_size = 10) + theme(legend.position = "top")
+  ggsave(pdf_path("dose_strain_rd_by_age"), p_rd, width = 8.5, height = 4.5)
 }
 
 message("Wrote 6 tables + 5 figures to ", final_dir)
