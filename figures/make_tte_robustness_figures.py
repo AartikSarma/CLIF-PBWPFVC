@@ -28,9 +28,9 @@ OK = dict(orange="#E69F00", sky="#56B4E9", green="#009E73", blue="#0072B2",
 plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
 
 # Primary specification (matches script 10 knobs: C_LOW=11, C_HIGH=16, GRACE=2,
-# DAYW_CAP=5, rule="simple"). RD<0 = stress-limiting protective.
+# DAYW_CAP=5, rule="simple"). RD<0 = strain-limiting protective.
 C_LOW, C_HIGH, GRACE, CAP = 11, 16, 2, 5
-PROTECT = OK["green"]   # RD < 0  (stress-limiting reduces mortality)
+PROTECT = OK["green"]   # RD < 0  (strain-limiting reduces mortality)
 HARM    = OK["verm"]    # RD > 0
 def sgn_color(rd):
     return PROTECT if rd < 0 else HARM
@@ -95,7 +95,7 @@ for (yy, lab, rd, lo, hi, n, col, kind) in rows:
 ax.axvline(0, color="black", lw=1, ls="-", alpha=.6)
 ax.set_yticks([])
 ax.set_ylim(min(r[0] for r in rows) - 1, 1.0)
-ax.set_xlabel("60-day mortality risk difference  (stress-limiting − permissive), percentage points",
+ax.set_xlabel("60-day mortality risk difference  (strain-limiting − permissive), percentage points",
               fontsize=10)
 xmax = max(abs(sg.rd_lo.min()), abs(sg.rd_hi.max()), abs(prim_rd)) * 1.15
 ax.set_xlim(-xmax, xmax)
@@ -103,11 +103,11 @@ xticks = ax.get_xticks()
 ax.set_xticks(xticks)
 ax.set_xticklabels([f"{t*100:+.0f}" for t in xticks])
 ax.text(0.0, 1.0, "", transform=ax.transAxes)
-ax.annotate("◀ stress-limiting protective", xy=(0.0, 1.0), xytext=(0.02, 1.02),
+ax.annotate("◀ strain-limiting protective", xy=(0.0, 1.0), xytext=(0.02, 1.02),
             xycoords="axes fraction", fontsize=9, color=PROTECT, ha="left", va="bottom")
 ax.annotate("harm ▶", xy=(1.0, 1.0), xytext=(0.98, 1.02),
             xycoords="axes fraction", fontsize=9, color=HARM, ha="right", va="bottom")
-fig.suptitle(f"Stress-limiting ventilation: subgroup mortality risk differences ({SITE})",
+fig.suptitle(f"Strain-limiting ventilation: subgroup mortality risk differences ({SITE})",
              fontsize=12.5, y=1.0)
 fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.99))
 fig.savefig(f"{OUT}/fig5_tte_subgroup_forest_{SITE}.png", dpi=150, bbox_inches="tight")
@@ -143,10 +143,10 @@ lo, hi = rng(ch.rd)
 bars.append((f"Permissive ceiling\n(c_high {'/'.join(str(int(x)) for x in sorted(ch.c_high.unique()))}%)",
              lo, hi, ""))
 
-# Stress-limiting ceiling c_low: hold c_high + grace at primary
+# Strain-limiting ceiling c_low: hold c_high + grace at primary
 cl = cg[(cg.c_high == C_HIGH) & (cg.grace == GRACE)]
 lo, hi = rng(cl.rd)
-bars.append((f"Stress-limit ceiling\n(c_low {'/'.join(str(int(x)) for x in sorted(cl.c_low.unique()))}%)",
+bars.append((f"Strain-limit ceiling\n(c_low {'/'.join(str(int(x)) for x in sorted(cl.c_low.unique()))}%)",
              lo, hi, ""))
 
 # Deviation rule: simple vs corrected
@@ -185,7 +185,7 @@ xticks2 = ax.get_xticks()
 ax.set_xticks(xticks2)
 ax.set_xticklabels([f"{t*100:+.1f}" for t in xticks2])
 ax.set_ylim(-.6, len(bars) + .35)
-fig.suptitle(f"Design-choice robustness of the stress-limiting effect ({SITE})", fontsize=12.5, y=0.99)
+fig.suptitle(f"Design-choice robustness of the strain-limiting effect ({SITE})", fontsize=12.5, y=0.99)
 ax.text(.5, -.22, "Each bar spans the RD range as one knob varies, others held at the primary spec.",
         transform=ax.transAxes, ha="center", fontsize=8.5, color=OK["grey"])
 fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.99))

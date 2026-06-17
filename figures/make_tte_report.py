@@ -77,7 +77,7 @@ def overall_table():
                  f"<td>{int(o['n_patients']):,}</td>"
                  f"<td>{ci(o,'lib')}</td></tr>")
     return ("<table><thead><tr><th>Cohort</th>"
-            "<th>60-day mortality RD<br><span class='sub'>stress-limiting − permissive (pp)</span></th>"
+            "<th>60-day mortality RD<br><span class='sub'>strain-limiting − permissive (pp)</span></th>"
             "<th>Risk (SL vs perm)</th><th>n</th>"
             "<th>28-day liberation CIF diff<br><span class='sub'>(pp)</span></th></tr></thead>"
             f"<tbody>{rows}</tbody></table>")
@@ -86,9 +86,10 @@ def diag_table():
     rows = ""
     for s in SITES:
         d = R[s]["diag"].set_index("arm")
+        arm_disp = {"permissive": "permissive", "stress_limiting": "strain-limiting"}
         for arm in ["permissive", "stress_limiting"]:
             r = d.loc[arm]
-            rows += (f"<tr><td>{s}</td><td>{arm.replace('_','-')}</td>"
+            rows += (f"<tr><td>{s}</td><td>{arm_disp[arm]}</td>"
                      f"<td>{r['frac_deviated']*100:.1f}%</td>"
                      f"<td>{r['ess_frac']:.3f}</td>"
                      f"<td>{r['wt_max']:.2f}</td></tr>")
@@ -225,14 +226,14 @@ parts.append(f"<!doctype html><html lang='en'><head><meta charset='utf-8'>"
 # --- title + abstract --------------------------------------------------------
 mi, uc = O["MIMIC"], O["UCSF"]
 parts.append(f"""
-<h1>Longitudinal Target Trial Emulation of a Stress-Limiting Ventilation Strategy</h1>
+<h1>Longitudinal Target Trial Emulation of a Strain-Limiting Ventilation Strategy</h1>
 <p class="muted">A clone-censor-weight (CCW) per-protocol analysis with an inverse-probability-of-censoring-weighted
 marginal structural model — annotated walkthrough of <code>code/10_longitudinal_tte.R</code>,
 with results from the MIMIC and UCSF CLIF cohorts.</p>
 
 <p class="lead">We emulate a trial that randomizes mechanically-ventilated patients to one of two
 <i>sustained</i> tidal-volume strategies defined on the size-relative dose VT/PFVC (tidal volume ÷ predicted
-forced vital capacity): a <b>stress-limiting</b> arm (keep VT/PFVC ≤ 11%)
+forced vital capacity): a <b>strain-limiting</b> arm (keep VT/PFVC ≤ 11%)
 and a <b>permissive</b> arm (≤ 16%, ≈ usual care). The headline per-protocol effect on 60-day mortality is
 <b>{ci(mi)} pp in MIMIC</b> and <b>{ci(uc)} pp in UCSF</b> — a concordant ≈5–6 percentage-point absolute
 mortality reduction that survives every sensitivity we ran.</p>
@@ -285,7 +286,7 @@ outcome, so the analysis cannot drift into an ill-defined comparison.</p>
 <td>Cohort from scripts 01–03 with a valid PFVC, demographics, SOFA, height (§10a)</td></tr>
 <tr><td><b>Time zero</b></td><td>Start of invasive ventilation</td>
 <td><code>t0 = recorded_dttm</code> at index IMV; follow-up day 0 (§10a)</td></tr>
-<tr><td><b>Strategies</b></td><td>Keep VT/PFVC ≤ 11% (stress-limiting) vs ≤ 16% (permissive) every day on the vent</td>
+<tr><td><b>Strategies</b></td><td>Keep VT/PFVC ≤ 11% (strain-limiting) vs ≤ 16% (permissive) every day on the vent</td>
 <td>Two ceilings <code>C_LOW=11</code>, <code>C_HIGH=16</code>, sustained over the ventilation window (§10c)</td></tr>
 <tr><td><b>Assignment</b></td><td>Randomized at time zero</td>
 <td><b>Cloning</b>: every patient is copied into <i>both</i> arms at t0 (§10c–d)</td></tr>
@@ -330,7 +331,15 @@ adhered, restoring the broken exchangeability.</li>
 parts.append('<h2 id="walk">3 · Code walkthrough</h2>'
  '<p>The full source of <code>code/10_longitudinal_tte.R</code> follows, in order, each block preceded by an '
  'explanation of what it does and why. Nothing here is re-run; the numbers in §4 come from the result CSVs '
- 'already written by these exact lines on MIMIC and UCSF.</p>')
+ 'already written by these exact lines on MIMIC and UCSF.</p>'
+ + callout("note", "A naming note on the embedded source",
+   "The low-ceiling arm caps <b>VT/PFVC</b> — a <b>strain</b> quantity (volume ÷ size, the E⁰ rung of the "
+   "elastance ladder), not <b>stress</b> (transpulmonary pressure = E<sub>spec</sub>×strain). This report "
+   "therefore calls it the <b>strain-limiting</b> arm throughout the prose, figures, and tables. The R source "
+   "below still uses the legacy identifier <code>stress_limiting</code> for the arm and its result-CSV columns "
+   "(<code>risk_stress_limiting</code>, …); that is a variable name only — it denotes the strain-limiting arm "
+   "and will be renamed on the next full re-run. Read every <code>stress_limiting</code> in the code as "
+   "&lsquo;strain-limiting&rsquo;."))
 
 # 3.1 header
 parts.append(f"""
@@ -462,7 +471,7 @@ parts.append(f"""
 <ul>
 <li><b>Weight cap</b> {{3, 5, 10, ∞}} — how aggressively the IPC weights are truncated. The ∞ (untruncated)
 row is expected to be degenerate and is reported precisely to show <i>why</i> truncation is needed.</li>
-<li><b>Ceiling/grace grid</b> — every combination of stress-limiting ceiling {{10,11,12}}, permissive ceiling
+<li><b>Ceiling/grace grid</b> — every combination of strain-limiting ceiling {{10,11,12}}, permissive ceiling
 {{14,16}}, and grace {{1,2,3}} days (18 specifications), to show the effect is not an artifact of the exact
 11-vs-16 choice.</li>
 <li><b>Deviation rule</b> — simple vs corrected (§10c).</li>
@@ -477,7 +486,7 @@ parts.append(f"""
 reports the fraction of clones that ever deviate, the 99th-percentile and maximum cumulative weight, and the
 <b>effective sample size fraction</b> — the share of nominal sample size that survives the weighting. A low ESS
 fraction (say &lt;0.1) would mean a handful of clones carry the estimate and the result is fragile. As §4 shows,
-the stress-limiting arm retains ESS ≈ 0.56 at both sites — healthy.</p>
+the strain-limiting arm retains ESS ≈ 0.56 at both sites — healthy.</p>
 {code('10g')}
 """)
 
@@ -505,7 +514,7 @@ benefit — i.e. a somewhat larger <i>relative</i> effect.</p>
 <h3>Positivity &amp; weight diagnostics</h3>
 {diag_table()}
 <p>The permissive arm barely deviates (≈2–3% of clones) because most patients already sit below 16% — its ESS
-is essentially the full sample. The stress-limiting arm deviates in ≈24–26% of clones and retains an ESS
+is essentially the full sample. The strain-limiting arm deviates in ≈24–26% of clones and retains an ESS
 fraction of ≈0.56 after truncation, with the maximum weight pinned at the cap of 5. These are the diagnostics
 that certify the longitudinal design genuinely escaped the positivity wall: there is real, weight-stable overlap
 on the <i>decision</i>, even though there was none on the static exposure level.</p>
@@ -539,7 +548,7 @@ matters:</p>
 <p>The 28-day liberation CIF difference is the one place the cohorts diverge: MIMIC
 <b>{ci(mi,'lib')} pp</b> (a small, significant reduction in/delay of extubation) versus UCSF
 <b>{ci(uc,'lib')} pp</b> (null). This is mechanistically coherent rather than alarming: under a strong mortality
-benefit, the patients stress-limiting keeps alive are precisely the sickest, slowest-to-wean ones who would
+benefit, the patients strain-limiting keeps alive are precisely the sickest, slowest-to-wean ones who would
 otherwise have died (the competing event), which flattens or slightly lowers the liberation CIF. It is a real
 between-site difference worth pre-empting — reviewers will ask about ventilator duration — by reporting
 ventilator-free days alongside and framing it as "no extubation penalty at UCSF, a small one at MIMIC, against a
@@ -574,7 +583,7 @@ threats = [
  "contrast (c≈0.996, ESS≈0).",
  "Two lines of defense. First, the design contrasts <b>decisions over time</b>, on which the positivity probe "
  "found genuine overlap (AUC≈0.66–0.70) — not a static exposure level near-determined by demographics. Second, "
- "the §10g diagnostics <i>measure</i> the overlap directly: ESS≈0.56 in the stress-limiting arm at both sites, "
+ "the §10g diagnostics <i>measure</i> the overlap directly: ESS≈0.56 in the strain-limiting arm at both sites, "
  "and the weight-cap sweep shows the estimate is stable for any sane truncation and only degenerates at ∞ "
  "(which is reported, not hidden).",
  "rescue"),
