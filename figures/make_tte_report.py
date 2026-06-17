@@ -185,21 +185,31 @@ def ph_block():
     if not have:
         return ("<p class='muted'>This sensitivity (script 10 §10i, [T5b]) computes on the next real-data "
                 "re-run: synthetic CLIF has no blood-gas labs, and the current MIMIC/UCSF result CSVs predate "
-                "the analysis. On re-run the table below populates automatically with the three-row comparison "
-                "— full-cohort primary vs the pH-covered subset without and with lagged-pH adjustment.</p>")
-    label = {"full_cohort_primary": "Full cohort (primary, no pH)",
-             "ph_subset_no_ph_adj": "pH-covered subset, no pH adjustment",
-             "ph_subset_with_ph_adj": "pH-covered subset, + lagged pH"}
+                "the analysis. On re-run the table below populates automatically — for each pH source (pooled "
+                "arterial+venous, and arterial-only), the gas-covered-subset RD without and with lagged-pH "
+                "adjustment, against the full-cohort primary.</p>")
+    src_label = {"full_cohort": "Full cohort (primary)",
+                 "pooled_art_plus_venous": "Arterial + venous (+0.05)",
+                 "arterial_only": "Arterial only"}
+    spec_label = {"primary": "— (no pH)",
+                  "subset_no_ph_adj": "subset, no pH adj.",
+                  "subset_with_ph_adj": "subset, + lagged pH"}
+    order = [("full_cohort", "primary"),
+             ("pooled_art_plus_venous", "subset_no_ph_adj"),
+             ("pooled_art_plus_venous", "subset_with_ph_adj"),
+             ("arterial_only", "subset_no_ph_adj"),
+             ("arterial_only", "subset_with_ph_adj")]
     rows = ""
     for s, df in have.items():
-        d = df.set_index("spec")
-        for key in ["full_cohort_primary", "ph_subset_no_ph_adj", "ph_subset_with_ph_adj"]:
-            if key in d.index:
-                r = d.loc[key]
-                rows += (f"<tr><td>{s}</td><td>{label[key]}</td><td>{pp(r['rd'])}</td>"
+        d = df.set_index(["ph_source", "spec"])
+        for src, spec in order:
+            if (src, spec) in d.index:
+                r = d.loc[(src, spec)]
+                rows += (f"<tr><td>{s}</td><td>{src_label.get(src, src)}</td>"
+                         f"<td>{spec_label.get(spec, spec)}</td><td>{pp(float(r['rd']))}</td>"
                          f"<td>{int(r['n_patients']):,}</td></tr>")
-    return ("<table><thead><tr><th>Cohort</th><th>Specification</th><th>RD (pp)</th><th>n</th>"
-            "</tr></thead>" f"<tbody>{rows}</tbody></table>")
+    return ("<table><thead><tr><th>Cohort</th><th>pH source</th><th>Specification</th>"
+            "<th>RD (pp)</th><th>n</th></tr></thead>" f"<tbody>{rows}</tbody></table>")
 
 # =============================================================================
 # assemble the HTML
@@ -581,11 +591,14 @@ matters:</p>
 <p>Permissive hypercapnia is the specific feedback that makes a low-tidal-volume strategy "fail": cutting VT
 raises CO₂ and drops pH, which prompts the clinician to relax the ceiling (a deviation), and acidosis is itself
 prognostic. So arterial pH is the single most decision-relevant time-varying confounder for this exposure. The
-sensitivity pools arterial and venous gases (venous imputed as venous + 0.05), adds <b>lagged pH</b> to the IPCW
-denominator on the gas-covered subset, and compares the risk difference with versus without that adjustment —
-stability across the two means the strategy effect is not an artifact of uncontrolled acidosis. It is reported
-as a sensitivity rather than a core-panel confounder because gas sampling is indication-driven (missing-not-at-
-random); forcing it into the primary would import selection bias.</p>
+sensitivity adds <b>lagged pH</b> to the IPCW denominator on the gas-covered subset and compares the risk
+difference with versus without that adjustment — stability means the strategy effect is not an artifact of
+uncontrolled acidosis. It is run for <b>two pH sources</b>: a <i>pooled</i> series (arterial + venous gases,
+venous imputed as venous + 0.05) and an <i>arterial-only</i> series (dropping the imputed venous values), so the
+venous imputation cannot be doing the work. It is a sensitivity rather than a core-panel confounder because gas
+sampling is indication-driven (missing-not-at-random); forcing it into the primary would import selection bias.
+Each source also reports the subset <i>without</i> pH, so any selection from restricting to gas-sampled patients
+is itself visible.</p>
 {ph_block()}
 
 <h3>Secondary endpoint — liberation (competing risk) <span class="tag">[T1]</span></h3>
@@ -637,12 +650,12 @@ threats = [
  "rises, pH falls, and the clinician relaxes the ceiling — i.e. acidosis directly drives deviation — while "
  "acidosis is independently prognostic. If pH is uncaptured, this is the most mechanistically plausible "
  "residual time-varying confounder for <i>this</i> exposure specifically.",
- "Addressed directly by the pH sensitivity (§4, [T5b]): arterial pH (with venous gases imputed as venous + "
- "0.05) is added as a <b>lagged</b> confounder to the IPCW denominator on the gas-covered subset, and the risk "
- "difference is compared with versus without that adjustment. Stability across the two localizes that acidosis "
- "is not driving the effect. It is a sensitivity rather than a core confounder because blood-gas sampling is "
- "indication-driven (missing-not-at-random); the comparison also reports the same subset without pH so any "
- "selection from restricting to gas-sampled patients is itself visible.",
+ "Addressed directly by the pH sensitivity (§4, [T5b]): lagged pH is added to the IPCW denominator on the "
+ "gas-covered subset and the risk difference is compared with versus without that adjustment. It is run for two "
+ "pH sources — pooled (arterial + venous imputed as venous + 0.05) and arterial-only (no venous) — so neither "
+ "the venous imputation nor uncontrolled acidosis can be driving the effect. It is a sensitivity rather than a "
+ "core confounder because blood-gas sampling is indication-driven (missing-not-at-random); each source also "
+ "reports the same subset without pH so any selection from restricting to gas-sampled patients is itself visible.",
  "rescue"),
 ("No unmeasured time-varying confounding (sequential exchangeability)",
  "The IPCW estimate is consistent only if deviation from a ceiling is fully explained by the <i>measured</i> "

@@ -49,8 +49,10 @@
 #        acidosis (permissive hypercapnia) is THE feedback that drives deviation
 #        from a low-VT arm, so it is the most decision-relevant gas. Reported as a
 #        SENSITIVITY, not a core-panel member, because ABG/VBG sampling is
-#        indication-driven (missing-not-at-random). tte_ccw_sens_ph_*: full-cohort
-#        vs pH-subset(no pH) vs pH-subset(+ lagged pH).
+#        indication-driven (missing-not-at-random). Run for TWO pH sources --
+#        "pooled" (arterial + venous+0.05) and "arterial_only" (drops imputed
+#        venous, to show the +0.05 imputation isn't doing the work). Each: subset
+#        RD without vs with lagged pH. tte_ccw_sens_ph_* (ph_source, spec, rd, n).
 # =============================================================================
 
 # Pin BLAS to one thread per process so the PSOCK bootstrap workers don't each
@@ -170,21 +172,26 @@ extub <- panel %>% group_by(hospitalization_id) %>%
 panel <- panel %>% left_join(extub, by = "hospitalization_id")
 message("Panel: ", nrow(panel), " patient-days, ", n_distinct(panel$hospitalization_id), " patients")
 
-# Daily arterial-equivalent pH for the [T5b] sensitivity: pool arterial + venous
-# gases, imputing arterial from venous as venous + 0.05 (venous pH runs ~0.03-0.05
-# below arterial); take the daily median. Kept SEPARATE from the core panel because
-# gas sampling is indication-driven (missing-not-at-random) -> sensitivity only.
-ph_daily <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+# Daily pH for the [T5b] sensitivity. Read both gases once, then derive two daily
+# series: (1) POOLED arterial-equivalent = arterial + venous imputed as venous +
+# 0.05 (venous pH runs ~0.03-0.05 below arterial); (2) ARTERIAL-ONLY (drops the
+# imputed venous values, to confirm the +0.05 imputation isn't doing the work).
+# Kept SEPARATE from the core panel: gas sampling is indication-driven (MNAR).
+gas <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
   filter(lab_category %in% c("ph_arterial", "ph_venous"), !is.na(lab_value_numeric)) %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
   mutate(vent_day = floor(as.numeric(difftime(lab_result_dttm, t0, units = "days"))),
          ph_art_eq = if_else(lab_category == "ph_venous",
                              lab_value_numeric + 0.05, lab_value_numeric)) %>%
-  filter(vent_day >= 0, vent_day <= MAX_VENT_DAY) %>%
-  group_by(hospitalization_id, vent_day) %>%
+  filter(vent_day >= 0, vent_day <= MAX_VENT_DAY)
+ph_daily <- gas %>% group_by(hospitalization_id, vent_day) %>%        # pooled (art + venous+0.05)
   summarise(ph = median(ph_art_eq, na.rm = TRUE), .groups = "drop")
-message("pH panel: ", nrow(ph_daily), " patient-days with a gas, ",
-        n_distinct(ph_daily$hospitalization_id), " patients")
+ph_daily_art <- gas %>% filter(lab_category == "ph_arterial") %>%     # arterial only
+  group_by(hospitalization_id, vent_day) %>%
+  summarise(ph = median(lab_value_numeric, na.rm = TRUE), .groups = "drop")
+message("pH panel: ", nrow(ph_daily), " patient-days (pooled), ",
+        n_distinct(ph_daily$hospitalization_id), " patients; ",
+        n_distinct(ph_daily_art$hospitalization_id), " with an arterial gas")
 
 # =============================================================================
 # 10c. Parameterized arm builder: IPCW day-weights (lagged-confounder model)
@@ -416,37 +423,45 @@ cat("\n=== deviation-rule sensitivity ([T4]) ===\n"); print(as.data.frame(t4_sen
 cat("=== ceiling/grace grid ([T3]): RD range ", round(min(t3_sens$rd),3), " to ", round(max(t3_sens$rd),3), " ===\n")
 
 # =============================================================================
-# 10i. pH sensitivity ([T5b]): add lagged arterial pH (venous imputed +0.05) to the
-#      IPCW denominator, on the pH-covered subset. Three rows isolate the question:
-#        full_cohort_primary    -- the headline RD (no pH, all patients)
-#        ph_subset_no_ph_adj    -- same RD re-estimated on pH-covered patients only
-#                                  (shows whether that subset is itself selected)
-#        ph_subset_with_ph_adj  -- pH-covered patients WITH lagged pH in the weight
-#                                  model (the actual acidosis-adjusted estimate)
-#      Stability across the last two = the strategy effect is not driven by
-#      unmeasured respiratory acidosis (the permissive-hypercapnia feedback).
+# 10i. pH sensitivity ([T5b]): add lagged pH to the IPCW denominator on the
+#      gas-covered subset. Run for TWO pH sources so the venous imputation can be
+#      checked: "pooled" (arterial + venous+0.05) and "arterial_only" (no venous).
+#      For each source, two rows isolate the question:
+#        subset_no_ph_adj    -- RD re-estimated on that subset, NO pH in the model
+#                               (shows whether the gas-sampled subset is selected)
+#        subset_with_ph_adj  -- same subset WITH lagged pH (acidosis-adjusted)
+#      Stability across the two rows (and across the two sources) = the strategy
+#      effect is not driven by unmeasured respiratory acidosis or by the venous
+#      imputation. full_cohort/primary row carries the headline RD for reference.
 # =============================================================================
-ph_ids   <- unique(ph_daily$hospitalization_id)
-panel_ph <- panel %>% filter(hospitalization_id %in% ph_ids) %>%
-  left_join(ph_daily, by = c("hospitalization_id", "vent_day")) %>%
-  group_by(hospitalization_id) %>% arrange(vent_day) %>%
-  fill(ph, .direction = "downup") %>% ungroup()   # LOCF + backfill within patient
-n_ph <- n_distinct(panel_ph$hospitalization_id)
-if (n_ph >= 100) {
-  d_ph_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_ph, use_ph = FALSE)
-  d_ph_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_ph, use_ph = TRUE)
-  ph_sens <- tibble(
-    spec = c("full_cohort_primary", "ph_subset_no_ph_adj", "ph_subset_with_ph_adj"),
-    rd = c(unname(point["rd"]), unname(rd_from(d_ph_base$long)["rd"]),
-           unname(rd_from(d_ph_adj$long)["rd"])),
-    n_patients = c(length(ids), n_ph, n_ph),
-    frac_of_cohort = round(c(1, n_ph / length(ids), n_ph / length(ids)), 3))
+ph_sens_one <- function(phd, src_label) {
+  pnl <- panel %>% filter(hospitalization_id %in% unique(phd$hospitalization_id)) %>%
+    left_join(phd, by = c("hospitalization_id", "vent_day")) %>%
+    group_by(hospitalization_id) %>% arrange(vent_day) %>%
+    fill(ph, .direction = "downup") %>% ungroup()   # LOCF + backfill within patient
+  n_src <- n_distinct(pnl$hospitalization_id)
+  if (n_src < 100) {
+    message("pH sensitivity [", src_label, "] skipped: ", n_src, " patients (<100).")
+    return(NULL)
+  }
+  d_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, use_ph = FALSE)
+  d_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, use_ph = TRUE)
+  tibble(ph_source = src_label, spec = c("subset_no_ph_adj", "subset_with_ph_adj"),
+         rd = c(unname(rd_from(d_base$long)["rd"]), unname(rd_from(d_adj$long)["rd"])),
+         n_patients = n_src, frac_of_cohort = round(n_src / length(ids), 3))
+}
+ph_sens <- bind_rows(
+  tibble(ph_source = "full_cohort", spec = "primary", rd = unname(point["rd"]),
+         n_patients = length(ids), frac_of_cohort = 1),
+  ph_sens_one(ph_daily,     "pooled_art_plus_venous"),
+  ph_sens_one(ph_daily_art, "arterial_only"))
+if (nrow(ph_sens) > 1) {
   write_csv(ph_sens, file.path(final_dir, paste0("tte_ccw_sens_ph_", site_name, ".csv")))
-  cat("\n=== pH sensitivity ([T5b]: arterial; venous imputed +0.05) ===\n")
+  cat("\n=== pH sensitivity ([T5b]: pooled vs arterial-only) ===\n")
   print(as.data.frame(ph_sens %>% mutate(rd = round(rd, 3))), row.names = FALSE)
 } else {
-  message("pH sensitivity ([T5b]) skipped: ", n_ph,
-          " patients with a gas (<100; e.g. synthetic CLIF has no pH labs).")
+  message("pH sensitivity ([T5b]) skipped: no source had >=100 patients ",
+          "(e.g. synthetic CLIF has no pH labs).")
 }
 
 # =============================================================================
