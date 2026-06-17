@@ -31,8 +31,7 @@ table_names <- c("patient", "hospitalization", "adt", "respiratory_support",
                  "vitals", "labs", "medication_admin_continuous",
                  "patient_assessments")
 
-clif_tables <- list()
-# Check if files are available
+# Check that all files are present before loading
 for (tbl in table_names) {
   fpath <- file.path(tables_path, paste0("clif_", tbl, ".", file_type))
   if (!file.exists(fpath)) {
@@ -40,41 +39,52 @@ for (tbl in table_names) {
   }
 }
 
-#If all files are available, load the data: 
-if(file_type == "parquet"){
-  for (tbl in table_names) {
-    fpath <- file.path(tables_path, paste0("clif_", tbl, ".", file_type))
-    clif_tables[[tbl]] <- arrow::read_parquet(fpath)
-    message("Loaded ", tbl, ": ", nrow(clif_tables[[tbl]]), " rows")
-  }
+# Loader. For PARQUET, open each table as a lazy Arrow dataset so column/row
+# predicates push down to the file scan -- only the rows we keep are ever
+# materialized, and collect() realizes the query. CSV/FST have no predicate
+# pushdown, so they read in full and filter in memory (collect() is then a
+# no-op on the local frame). One code path serves all three formats because
+# collect() is a no-op on a local data frame.
+open_clif <- function(tbl) {
+  fpath <- file.path(tables_path, paste0("clif_", tbl, ".", file_type))
+  if (file_type == "parquet") return(arrow::open_dataset(fpath))
+  if (file_type == "csv")     return(readr::read_csv(fpath, show_col_types = FALSE))
+  if (file_type == "fst")     return(fst::read_fst(fpath))
+  stop("Unsupported file_type: ", file_type)
 }
 
-if(file_type == "csv"){
-  for (tbl in table_names) {
-    fpath <- file.path(tables_path, paste0("clif_", tbl, ".", file_type))
-    clif_tables[[tbl]] <- readr::read_csv(fpath)
-    message("Loaded ", tbl, ": ", nrow(clif_tables[[tbl]]), " rows")
-  }
-}
+# Category whitelists for the big event tables. Defined once and used BOTH for the
+# load-time predicate pushdown here AND the downstream extraction filters below.
+# Pre-filtering at load is safe: each big table is consumed only within its
+# whitelist. ph_arterial/ph_venous feed the script-10 [T5b] pH sensitivity.
+vitals_categories_needed     <- c("height_cm", "weight_kg", "spo2", "map")
+med_categories_needed        <- c("norepinephrine", "epinephrine", "vasopressin",
+                                  "dopamine", "phenylephrine", "dobutamine")
+lab_categories_needed        <- c("po2_arterial", "pco2_arterial", "creatinine",
+                                  "bilirubin_total", "platelet_count",
+                                  "ph_arterial", "ph_venous")
+assessment_categories_needed <- c("gcs_total")
 
-if(file_type == "fst"){
-  for (tbl in table_names) {
-    fpath <- file.path(tables_path, paste0("clif_", tbl, ".", file_type))
-    clif_tables[[tbl]] <- fst::read_fst(fpath)
-    message("Loaded ", tbl, ": ", nrow(clif_tables[[tbl]]), " rows")
-  }
-}
+# Eligibility tables: read in full (used wholesale to derive the cohort).
+clif_patient             <- open_clif("patient") %>% collect()
+clif_hospitalization     <- open_clif("hospitalization") %>% collect()
+clif_adt                 <- open_clif("adt") %>% collect()
+clif_respiratory_support <- open_clif("respiratory_support") %>% collect()
 
-#Create R objects for analysis: 
-clif_patient <- clif_tables$patient
-clif_hospitalization <- clif_tables$hospitalization
-clif_adt <- clif_tables$adt
-clif_respiratory_support <- clif_tables$respiratory_support
-clif_vitals <- clif_tables$vitals
-clif_labs <- clif_tables$labs
-clif_meds <- clif_tables$medication_admin_continuous
-clif_assessments <- clif_tables$patient_assessments
-rm(clif_tables)
+# Big event tables: push the category predicate down (parquet), then materialize.
+clif_vitals      <- open_clif("vitals") %>%
+  filter(vital_category %in% vitals_categories_needed) %>% collect()
+clif_labs        <- open_clif("labs") %>%
+  filter(lab_category %in% lab_categories_needed) %>% collect()
+clif_meds        <- open_clif("medication_admin_continuous") %>%
+  filter(med_category %in% med_categories_needed) %>% collect()
+clif_assessments <- open_clif("patient_assessments") %>%
+  filter(assessment_category %in% assessment_categories_needed) %>% collect()
+
+message("Loaded: patient=", nrow(clif_patient), " hosp=", nrow(clif_hospitalization),
+        " adt=", nrow(clif_adt), " resp=", nrow(clif_respiratory_support))
+message("Loaded (category-filtered): vitals=", nrow(clif_vitals), " labs=", nrow(clif_labs),
+        " meds=", nrow(clif_meds), " assessments=", nrow(clif_assessments))
 
 # =============================================================================
 # Cohort filtering
@@ -251,8 +261,9 @@ cohort_vitals <- bind_rows(
 # Extract labs (PaO2, creatinine, bilirubin_total, platelets)
 # =============================================================================
 
-lab_categories_needed <- c("po2_arterial", "pco2_arterial", "creatinine", "bilirubin_total", "platelet_count")
-
+# lab_categories_needed (incl. ph_arterial/ph_venous for the script-10 [T5b]
+# sensitivity) is defined at load above and already pushed down at read time;
+# this filter is now a no-op safeguard on the in-memory frame.
 cohort_labs <- clif_labs %>%
   filter(hospitalization_id %in% eligible_hospitalizations,
          lab_category %in% lab_categories_needed) %>%
