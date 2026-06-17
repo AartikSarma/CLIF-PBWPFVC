@@ -33,6 +33,9 @@ R = {}
 for s in SITES:
     def L(stub, _s=s):
         return _norm(pd.read_csv(finalp(_s, stub)))
+    def L_opt(stub, _s=s):   # optional CSV (e.g. pH sensitivity, written only on re-run)
+        pth = finalp(_s, stub)
+        return _norm(pd.read_csv(pth)) if os.path.exists(pth) else None
     R[s] = {
         "overall":  L("tte_ccw_overall").iloc[0],
         "diag":     L("tte_ccw_diagnostics"),
@@ -40,6 +43,7 @@ for s in SITES:
         "wcap":     L("tte_ccw_sens_weightcap"),
         "cg":       L("tte_ccw_sens_ceiling_grace"),
         "rule":     L("tte_ccw_sens_rule"),
+        "ph":       L_opt("tte_ccw_sens_ph"),
     }
 
 # ---- R source, sliced by section (1-indexed inclusive line ranges) ----------
@@ -175,6 +179,27 @@ def rule_table():
     return ("<table><thead><tr><th>Cohort</th><th>Simple rule RD</th>"
             "<th>Corrected rule RD</th><th>Deviated (simple/corr)</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>")
+
+def ph_block():
+    have = {s: R[s]["ph"] for s in SITES if R[s]["ph"] is not None}
+    if not have:
+        return ("<p class='muted'>This sensitivity (script 10 §10i, [T5b]) computes on the next real-data "
+                "re-run: synthetic CLIF has no blood-gas labs, and the current MIMIC/UCSF result CSVs predate "
+                "the analysis. On re-run the table below populates automatically with the three-row comparison "
+                "— full-cohort primary vs the pH-covered subset without and with lagged-pH adjustment.</p>")
+    label = {"full_cohort_primary": "Full cohort (primary, no pH)",
+             "ph_subset_no_ph_adj": "pH-covered subset, no pH adjustment",
+             "ph_subset_with_ph_adj": "pH-covered subset, + lagged pH"}
+    rows = ""
+    for s, df in have.items():
+        d = df.set_index("spec")
+        for key in ["full_cohort_primary", "ph_subset_no_ph_adj", "ph_subset_with_ph_adj"]:
+            if key in d.index:
+                r = d.loc[key]
+                rows += (f"<tr><td>{s}</td><td>{label[key]}</td><td>{pp(r['rd'])}</td>"
+                         f"<td>{int(r['n_patients']):,}</td></tr>")
+    return ("<table><thead><tr><th>Cohort</th><th>Specification</th><th>RD (pp)</th><th>n</th>"
+            "</tr></thead>" f"<tbody>{rows}</tbody></table>")
 
 # =============================================================================
 # assemble the HTML
@@ -552,6 +577,17 @@ between the arms yields a larger effect, and a longer grace mildly attenuates it
 matters:</p>
 {rule_table()}
 
+<h4>Respiratory-acidosis (pH) sensitivity <span class="tag">[T5b]</span></h4>
+<p>Permissive hypercapnia is the specific feedback that makes a low-tidal-volume strategy "fail": cutting VT
+raises CO₂ and drops pH, which prompts the clinician to relax the ceiling (a deviation), and acidosis is itself
+prognostic. So arterial pH is the single most decision-relevant time-varying confounder for this exposure. The
+sensitivity pools arterial and venous gases (venous imputed as venous + 0.05), adds <b>lagged pH</b> to the IPCW
+denominator on the gas-covered subset, and compares the risk difference with versus without that adjustment —
+stability across the two means the strategy effect is not an artifact of uncontrolled acidosis. It is reported
+as a sensitivity rather than a core-panel confounder because gas sampling is indication-driven (missing-not-at-
+random); forcing it into the primary would import selection bias.</p>
+{ph_block()}
+
 <h3>Secondary endpoint — liberation (competing risk) <span class="tag">[T1]</span></h3>
 <p>The 28-day liberation CIF difference is the one place the cohorts diverge: MIMIC
 <b>{ci(mi,'lib')} pp</b> (a small, significant reduction in/delay of extubation) versus UCSF
@@ -572,6 +608,42 @@ analysis that addresses it.</p>
 """)
 
 threats = [
+("Demographic paths to mortality not mediated by lung volume (especially age)",
+ "Age, sex, and race have many routes to death besides lung size — frailty, comorbidity, immune senescence. "
+ "In a conventional <i>dose</i>→mortality regression these are open backdoors, because VT/PFVC is a near-"
+ "deterministic function of demographics (GLI-2012 + Devine), so demographics are a common cause of both the "
+ "exposure and the outcome. This is the critique a general-medicine reviewer is most likely to raise.",
+ "<b>The TTE changes the nature of this question.</b> The two strategies are assigned by <b>cloning the same "
+ "patients</b> into both arms at t0, and demographics are <i>time-invariant</i> — so age, sex, and race (and "
+ "any unmeasured mortality risk they index) are <b>identical between the strain-limiting and permissive clones "
+ "by construction</b>, exactly as randomization would balance them. They cannot confound the strategy contrast; "
+ "they enter the MSM only as baseline terms and effect modifiers. This is precisely the backdoor that is open "
+ "in the cross-sectional analysis (04–05) and closed here.<br><br>"
+ "<b>What remains is narrower.</b> Cloning balances <i>baseline</i> confounding; it cannot balance unmeasured "
+ "<i>post-baseline</i> confounding. So the residual worry is not 'age has other paths to death' (balanced) but "
+ "specifically 'is there unmeasured <i>time-varying</i> deterioration driving both deviation and death' — which "
+ "the daily physiologic panel is built to capture before each dosing decision, the IPCW models adjust for "
+ "demographics in both numerator and denominator, and the height-IV (no-unmeasured-confounding-free) and the "
+ "randomized RCT reanalysis corroborate.<br><br>"
+ "<b>The subgroup gradient is supporting evidence, not contamination.</b> The age gradient appears only on the "
+ "<i>absolute</i> (RD) scale; on the <i>relative</i> (OR) scale the strain effect is age-invariant (08). A "
+ "constant relative effect on a higher-baseline-risk group mechanically produces a larger RD — exactly the "
+ "observed pattern. A genuine non-lung age→death pathway corrupting the estimate would instead show "
+ "age-modification on the relative scale, and there is none. Running every model demographic-adjusted AND "
+ "unadjusted, plus spline-age + E-value in the cross-sectional arm, closes the enumerable channels.",
+ "rescue"),
+("Respiratory acidosis (permissive hypercapnia) as a specific time-varying confounder <span class='tag'>[T5b]</span>",
+ "A low-tidal-volume strategy works through a known feedback loop: cutting VT cuts minute ventilation, CO₂ "
+ "rises, pH falls, and the clinician relaxes the ceiling — i.e. acidosis directly drives deviation — while "
+ "acidosis is independently prognostic. If pH is uncaptured, this is the most mechanistically plausible "
+ "residual time-varying confounder for <i>this</i> exposure specifically.",
+ "Addressed directly by the pH sensitivity (§4, [T5b]): arterial pH (with venous gases imputed as venous + "
+ "0.05) is added as a <b>lagged</b> confounder to the IPCW denominator on the gas-covered subset, and the risk "
+ "difference is compared with versus without that adjustment. Stability across the two localizes that acidosis "
+ "is not driving the effect. It is a sensitivity rather than a core confounder because blood-gas sampling is "
+ "indication-driven (missing-not-at-random); the comparison also reports the same subset without pH so any "
+ "selection from restricting to gas-sampled patients is itself visible.",
+ "rescue"),
 ("No unmeasured time-varying confounding (sequential exchangeability)",
  "The IPCW estimate is consistent only if deviation from a ceiling is fully explained by the <i>measured</i> "
  "lagged covariates. An unmeasured driver of both 'clinician relaxes the tidal volume' and 'patient dies' "
