@@ -44,6 +44,13 @@
 #   [T5 CLOSED by decision] Lactate deliberately excluded: noisy biomarker
 #        (timing/clearance/indication confounding) that would cost more sample
 #        than it adds. Confounder set = resp settings + S/F + MAP + vasopressor.
+#   [T5b DONE] pH sensitivity: arterial pH (venous imputed as venous + 0.05) added
+#        as a LAGGED time-varying confounder on the pH-covered subset. Respiratory
+#        acidosis (permissive hypercapnia) is THE feedback that drives deviation
+#        from a low-VT arm, so it is the most decision-relevant gas. Reported as a
+#        SENSITIVITY, not a core-panel member, because ABG/VBG sampling is
+#        indication-driven (missing-not-at-random). tte_ccw_sens_ph_*: full-cohort
+#        vs pH-subset(no pH) vs pH-subset(+ lagged pH).
 # =============================================================================
 
 # Pin BLAS to one thread per process so the PSOCK bootstrap workers don't each
@@ -163,6 +170,22 @@ extub <- panel %>% group_by(hospitalization_id) %>%
 panel <- panel %>% left_join(extub, by = "hospitalization_id")
 message("Panel: ", nrow(panel), " patient-days, ", n_distinct(panel$hospitalization_id), " patients")
 
+# Daily arterial-equivalent pH for the [T5b] sensitivity: pool arterial + venous
+# gases, imputing arterial from venous as venous + 0.05 (venous pH runs ~0.03-0.05
+# below arterial); take the daily median. Kept SEPARATE from the core panel because
+# gas sampling is indication-driven (missing-not-at-random) -> sensitivity only.
+ph_daily <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+  filter(lab_category %in% c("ph_arterial", "ph_venous"), !is.na(lab_value_numeric)) %>%
+  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  mutate(vent_day = floor(as.numeric(difftime(lab_result_dttm, t0, units = "days"))),
+         ph_art_eq = if_else(lab_category == "ph_venous",
+                             lab_value_numeric + 0.05, lab_value_numeric)) %>%
+  filter(vent_day >= 0, vent_day <= MAX_VENT_DAY) %>%
+  group_by(hospitalization_id, vent_day) %>%
+  summarise(ph = median(ph_art_eq, na.rm = TRUE), .groups = "drop")
+message("pH panel: ", nrow(ph_daily), " patient-days with a gas, ",
+        n_distinct(ph_daily$hospitalization_id), " patients")
+
 # =============================================================================
 # 10c. Parameterized arm builder: IPCW day-weights (lagged-confounder model)
 # =============================================================================
@@ -176,22 +199,31 @@ message("Panel: ", nrow(panel), " patient-days, ", n_distinct(panel$hospitalizat
 trunc_w <- function(w) { q <- quantile(w, WT_TRUNC, na.rm = TRUE); pmin(pmax(w, q[1]), q[2]) }
 ess_frac <- function(w) { w <- trunc_w(w); (sum(w)^2 / sum(w^2)) / length(w) }
 
-arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple") {
-  p <- panel %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
+# pnl: the panel to build on (default = global `panel`; the pH sensitivity passes a
+#      pH-augmented, pH-covered-patient subset). use_ph: add lagged pH (l_ph) to the
+#      IPCW denominator and require it non-missing for eligibility ([T5b]).
+arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
+                      pnl = panel, use_ph = FALSE) {
+  p <- pnl %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
     mutate(above = vent_day > grace & vtpfvc > ceiling, lead_vt = lead(vtpfvc),
            viol = if (rule == "corrected") above & (is.na(lead_vt) | lead_vt > ceiling) else above,
            prior_dev = lag(cumsum(viol), default = 0) > 0,
            l_vtpfvc = lag(vtpfvc), l_fio2 = lag(fio2), l_peep = lag(peep),
            l_rr = lag(rr), l_sf = lag(sf), l_map = lag(map), l_pressor = lag(on_pressor)) %>%
     ungroup()
+  if (use_ph) p <- p %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
+    mutate(l_ph = lag(ph)) %>% ungroup()
   fr <- p %>% filter(!prior_dev, vent_day > grace, !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_map))
+  if (use_ph) fr <- fr %>% filter(!is.na(l_ph))
   num <- glm(viol ~ ns(vent_day, 3) + age10 + sex_category + race_category + sofa_total,
              data = fr, family = binomial)
-  den <- glm(viol ~ ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr + l_sf + l_map +
-               l_pressor + age10 + sex_category + race_category + sofa_total,
-             data = fr, family = binomial)
+  den_rhs <- paste("ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr + l_sf + l_map +",
+                   "l_pressor + age10 + sex_category + race_category + sofa_total",
+                   if (use_ph) "+ l_ph" else "")
+  den <- glm(as.formula(paste("viol ~", den_rhs)), data = fr, family = binomial)
   p <- p %>% mutate(
-    elig  = !prior_dev & vent_day > grace & !is.na(l_vtpfvc) & !is.na(l_sf) & !is.na(l_map),
+    elig  = !prior_dev & vent_day > grace & !is.na(l_vtpfvc) & !is.na(l_sf) & !is.na(l_map) &
+            (if (use_ph) !is.na(l_ph) else TRUE),
     p_num = predict(num, newdata = ., type = "response"),
     p_den = predict(den, newdata = ., type = "response"),
     day_w = if_else(elig, pmin(pmax((1 - p_num) / (1 - p_den), 1 / cap), cap), 1)) %>%
@@ -225,8 +257,10 @@ make_long <- function(b, arm_lab) {
     left_join(b$wday, by = c("hospitalization_id", "vent_day")) %>%
     mutate(ipcw = coalesce(cumw, 1)) %>% select(-cumw)
 }
-build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple") {
-  bl <- arm_build(c_low, grace, cap, rule); bh <- arm_build(c_high, grace, cap, rule)
+build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple",
+                         pnl = panel, use_ph = FALSE) {
+  bl <- arm_build(c_low, grace, cap, rule, pnl, use_ph)
+  bh <- arm_build(c_high, grace, cap, rule, pnl, use_ph)
   long <- bind_rows(make_long(bl, "strain_limiting"), make_long(bh, "permissive")) %>%
     mutate(arm = factor(arm, levels = c("permissive", "strain_limiting")))
   lib <- bind_rows(bl$idsum %>% mutate(arm = "strain_limiting"),
@@ -382,6 +416,40 @@ cat("\n=== deviation-rule sensitivity ([T4]) ===\n"); print(as.data.frame(t4_sen
 cat("=== ceiling/grace grid ([T3]): RD range ", round(min(t3_sens$rd),3), " to ", round(max(t3_sens$rd),3), " ===\n")
 
 # =============================================================================
+# 10i. pH sensitivity ([T5b]): add lagged arterial pH (venous imputed +0.05) to the
+#      IPCW denominator, on the pH-covered subset. Three rows isolate the question:
+#        full_cohort_primary    -- the headline RD (no pH, all patients)
+#        ph_subset_no_ph_adj    -- same RD re-estimated on pH-covered patients only
+#                                  (shows whether that subset is itself selected)
+#        ph_subset_with_ph_adj  -- pH-covered patients WITH lagged pH in the weight
+#                                  model (the actual acidosis-adjusted estimate)
+#      Stability across the last two = the strategy effect is not driven by
+#      unmeasured respiratory acidosis (the permissive-hypercapnia feedback).
+# =============================================================================
+ph_ids   <- unique(ph_daily$hospitalization_id)
+panel_ph <- panel %>% filter(hospitalization_id %in% ph_ids) %>%
+  left_join(ph_daily, by = c("hospitalization_id", "vent_day")) %>%
+  group_by(hospitalization_id) %>% arrange(vent_day) %>%
+  fill(ph, .direction = "downup") %>% ungroup()   # LOCF + backfill within patient
+n_ph <- n_distinct(panel_ph$hospitalization_id)
+if (n_ph >= 100) {
+  d_ph_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_ph, use_ph = FALSE)
+  d_ph_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_ph, use_ph = TRUE)
+  ph_sens <- tibble(
+    spec = c("full_cohort_primary", "ph_subset_no_ph_adj", "ph_subset_with_ph_adj"),
+    rd = c(unname(point["rd"]), unname(rd_from(d_ph_base$long)["rd"]),
+           unname(rd_from(d_ph_adj$long)["rd"])),
+    n_patients = c(length(ids), n_ph, n_ph),
+    frac_of_cohort = round(c(1, n_ph / length(ids), n_ph / length(ids)), 3))
+  write_csv(ph_sens, file.path(final_dir, paste0("tte_ccw_sens_ph_", site_name, ".csv")))
+  cat("\n=== pH sensitivity ([T5b]: arterial; venous imputed +0.05) ===\n")
+  print(as.data.frame(ph_sens %>% mutate(rd = round(rd, 3))), row.names = FALSE)
+} else {
+  message("pH sensitivity ([T5b]) skipped: ", n_ph,
+          " patients with a gas (<100; e.g. synthetic CLIF has no pH labs).")
+}
+
+# =============================================================================
 # 10g. Diagnostics: deviation, weights, per-arm positivity ([T7])
 # =============================================================================
 diag <- bind_rows(des$bl$idsum %>% mutate(arm = "strain_limiting"),
@@ -410,4 +478,5 @@ p <- ggplot(cc, aes(day, 100 * cuminc, colour = arm)) +
          " - 60-d mortality; subgroup CIs + weight-cap/ceiling-grace/rule sensitivities written")) +
   theme_minimal(base_size = 10) + theme(legend.position = "top")
 ggsave(file.path(final_dir, paste0("tte_ccw_cuminc_", site_name, ".pdf")), p, width = 8, height = 5)
-message("Wrote 6 tables + 1 figure to ", final_dir, "  [T1-T4,T6,T7 done; T5 closed (lactate excluded by decision)]")
+message("Wrote CCW tables + 1 figure to ", final_dir,
+        "  [T1-T4,T6,T7 done; T5b pH sensitivity added; T5 lactate excluded by decision]")
