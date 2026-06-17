@@ -1,5 +1,5 @@
 # =============================================================================
-# Script 10: Longitudinal target trial emulation of a stress-limiting strategy
+# Script 10: Longitudinal target trial emulation of a strain-limiting strategy
 #            (clone-censor-weight)  ***DRAFT SCAFFOLD -- harden before reporting***
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
@@ -7,13 +7,13 @@
 # Emulates the trial the cross-sectional analysis could not (positivity probe:
 # decision-level overlap AUC ~0.66-0.70 vs cross-sectional c=0.996). Two
 # sustained ceiling strategies on the size-relative dose:
-#   * LOW ceiling  (stress-limiting): keep VT/PFVC <= C_LOW (11% predicted FVC)
+#   * LOW ceiling  (strain-limiting): keep VT/PFVC <= C_LOW (11% predicted FVC)
 #   * HIGH ceiling (permissive ~ usual care): keep VT/PFVC <= C_HIGH
 # Per-protocol effect on 60-day mortality, by clone-censor-weight: clone each
 # patient into both arms at t0 (index IMV), censor a clone at first deviation
 # (exceeds its ceiling after a grace period), and inverse-probability-of-
 # censoring weight to correct the informative (adherence) censoring. PFVC is the
-# IMPLEMENTATION lever; the estimand is the stress-limiting STRATEGY effect.
+# IMPLEMENTATION lever; the estimand is the strain-limiting STRATEGY effect.
 #
 # WHY THIS DESIGN: identified WITHOUT demographic positivity (the wall that
 # killed the cross-sectional VT/PFVC contrast) and WITHOUT the height exclusion
@@ -68,7 +68,7 @@ okabe <- c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
 RNGkind("L'Ecuyer-CMRG"); set.seed(20260617)
 
 # --- design knobs (provisional; see [T3]) ------------------------------------
-C_LOW        <- 11      # stress-limiting ceiling, VT/PFVC %
+C_LOW        <- 11      # strain-limiting ceiling, VT/PFVC %
 C_HIGH       <- 16      # permissive ceiling (~ usual care)
 GRACE        <- 2L      # days allowed above ceiling before deviation
 DAYW_CAP     <- 5       # day-weight truncation (IPCW clamped to [1/cap, cap]); see weight-cap sensitivity
@@ -227,9 +227,9 @@ make_long <- function(b, arm_lab) {
 }
 build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple") {
   bl <- arm_build(c_low, grace, cap, rule); bh <- arm_build(c_high, grace, cap, rule)
-  long <- bind_rows(make_long(bl, "stress_limiting"), make_long(bh, "permissive")) %>%
-    mutate(arm = factor(arm, levels = c("permissive", "stress_limiting")))
-  lib <- bind_rows(bl$idsum %>% mutate(arm = "stress_limiting"),
+  long <- bind_rows(make_long(bl, "strain_limiting"), make_long(bh, "permissive")) %>%
+    mutate(arm = factor(arm, levels = c("permissive", "strain_limiting")))
+  lib <- bind_rows(bl$idsum %>% mutate(arm = "strain_limiting"),
                    bh$idsum %>% mutate(arm = "permissive")) %>%
     mutate(dd = ifelse(is.finite(death_day), death_day, Inf), extub_day = last_vent + 1L,
            cr_end = pmin(dd, extub_day, dev_day, HORIZON),
@@ -239,13 +239,13 @@ build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "s
 }
 ci_curve <- function(dat) {
   fit <- suppressWarnings(glm(died ~ arm * ns(day, 4), data = dat, family = binomial, weights = ipcw))
-  haz <- function(a) predict(fit, tibble(arm = factor(a, c("permissive", "stress_limiting")),
+  haz <- function(a) predict(fit, tibble(arm = factor(a, c("permissive", "strain_limiting")),
                                          day = 1:HORIZON), type = "response")
-  tibble(day = 1:HORIZON, stress_limiting = 1 - cumprod(1 - haz("stress_limiting")),
+  tibble(day = 1:HORIZON, strain_limiting = 1 - cumprod(1 - haz("strain_limiting")),
          permissive = 1 - cumprod(1 - haz("permissive")))
 }
 rd_from <- function(dat) {
-  cc <- ci_curve(dat); rs <- cc$stress_limiting[HORIZON]; rp <- cc$permissive[HORIZON]
+  cc <- ci_curve(dat); rs <- cc$strain_limiting[HORIZON]; rp <- cc$permissive[HORIZON]
   c(risk_sl = unname(rs), risk_pm = unname(rp), rd = unname(rs - rp))
 }
 cif_lib <- function(df, day = 28L) {
@@ -256,7 +256,7 @@ cif_lib <- function(df, day = 28L) {
   if (!"liberation" %in% colnames(fit$pstate)) return(NA_real_)
   fit$pstate[max(which(fit$time <= day)), "liberation"]
 }
-lib_diff <- function(df) cif_lib(df %>% filter(arm == "stress_limiting")) -
+lib_diff <- function(df) cif_lib(df %>% filter(arm == "strain_limiting")) -
                          cif_lib(df %>% filter(arm == "permissive"))
 
 # per-(var, level) subgroup RD, used for point estimates AND inside the bootstrap
@@ -338,12 +338,12 @@ bts <- do.call(rbind, bts_list)
 ci  <- function(col) quantile(bts[, col], c(.025, .975), na.rm = TRUE)
 
 overall <- tibble(
-  risk_stress_limiting = unname(point["risk_sl"]), risk_permissive = unname(point["risk_pm"]),
+  risk_strain_limiting = unname(point["risk_sl"]), risk_permissive = unname(point["risk_pm"]),
   rd = unname(point["rd"]), rd_lo = ci("overall")[1], rd_hi = ci("overall")[2],
   lib_diff = lib_pt, lib_lo = ci("lib")[1], lib_hi = ci("lib")[2], n_patients = length(ids))
 write_csv(overall, file.path(final_dir, paste0("tte_ccw_overall_", site_name, ".csv")))
 message(sprintf("60-day MORTALITY RD: %.3f [%.3f, %.3f]  (%.3f vs %.3f)",
-        overall$rd, overall$rd_lo, overall$rd_hi, overall$risk_stress_limiting, overall$risk_permissive))
+        overall$rd, overall$rd_lo, overall$rd_hi, overall$risk_strain_limiting, overall$risk_permissive))
 message(sprintf("28-day LIBERATION CIF diff: %.3f [%.3f, %.3f]", overall$lib_diff, overall$lib_lo, overall$lib_hi))
 
 # subgroup table WITH bootstrap CIs ([T6])
@@ -358,7 +358,7 @@ write_csv(sub, file.path(final_dir, paste0("tte_ccw_subgroup_", site_name, ".csv
 cap_sens <- map_dfr(c(3, 5, 10, 1e6), function(cp) {
   d <- build_design(C_LOW, C_HIGH, GRACE, cp, "simple")
   tibble(weight_cap = if (cp >= 1e6) Inf else cp, rd = unname(rd_from(d$long)["rd"]),
-         ess_stress_limiting = ess_frac(d$bl$idsum$ipcw_term),
+         ess_strain_limiting = ess_frac(d$bl$idsum$ipcw_term),
          ess_permissive = ess_frac(d$bh$idsum$ipcw_term))
 })
 write_csv(cap_sens, file.path(final_dir, paste0("tte_ccw_sens_weightcap_", site_name, ".csv")))
@@ -373,7 +373,7 @@ write_csv(t3_sens, file.path(final_dir, paste0("tte_ccw_sens_ceiling_grace_", si
 t4_sens <- map_dfr(c("simple", "corrected"), function(rl) {
   d <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, rl)
   tibble(deviation_rule = rl, rd = unname(rd_from(d$long)["rd"]),
-         frac_deviated_stress_limiting = mean(is.finite(d$bl$idsum$dev_day)))
+         frac_deviated_strain_limiting = mean(is.finite(d$bl$idsum$dev_day)))
 })
 write_csv(t4_sens, file.path(final_dir, paste0("tte_ccw_sens_rule_", site_name, ".csv")))
 
@@ -384,7 +384,7 @@ cat("=== ceiling/grace grid ([T3]): RD range ", round(min(t3_sens$rd),3), " to "
 # =============================================================================
 # 10g. Diagnostics: deviation, weights, per-arm positivity ([T7])
 # =============================================================================
-diag <- bind_rows(des$bl$idsum %>% mutate(arm = "stress_limiting"),
+diag <- bind_rows(des$bl$idsum %>% mutate(arm = "strain_limiting"),
                   des$bh$idsum %>% mutate(arm = "permissive")) %>%
   group_by(arm) %>%
   summarise(n_patients = n(), frac_deviated = mean(is.finite(dev_day)),
@@ -398,14 +398,14 @@ print(as.data.frame(diag %>% mutate(across(where(is.numeric), ~ round(., 3)))), 
 # 10h. Figure: MSM per-protocol cumulative mortality by arm
 # =============================================================================
 cc <- ci_curve(long_all) %>%
-  pivot_longer(c(stress_limiting, permissive), names_to = "arm", values_to = "cuminc")
+  pivot_longer(c(strain_limiting, permissive), names_to = "arm", values_to = "cuminc")
 p <- ggplot(cc, aes(day, 100 * cuminc, colour = arm)) +
   geom_line(linewidth = 1) +
-  scale_colour_manual(values = c(stress_limiting = okabe[3], permissive = okabe[1]),
-                      labels = c(stress_limiting = "stress-limiting (<=11%)",
+  scale_colour_manual(values = c(strain_limiting = okabe[3], permissive = okabe[1]),
+                      labels = c(strain_limiting = "strain-limiting (<=11%)",
                                  permissive = "permissive (<=16%)"), name = NULL) +
   labs(x = "Days from index ventilation", y = "Per-protocol cumulative mortality (%)",
-       title = "Longitudinal TTE (CCW + IPC-weighted MSM): stress-limiting vs permissive",
+       title = "Longitudinal TTE (CCW + IPC-weighted MSM): strain-limiting vs permissive",
        subtitle = paste0(site_name, if (is_synthetic) " (SYNTHETIC - plumbing only)" else "",
          " - 60-d mortality; subgroup CIs + weight-cap/ceiling-grace/rule sensitivities written")) +
   theme_minimal(base_size = 10) + theme(legend.position = "top")

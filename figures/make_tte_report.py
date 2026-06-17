@@ -20,15 +20,26 @@ def finalp(site, stub):
     return os.path.join(ROOT, "output", f"{site}_output", "final", f"{stub}_{site}.csv")
 
 # ---- load every result CSV for both sites -----------------------------------
+# Tolerate either the legacy 'stress_limiting' identifier or the renamed
+# 'strain_limiting' one: script 10's column rename lands on the next re-run, so a
+# report generated before that re-run still reads the old-named CSVs correctly.
+def _norm(df):
+    df = df.rename(columns=lambda c: c.replace("stress_limiting", "strain_limiting"))
+    if "arm" in df.columns:
+        df["arm"] = df["arm"].replace({"stress_limiting": "strain_limiting"})
+    return df
+
 R = {}
 for s in SITES:
+    def L(stub, _s=s):
+        return _norm(pd.read_csv(finalp(_s, stub)))
     R[s] = {
-        "overall":  pd.read_csv(finalp(s, "tte_ccw_overall")).iloc[0],
-        "diag":     pd.read_csv(finalp(s, "tte_ccw_diagnostics")),
-        "sub":      pd.read_csv(finalp(s, "tte_ccw_subgroup")),
-        "wcap":     pd.read_csv(finalp(s, "tte_ccw_sens_weightcap")),
-        "cg":       pd.read_csv(finalp(s, "tte_ccw_sens_ceiling_grace")),
-        "rule":     pd.read_csv(finalp(s, "tte_ccw_sens_rule")),
+        "overall":  L("tte_ccw_overall").iloc[0],
+        "diag":     L("tte_ccw_diagnostics"),
+        "sub":      L("tte_ccw_subgroup"),
+        "wcap":     L("tte_ccw_sens_weightcap"),
+        "cg":       L("tte_ccw_sens_ceiling_grace"),
+        "rule":     L("tte_ccw_sens_rule"),
     }
 
 # ---- R source, sliced by section (1-indexed inclusive line ranges) ----------
@@ -73,7 +84,7 @@ def overall_table():
     for s in SITES:
         o = O[s]
         rows += (f"<tr><td><b>{s}</b></td><td>{ci(o)}</td>"
-                 f"<td>{pp0(o['risk_stress_limiting'])}% vs {pp0(o['risk_permissive'])}%</td>"
+                 f"<td>{pp0(o['risk_strain_limiting'])}% vs {pp0(o['risk_permissive'])}%</td>"
                  f"<td>{int(o['n_patients']):,}</td>"
                  f"<td>{ci(o,'lib')}</td></tr>")
     return ("<table><thead><tr><th>Cohort</th>"
@@ -86,8 +97,8 @@ def diag_table():
     rows = ""
     for s in SITES:
         d = R[s]["diag"].set_index("arm")
-        arm_disp = {"permissive": "permissive", "stress_limiting": "strain-limiting"}
-        for arm in ["permissive", "stress_limiting"]:
+        arm_disp = {"permissive": "permissive", "strain_limiting": "strain-limiting"}
+        for arm in ["permissive", "strain_limiting"]:
             r = d.loc[arm]
             rows += (f"<tr><td>{s}</td><td>{arm_disp[arm]}</td>"
                      f"<td>{r['frac_deviated']*100:.1f}%</td>"
@@ -136,7 +147,7 @@ def wcap_table():
                     ((d.weight_cap == cp) if np.isfinite(cp) else True)]
             if len(row):
                 r = row.iloc[0]
-                cells += f"<td>{pp(r['rd'])}</td><td>{r['ess_stress_limiting']:.2f}</td>"
+                cells += f"<td>{pp(r['rd'])}</td><td>{r['ess_strain_limiting']:.2f}</td>"
             else:
                 cells += "<td>—</td><td>—</td>"
         cls = ' class="degen"' if not np.isfinite(cp) else ""
@@ -159,8 +170,8 @@ def rule_table():
         rows += (f"<tr><td>{s}</td>"
                  f"<td>{pp(d.loc['simple','rd'])}</td>"
                  f"<td>{pp(d.loc['corrected','rd'])}</td>"
-                 f"<td>{d.loc['simple','frac_deviated_stress_limiting']*100:.1f}% / "
-                 f"{d.loc['corrected','frac_deviated_stress_limiting']*100:.1f}%</td></tr>")
+                 f"<td>{d.loc['simple','frac_deviated_strain_limiting']*100:.1f}% / "
+                 f"{d.loc['corrected','frac_deviated_strain_limiting']*100:.1f}%</td></tr>")
     return ("<table><thead><tr><th>Cohort</th><th>Simple rule RD</th>"
             "<th>Corrected rule RD</th><th>Deviated (simple/corr)</th></tr></thead>"
             f"<tbody>{rows}</tbody></table>")
@@ -332,14 +343,11 @@ parts.append('<h2 id="walk">3 · Code walkthrough</h2>'
  '<p>The full source of <code>code/10_longitudinal_tte.R</code> follows, in order, each block preceded by an '
  'explanation of what it does and why. Nothing here is re-run; the numbers in §4 come from the result CSVs '
  'already written by these exact lines on MIMIC and UCSF.</p>'
- + callout("note", "A naming note on the embedded source",
+ + callout("note", "A note on naming",
    "The low-ceiling arm caps <b>VT/PFVC</b> — a <b>strain</b> quantity (volume ÷ size, the E⁰ rung of the "
-   "elastance ladder), not <b>stress</b> (transpulmonary pressure = E<sub>spec</sub>×strain). This report "
-   "therefore calls it the <b>strain-limiting</b> arm throughout the prose, figures, and tables. The R source "
-   "below still uses the legacy identifier <code>stress_limiting</code> for the arm and its result-CSV columns "
-   "(<code>risk_stress_limiting</code>, …); that is a variable name only — it denotes the strain-limiting arm "
-   "and will be renamed on the next full re-run. Read every <code>stress_limiting</code> in the code as "
-   "&lsquo;strain-limiting&rsquo;."))
+   "elastance ladder), not <b>stress</b> (transpulmonary pressure = E<sub>spec</sub>×strain). It is called the "
+   "<b>strain-limiting</b> arm throughout — in the prose, figures, tables, and (as <code>strain_limiting</code>) "
+   "in the code and result-CSV column names."))
 
 # 3.1 header
 parts.append(f"""
