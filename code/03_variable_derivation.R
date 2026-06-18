@@ -381,8 +381,13 @@ analysis_data <- imv_timepoints %>%
     pbwpfvc = pbw / pfvc,
     vtpbw = tidal_volume_set / pbw,
     vtpfvc = tidal_volume_set / pfvc * 0.1,
+    # QC AT SOURCE: plateau <= PEEP is non-physiologic (a ventilated patient
+    # receiving a tidal volume cannot have zero/negative driving pressure) and
+    # reflects a charting/measurement error -> driving pressure is undefined (NA).
+    # Doing this here means every downstream script gets clean dp (and dp-derived
+    # dp_pbw/dp_pfvc), instead of each having to remember to filter dp > 0.
     dp = if_else(
-      !is.na(plateau_pressure_obs) & !is.na(peep_set),
+      !is.na(plateau_pressure_obs) & !is.na(peep_set) & plateau_pressure_obs > peep_set,
       plateau_pressure_obs - peep_set,
       NA_real_
     ),
@@ -432,6 +437,19 @@ analysis_data <- imv_timepoints %>%
 
 message("Analysis timepoints: ", nrow(analysis_data), " rows, ",
         n_distinct(analysis_data$hospitalization_id), " hospitalizations")
+
+# QC diagnostic: how many timepoints had plateau <= PEEP (driving pressure NA'd).
+n_dp_bad <- sum(!is.na(analysis_data$plateau_pressure_obs) &
+                !is.na(analysis_data$peep_set) &
+                analysis_data$plateau_pressure_obs <= analysis_data$peep_set)
+if (n_dp_bad > 0) {
+  n_dp_obs <- sum(!is.na(analysis_data$plateau_pressure_obs) & !is.na(analysis_data$peep_set))
+  message("QC: ", n_dp_bad, " of ", n_dp_obs, " plateau-measured timepoint(s) had ",
+          "plateau <= PEEP (", round(100 * n_dp_bad / n_dp_obs, 1),
+          "%); driving pressure set to NA. If this fraction is large or systematic, ",
+          "inspect the site's CLIF respiratory_support mapping (plateau/PEEP swap, units) ",
+          "before assuming sporadic charting error.")
+}
 
 # --- NE equivalents: compute from cohort_meds and rolling-join to IMV timepoints ---
 # All catecholamine doses are first standardized to mcg/kg/min; vasopressin is
