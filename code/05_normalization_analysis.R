@@ -3,9 +3,9 @@
 # Discordance + prognostic utility
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
-# Pipeline script (run after 03; before 06). Reads the script 03 cross-sectional
-# dataset, writes per-site outputs to output/<site>_output/final/ with a <site>
-# suffix; script 06 discovers and pools them across cohorts (norm_* files).
+# Pipeline script (run after 03). Reads the script 03 cross-sectional dataset,
+# writes per-site outputs to output/<site>_output/final/ with a <site> suffix;
+# pooled_estimates.R discovers and pools them across cohorts (norm_* files).
 #
 # Prognostic superiority of PFVC for VT dosing is already established (Sarma LRM
 # 2025 + the analyses here). The next question is whether PFVC should also replace
@@ -718,5 +718,59 @@ p_enc <- ggplot(enc_long, aes(dAIC, family, fill = direction)) +
   theme_minimal(base_size = 11) + theme(legend.position = "top")
 ggsave(file.path(final_dir, paste0("norm_encompassing_", site_name, ".pdf")),
        p_enc, width = 10, height = 4.5)
+
+# =============================================================================
+# PART 2d -- Discrimination by normalization (optimism-corrected univariate C)
+# =============================================================================
+# Which size scale lets each mechanic best discriminate mortality? For DP, MP and
+# Ers, compare raw vs PBW- vs PFVC-normalized on the optimism-corrected C-statistic
+# (AUC) for in-hospital mortality. Logistic/in-hospital analogue of the Cox version
+# previously in script 06 (which has been retired); the ordering -- PFVC-normalized
+# discriminating best -- is the result. DP-normalized columns (DP/PBW, DP/PFVC) are
+# derived here as dp / pbw and dp / pfvc.
+B_DISC <- if (identical(site_name, "synthetic_clif")) 100L else 300L
+auc_optimism <- function(d, var, B) {           # apparent AUC minus mean bootstrap optimism
+  f   <- reformulate(var, "deceased")
+  app <- auc_fn(d$deceased, fitted(glm(f, data = d, family = binomial)))
+  opt <- numeric(0)
+  for (b in seq_len(B)) {
+    bd <- d[sample.int(nrow(d), replace = TRUE), , drop = FALSE]
+    m  <- tryCatch(glm(f, data = bd, family = binomial), error = function(e) NULL)
+    if (is.null(m)) next
+    opt <- c(opt, auc_fn(bd$deceased, fitted(m)) -
+                  auc_fn(d$deceased, predict(m, newdata = d, type = "response")))
+  }
+  o <- mean(opt, na.rm = TRUE)        # robust to occasional NA-AUC resamples
+  if (!is.finite(o)) o <- 0
+  tibble(c_apparent = app, optimism = o, c_corrected = app - o)
+}
+dp_disc <- base %>% mutate(dp_pbw = dp / pbw, dp_pfvc = dp / pfvc)
+disc_reg <- tribble(
+  ~family,            ~norm,  ~var,               ~metric,
+  "Driving pressure", "raw",  "dp",               "DP",
+  "Driving pressure", "pbw",  "dp_pbw",           "DP / PBW",
+  "Driving pressure", "pfvc", "dp_pfvc",          "DP / PFVC",
+  "Mechanical power", "raw",  "mechanical_power", "MP",
+  "Mechanical power", "pbw",  "mp_pbw",           "MP / PBW",
+  "Mechanical power", "pfvc", "mp_pfvc",          "MP / PFVC",
+  "Elastance",        "raw",  "ers",              "Ers",
+  "Elastance",        "pbw",  "ers_pbw",          "Ers x PBW",
+  "Elastance",        "pfvc", "ers_pfvc",         "Ers x PFVC")
+disc_data <- list("Driving pressure" = dp_disc, "Mechanical power" = mp_data, "Elastance" = ers_data)
+set.seed(20260617)
+disc_tbl <- pmap_dfr(disc_reg, function(family, norm, var, metric) {
+  d <- disc_data[[family]] %>% filter(is.finite(.data[[var]]))
+  bind_cols(tibble(site = site_name, family = family, norm = norm, metric = metric),
+            auc_optimism(d, var, B_DISC), tibble(n = nrow(d)))
+})
+write_csv(disc_tbl, file.path(final_dir, paste0("norm_discrimination_", site_name, ".csv")))
+
+message("\nPART 2d -- optimism-corrected discrimination (C for in-hospital mortality):")
+disc_tbl %>% arrange(family, norm) %>%
+  pwalk(function(family, metric, c_corrected, ...)
+    message(sprintf("  [%-16s] %-12s C = %.3f", family, metric, c_corrected)))
+best_norm <- disc_tbl %>% group_by(family) %>% slice_max(c_corrected, n = 1) %>% ungroup()
+message("  best-discriminating normalization per family: ",
+        paste(sprintf("%s=%s", best_norm$family, best_norm$norm), collapse = "; "))
 
 message("\nExploratory normalization discordance + prognostic utility analysis complete.")

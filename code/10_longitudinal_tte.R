@@ -114,7 +114,7 @@ rtrunc_lnorm <- function(n_needed, meanlog, sdlog, lo, hi) {
   acc[seq_len(n_needed)]
 }
 if (is_synthetic) {
-  message("*** SYNTHETIC SITE: simulated survival (plumbing only; see script 06). ***")
+  message("*** SYNTHETIC SITE: simulated survival (plumbing only; synthetic CLIF mortality is unreliable). ***")
   set.seed(20260615); n <- nrow(cs); died60 <- rbinom(n, 1L, 0.35)
   tte <- rep(NA_real_, n); tte[died60 == 1L] <- rtrunc_lnorm(sum(died60), log(9), 0.95, 0.04, HORIZON)
   cs <- cs %>% mutate(death_day = if_else(died60 == 1L, floor(tte), NA_real_))

@@ -81,7 +81,7 @@ rtrunc_lnorm <- function(n_needed, meanlog, sdlog, lo, hi) {
   acc[seq_len(n_needed)]
 }
 if (is_synthetic) {
-  message("*** SYNTHETIC SITE: simulated long-tailed survival (see script 06 header). ***")
+  message("*** SYNTHETIC SITE: simulated long-tailed survival (synthetic CLIF mortality is unreliable). ***")
   set.seed(20260615)
   n <- nrow(cross_sectional); died60 <- rbinom(n, 1L, 0.35)
   tte <- rep(NA_real_, n); n_dec <- sum(died60 == 1L)

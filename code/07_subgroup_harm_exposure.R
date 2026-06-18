@@ -15,7 +15,7 @@
 # and (via PBW) shorter patients. So a constant, guideline-correct VT/PBW
 # (6-8 mL/kg) delivers a LARGER fraction of true lung volume — and higher
 # absolute mechanical stress (DP, MP, VT/PFVC) — in exactly those subgroups.
-# Script 06 separately shows that absolute stress causally raises mortality.
+# Script 09 (height-IV) separately shows absolute stress causally raises mortality.
 # This script JOINS the two halves and asks the subgroup question directly:
 #
 #   (A) HARMFUL-EXPOSURE BURDEN — among patients dosed by the book at
@@ -82,13 +82,13 @@ message("Site: ", site_name, " | synthetic = ", is_synthetic)
 
 # =============================================================================
 # 7a. Load cohort + re-anchor 60-day mortality at the index ventilation time
-#     (identical mortality handling to script 06, including the synthetic-only
-#     workaround for the known-buggy synthetic-CLIF mortality fields).
+#     (synthetic-only workaround for the known-buggy synthetic-CLIF mortality
+#     fields; real sites use death_dttm unchanged).
 # =============================================================================
 cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
 message("Cohort: ", nrow(cross_sectional), " patients")
 
-# *** SYNTHETIC-ONLY MORTALITY WORKAROUND (see script 06 header). REMOVE once
+# *** SYNTHETIC-ONLY MORTALITY WORKAROUND (synthetic-CLIF mortality is buggy). REMOVE once
 # the synthetic-CLIF mortality fix lands. Real sites use death_dttm unchanged.
 rtrunc_lnorm <- function(n_needed, meanlog, sdlog, lo, hi) {
   acc <- numeric(0)
@@ -102,7 +102,7 @@ rtrunc_lnorm <- function(n_needed, meanlog, sdlog, lo, hi) {
 
 if (is_synthetic) {
   message("*** SYNTHETIC SITE: replacing buggy mortality with simulated ",
-          "long-tailed survival (see script 06 header). ***")
+          "long-tailed survival (synthetic CLIF mortality is unreliable). ***")
   set.seed(20260615)
   n <- nrow(cross_sectional)
   died60 <- rbinom(n, 1L, 0.35)
@@ -136,48 +136,19 @@ message("Re-anchored 60-day mortality: ", sum(cross_sectional$event), " / ",
 # normalized metric, because the question is precisely whether the raw physiologic
 # insult is patterned by demographics.
 #
-# IMPORTANT — metric ordering is deliberate. VT/PFVC and Ers are size-RELATIVE /
-# size-invariant (VT/PFVC is the dose per unit predicted lung; Ers cmH2O/L is an
-# intensive stiffness), so they reveal the bias directly. DP (a pressure) is
-# intermediate. MP (J/min) is size-EXTENSIVE — a smaller patient receives less
-# absolute power at the same VT/kg, so raw MP UNDER-states the per-lung insult in
-# small (older/female/shorter) patients. The leading two metrics are therefore the
-# clean test; raw DP/MP are reported as size-extensive comparators.
+# The burden-by-subgroup analysis reports the headline size-relative dose VT/PFVC
+# at the FIXED clinical cut (VTPFVC_TARGET) — interpretable and cross-site-poolable.
+# The size-relative-vs-extensive mechanic comparators (DP/MP/Ers) and their
+# discrimination have moved to the physiology/normalization analysis (scripts 05/08);
+# this removes the dependency on script 06's (retired) maxstat cutpoints. The
+# counterfactual re-dosing + E-value models below still use raw DP/MP as
+# absolute-stress exposures — that is independent of any harm threshold.
 metric_specs <- tribble(
-  ~var,               ~label,      ~unit,     ~scale_type,
-  "vtpfvc",           "VT/PFVC",   "mL/L",    "size-relative",
-  "ers",              "Ers",       "cmH2O/L", "size-relative",
-  "dp",               "DP",        "cmH2O",   "intensive",
-  "mechanical_power", "MP",        "J/min",   "size-extensive"
-)
+  ~var,     ~label,    ~unit,  ~scale_type,
+  "vtpfvc", "VT/PFVC", "mL/L", "size-relative"
+) %>% mutate(threshold = VTPFVC_TARGET)
 
-# Harmful thresholds. VT/PFVC uses the FIXED clinical cut (VTPFVC_TARGET) — the
-# headline, interpretable, cross-site-poolable metric. DP/MP/Ers reuse the
-# published script-06 raw cutpoints (size-extensive comparators, separate
-# provenance); script 06 must have run first. The site-specific maxstat cut is
-# removed entirely: it was uninterpretable and, worse, sat on opposite sides of
-# the dose distribution at different sites (below the median at one, above at
-# another), so "re-dose to the maxstat cut" was de-escalation at one site and
-# escalation at the next — incoherent for pooling.
-opt06_path <- file.path(final_dir, paste0("tte_optimal_thresholds_", site_name, ".csv"))
-opt06 <- if (file.exists(opt06_path)) read_csv(opt06_path, show_col_types = FALSE) else NULL
-raw06_cut <- function(lbl) {
-  if (is.null(opt06)) return(NA_real_)
-  v <- opt06$maxstat_cut[opt06$metric == lbl & opt06$norm == "raw"]
-  if (length(v) == 1) v else NA_real_
-}
-
-metric_specs <- metric_specs %>%
-  rowwise() %>%
-  mutate(threshold = if (label == "VT/PFVC") VTPFVC_TARGET else raw06_cut(label)) %>%
-  ungroup()
-if (any(!is.finite(metric_specs$threshold)))
-  stop("Missing DP/MP/Ers harmful threshold(s): ",
-       paste(metric_specs$label[!is.finite(metric_specs$threshold)], collapse = ", "),
-       ". Script 06 optimal-thresholds CSV (", basename(opt06_path),
-       ") must be present for the raw comparator cuts.")
-
-message("Harmful thresholds (VT/PFVC = fixed clinical cut, DP/MP/Ers = script-06 raw):")
+message("Harmful threshold (VT/PFVC = fixed clinical cut):")
 walk(seq_len(nrow(metric_specs)), ~ message(
   "  ", metric_specs$label[.x], " > ", round(metric_specs$threshold[.x], 3),
   " ", metric_specs$unit[.x]))
@@ -549,9 +520,8 @@ if (nrow(burden_tbl) > 0) {
                         VT_PBW_LO, "-", VT_PBW_HI, ") patients"),
          subtitle = paste0(site_name,
            if (is_synthetic) " (SYNTHETIC - simulated survival)" else "",
-           " - size-relative VT/PFVC & Ers (top) reveal the bias (higher in Female, ",
-           "non-White, Older, Shorter); raw DP/MP are size-extensive and understate ",
-           "small-patient stress")) +
+           " - size-relative VT/PFVC harm is higher in Female, non-White, Older, ",
+           "and Shorter patients (the demographic bias of a fixed VT/PBW dose)")) +
     theme_minimal(base_size = 10) +
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
   ggsave(pdf_path("harm_burden_by_subgroup"), p_burden, width = 11, height = 8)
