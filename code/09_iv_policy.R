@@ -149,13 +149,13 @@ candidates <- tribble(
   "ers",              "Ers",     NA_real_, FALSE
 )
 
-# Instrument + control set: severity + dose + spline age + sex + race (matches the
-# script-06 IV convention; vtpbw kept so height enters via PBW, not the dose lever).
+# Instrument + control set: severity + dose + spline age + sex + race (vtpbw kept
+# so height enters via PBW, not the dose lever).
 INSTRUMENT <- "height_cm"
 iv_cov <- "sofa_total + sf_ratio + bmi + vtpbw + ns(age_at_admission, df = 3) + sex_category + race_category"
 
 # =============================================================================
-# 9c. Just-identified 2SLS with HC1 SEs (base R; same as script 06)
+# 9c. Just-identified 2SLS (HC1 SEs) + Anderson-Rubin weak-IV-robust CIs (base R)
 # =============================================================================
 iv2sls_robust <- function(y, d, z, X) {
   W  <- cbind(d, X); Zf <- cbind(z, X)
@@ -169,6 +169,33 @@ first_stage_F <- function(df, var) {
   full <- lm(as.formula(paste(var, "~", INSTRUMENT, "+", iv_cov)), data = df)
   red  <- lm(as.formula(paste(var, "~", iv_cov)), data = df)
   anova(red, full)$F[2]
+}
+
+# Anderson-Rubin confidence set for the structural coefficient beta (LPM scale,
+# same scale as iv2sls_robust's beta_d). WEAK-INSTRUMENT-ROBUST: correct coverage
+# regardless of first-stage strength, where the Wald CI is unreliable when F is
+# small. Just-identified (1 instrument), so AR is the efficient weak-robust test.
+# After partialling the covariates X out of y, d (endogenous) and z (instrument),
+# the test AR(b0) <= F_crit reduces to a quadratic A*b^2 + B*b + C <= 0 in b0; the
+# set is a bounded interval (A>0, disc>0) OR unbounded / whole-line / disconnected
+# (A<=0) -- the latter honestly signals the data cannot pin beta down.
+anderson_rubin <- function(y, d, z, X, alpha = 0.05) {
+  rX <- function(v) as.numeric(v - X %*% solve(crossprod(X), crossprod(X, v)))  # partial out X
+  yt <- rX(y); dt <- rX(d); zt <- rX(z)
+  Szz <- sum(zt * zt); Szy <- sum(zt * yt); Szd <- sum(zt * dt)
+  Syy <- sum(yt * yt); Syd <- sum(yt * dt); Sdd <- sum(dt * dt)
+  m  <- length(y) - ncol(X) - 1                       # df2 of the AR F(1, m)
+  cc <- qf(1 - alpha, 1, m)
+  A  <- (m + cc) * Szd^2 - cc * Szz * Sdd
+  B  <- -2 * (m + cc) * Szy * Szd + 2 * cc * Szz * Syd
+  C  <- (m + cc) * Szy^2 - cc * Szz * Syy
+  disc <- B^2 - 4 * A * C
+  if (is.finite(A) && A > 0 && disc > 0) {
+    r <- sort(c((-B - sqrt(disc)) / (2 * A), (-B + sqrt(disc)) / (2 * A)))
+    list(ar_lo = r[1], ar_hi = r[2], ar_unbounded = FALSE)
+  } else {
+    list(ar_lo = NA_real_, ar_hi = NA_real_, ar_unbounded = TRUE)
+  }
 }
 
 # =============================================================================
@@ -235,18 +262,35 @@ iv_diagnostic <- function(var, lbl) {
   d  <- analytic %>% filter(!is.na(.data[[var]]))
   X  <- model.matrix(as.formula(paste("~", iv_cov)), data = d)
   iv <- iv2sls_robust(d$deceased, d[[var]], d[[INSTRUMENT]], X)
+  ar <- tryCatch(anderson_rubin(d$deceased, d[[var]], d[[INSTRUMENT]], X),
+                 error = function(e) list(ar_lo = NA_real_, ar_hi = NA_real_, ar_unbounded = NA))
   fs <- lm(as.formula(paste(var, "~", INSTRUMENT, "+", iv_cov)), data = d)
   Fst <- first_stage_F(d, var)
   ols <- coef(lm(as.formula(paste("deceased ~", var, "+", iv_cov)), data = d))[[var]]
   tibble(metric = lbl, n = nrow(d), first_stage_F = Fst,
          first_stage_sign = unname(sign(coef(fs)[[INSTRUMENT]])),
          beta_iv = iv$beta_d, beta_ols = unname(ols),
+         wald_lo = iv$beta_d - 1.959964 * iv$se_d,      # Wald CI (unreliable if F small)
+         wald_hi = iv$beta_d + 1.959964 * iv$se_d,
+         ar_lo = ar$ar_lo, ar_hi = ar$ar_hi,            # Anderson-Rubin (weak-IV-robust)
+         ar_unbounded = ar$ar_unbounded,
          sign_concordant = sign(iv$beta_d) == sign(ols),
          valid = Fst >= 10 & (sign(iv$beta_d) == sign(ols)))
 }
 diag_tbl <- pmap_dfr(candidates %>% select(var, label),
                      function(var, label) iv_diagnostic(var, label))
 write_csv(diag_tbl, file.path(final_dir, paste0("ivpolicy_exposure_diagnostic_", site_name, ".csv")))
+
+# AR vs Wald: they should coincide for strong-F (valid) metrics, and AR stays valid
+# (often wide / unbounded) where the first stage is weak and Wald is unreliable.
+message("\nIV diagnostic -- Anderson-Rubin (weak-IV-robust) vs Wald CIs:")
+diag_tbl %>% pwalk(function(metric, first_stage_F, beta_iv, wald_lo, wald_hi,
+                            ar_lo, ar_hi, ar_unbounded, valid, ...)
+  message(sprintf("  %-7s F=%6.1f  beta_IV=%+.3f  Wald[%+.3f, %+.3f]  AR%s  [%s]",
+                  metric, first_stage_F, beta_iv, wald_lo, wald_hi,
+                  if (isTRUE(ar_unbounded)) "=unbounded" else
+                    sprintf("[%+.3f, %+.3f]", ar_lo, ar_hi),
+                  if (valid) "valid" else "weak/invalid")))
 message("Exposure-IV diagnostic (valid = F>=10 AND IV/OLS sign-concordant):")
 walk(seq_len(nrow(diag_tbl)), ~ message(sprintf(
   "  %-7s F=%6.1f  fs_sign=%+d  beta_IV=%+.4f  beta_OLS=%+.4f  valid=%s",
