@@ -44,6 +44,7 @@ for s in SITES:
         "cg":       L("tte_ccw_sens_ceiling_grace"),
         "rule":     L("tte_ccw_sens_rule"),
         "ph":       L_opt("tte_ccw_sens_ph"),
+        "dp":       L_opt("tte_ccw_sens_dp"),
     }
 
 # ---- R source, sliced by section (1-indexed inclusive line ranges) ----------
@@ -210,6 +211,27 @@ def ph_block():
                          f"<td>{int(r['n_patients']):,}</td></tr>")
     return ("<table><thead><tr><th>Cohort</th><th>pH source</th><th>Specification</th>"
             "<th>RD (pp)</th><th>n</th></tr></thead>" f"<tbody>{rows}</tbody></table>")
+
+def dp_block():
+    have = {s: R[s]["dp"] for s in SITES if R[s]["dp"] is not None}
+    if not have:
+        return ("<p class='muted'>This sensitivity (script 10 §10j, [T5c]) computes on the next real-data "
+                "re-run, on the subset of patient-days following a recorded plateau. On re-run the table below "
+                "populates with the full-cohort primary RD vs the plateau-recorded subset without and with "
+                "lagged worst-of-day driving pressure in the weight model.</p>")
+    label = {"full_cohort_primary": "Full cohort (primary)",
+             "dp_subset_no_dp_adj": "DP-recorded subset, no DP adj.",
+             "dp_subset_with_dp_adj": "DP-recorded subset, + lagged worst DP"}
+    rows = ""
+    for s, df in have.items():
+        d = df.set_index("spec")
+        for key in ["full_cohort_primary", "dp_subset_no_dp_adj", "dp_subset_with_dp_adj"]:
+            if key in d.index:
+                r = d.loc[key]
+                rows += (f"<tr><td>{s}</td><td>{label[key]}</td><td>{pp(float(r['rd']))}</td>"
+                         f"<td>{int(r['n_patients']):,}</td></tr>")
+    return ("<table><thead><tr><th>Cohort</th><th>Specification</th><th>RD (pp)</th><th>n</th>"
+            "</tr></thead>" f"<tbody>{rows}</tbody></table>")
 
 # =============================================================================
 # assemble the HTML
@@ -600,6 +622,19 @@ sampling is indication-driven (missing-not-at-random); forcing it into the prima
 Each source also reports the subset <i>without</i> pH, so any selection from restricting to gas-sampled patients
 is itself visible.</p>
 {ph_block()}
+
+<h4>Driving-pressure sensitivity <span class="tag">[T5c]</span></h4>
+<p>Clinicians titrate tidal volume in response to plateau pressure (the ARMA threshold) and driving pressure
+(Amato, <i>NEJM</i> 2015) — so the plateau/DP a patient ran at yesterday is a behaviorally-real driver of
+today's dosing decision, and a legitimate time-varying confounder. This sensitivity adds the <b>lagged
+worst-of-day driving pressure</b> (DP = plateau − PEEP) to the IPCW denominator on the subset of patient-days
+following a recorded plateau. Because plateau is recorded only intermittently and in passive conditions and is
+never forward-filled, the subset is restricted to days after a measured plateau, and the base and adjusted
+estimates run on that <i>same</i> day-set so they differ only by the DP term. DP enters the <i>weight</i> model,
+not the outcome model, so it corrects for why clinicians deviated without attenuating the strain→mortality
+pathway. Stability means the strain effect survives adjustment for the actual plateau/DP-driven titration
+behavior.</p>
+{dp_block()}
 
 <h3>Secondary endpoint — liberation (competing risk) <span class="tag">[T1]</span></h3>
 <p>The 28-day liberation CIF difference is the one place the cohorts diverge: MIMIC

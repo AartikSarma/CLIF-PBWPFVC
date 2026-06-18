@@ -53,6 +53,12 @@
 #        "pooled" (arterial + venous+0.05) and "arterial_only" (drops imputed
 #        venous, to show the +0.05 imputation isn't doing the work). Each: subset
 #        RD without vs with lagged pH. tte_ccw_sens_ph_* (ph_source, spec, rd, n).
+#   [T5c DONE] Driving-pressure sensitivity: lagged WORST-of-day DP (plateau - PEEP,
+#        recorded plateaus only, NOT forward-filled) added as a time-varying
+#        confounder on the plateau-recorded subset. Clinicians titrate VT to plateau
+#        (ARMA) and DP (Amato NEJM 2015), so lagged worst-DP is the behaviorally-real
+#        driver of the deviation decision. Base vs adjusted on the SAME day-set (days
+#        after a recorded plateau). Sensitivity only (sparse, MNAR). tte_ccw_sens_dp_*.
 # =============================================================================
 
 # Pin BLAS to one thread per process so the PSOCK bootstrap workers don't each
@@ -132,7 +138,8 @@ base <- cs %>%
 # 10b. Daily exposure + time-varying confounder panel (reuses the probe build)
 # =============================================================================
 wf <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
-  select(hospitalization_id, recorded_dttm, tidal_volume_set, fio2_set, peep_set, resp_rate_set) %>%
+  select(hospitalization_id, recorded_dttm, tidal_volume_set, fio2_set, peep_set,
+         resp_rate_set, plateau_pressure_obs) %>%
   filter(!is.na(tidal_volume_set), tidal_volume_set > 0) %>%
   inner_join(base %>% select(hospitalization_id, t0, pfvc), by = "hospitalization_id") %>%
   mutate(vent_day = floor(as.numeric(difftime(recorded_dttm, t0, units = "days")))) %>%
@@ -143,6 +150,20 @@ daily <- wf %>%
   summarise(vtpfvc = median(vtpfvc, na.rm = TRUE), fio2 = median(fio2_set, na.rm = TRUE),
             peep = median(peep_set, na.rm = TRUE), rr = median(resp_rate_set, na.rm = TRUE),
             .groups = "drop")
+
+# Daily WORST (max) driving pressure for the [T5c] sensitivity: DP = plateau - PEEP
+# from RECORDED plateaus only (plateau_pressure_obs is never forward-filled), taking
+# the worst value in each 24h vent-day. Clinicians titrate VT to plateau (ARMA) and
+# driving pressure (Amato NEJM 2015), so lagged worst-DP is a behaviorally-real
+# driver of the deviation decision -- a time-varying confounder, run as a sensitivity.
+dp_daily <- wf %>%
+  filter(!is.na(plateau_pressure_obs), !is.na(peep_set),
+         plateau_pressure_obs - peep_set > 0) %>%
+  mutate(dp = plateau_pressure_obs - peep_set) %>%
+  group_by(hospitalization_id, vent_day) %>%
+  summarise(dp = max(dp, na.rm = TRUE), .groups = "drop")
+message("DP panel: ", nrow(dp_daily), " patient-days with a recorded plateau, ",
+        n_distinct(dp_daily$hospitalization_id), " patients")
 vit <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet")) %>%
   filter(vital_category %in% c("spo2", "map")) %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
@@ -206,11 +227,13 @@ message("pH panel: ", nrow(ph_daily), " patient-days (pooled), ",
 trunc_w <- function(w) { q <- quantile(w, WT_TRUNC, na.rm = TRUE); pmin(pmax(w, q[1]), q[2]) }
 ess_frac <- function(w) { w <- trunc_w(w); (sum(w)^2 / sum(w^2)) / length(w) }
 
-# pnl: the panel to build on (default = global `panel`; the pH sensitivity passes a
-#      pH-augmented, pH-covered-patient subset). use_ph: add lagged pH (l_ph) to the
-#      IPCW denominator and require it non-missing for eligibility ([T5b]).
+# pnl: the panel to build on (default = global `panel`). conf: name of an extra daily
+#      column to add as a LAGGED confounder; eligibility is restricted to days whose
+#      lagged value is recorded ([T5b] pH, [T5c] driving pressure). conf_in_model
+#      toggles whether it enters the IPCW denominator -- FALSE gives the same-day-set
+#      base (so base vs adjusted differ ONLY by the confounder term, not the day-set).
 arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
-                      pnl = panel, use_ph = FALSE) {
+                      pnl = panel, conf = NULL, conf_in_model = TRUE) {
   p <- pnl %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
     mutate(above = vent_day > grace & vtpfvc > ceiling, lead_vt = lead(vtpfvc),
            viol = if (rule == "corrected") above & (is.na(lead_vt) | lead_vt > ceiling) else above,
@@ -218,19 +241,19 @@ arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
            l_vtpfvc = lag(vtpfvc), l_fio2 = lag(fio2), l_peep = lag(peep),
            l_rr = lag(rr), l_sf = lag(sf), l_map = lag(map), l_pressor = lag(on_pressor)) %>%
     ungroup()
-  if (use_ph) p <- p %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
-    mutate(l_ph = lag(ph)) %>% ungroup()
+  if (!is.null(conf)) p <- p %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
+    mutate(l_conf = lag(.data[[conf]])) %>% ungroup()
   fr <- p %>% filter(!prior_dev, vent_day > grace, !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_map))
-  if (use_ph) fr <- fr %>% filter(!is.na(l_ph))
+  if (!is.null(conf)) fr <- fr %>% filter(!is.na(l_conf))
   num <- glm(viol ~ ns(vent_day, 3) + age10 + sex_category + race_category + sofa_total,
              data = fr, family = binomial)
   den_rhs <- paste("ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr + l_sf + l_map +",
                    "l_pressor + age10 + sex_category + race_category + sofa_total",
-                   if (use_ph) "+ l_ph" else "")
+                   if (!is.null(conf) && conf_in_model) "+ l_conf" else "")
   den <- glm(as.formula(paste("viol ~", den_rhs)), data = fr, family = binomial)
   p <- p %>% mutate(
     elig  = !prior_dev & vent_day > grace & !is.na(l_vtpfvc) & !is.na(l_sf) & !is.na(l_map) &
-            (if (use_ph) !is.na(l_ph) else TRUE),
+            (if (!is.null(conf)) !is.na(l_conf) else TRUE),
     p_num = predict(num, newdata = ., type = "response"),
     p_den = predict(den, newdata = ., type = "response"),
     day_w = if_else(elig, pmin(pmax((1 - p_num) / (1 - p_den), 1 / cap), cap), 1)) %>%
@@ -265,9 +288,9 @@ make_long <- function(b, arm_lab) {
     mutate(ipcw = coalesce(cumw, 1)) %>% select(-cumw)
 }
 build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple",
-                         pnl = panel, use_ph = FALSE) {
-  bl <- arm_build(c_low, grace, cap, rule, pnl, use_ph)
-  bh <- arm_build(c_high, grace, cap, rule, pnl, use_ph)
+                         pnl = panel, conf = NULL, conf_in_model = TRUE) {
+  bl <- arm_build(c_low, grace, cap, rule, pnl, conf, conf_in_model)
+  bh <- arm_build(c_high, grace, cap, rule, pnl, conf, conf_in_model)
   long <- bind_rows(make_long(bl, "strain_limiting"), make_long(bh, "permissive")) %>%
     mutate(arm = factor(arm, levels = c("permissive", "strain_limiting")))
   lib <- bind_rows(bl$idsum %>% mutate(arm = "strain_limiting"),
@@ -444,8 +467,8 @@ ph_sens_one <- function(phd, src_label) {
     message("pH sensitivity [", src_label, "] skipped: ", n_src, " patients (<100).")
     return(NULL)
   }
-  d_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, use_ph = FALSE)
-  d_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, use_ph = TRUE)
+  d_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, conf = "ph", conf_in_model = FALSE)
+  d_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", pnl, conf = "ph", conf_in_model = TRUE)
   tibble(ph_source = src_label, spec = c("subset_no_ph_adj", "subset_with_ph_adj"),
          rd = c(unname(rd_from(d_base$long)["rd"]), unname(rd_from(d_adj$long)["rd"])),
          n_patients = n_src, frac_of_cohort = round(n_src / length(ids), 3))
@@ -462,6 +485,37 @@ if (nrow(ph_sens) > 1) {
 } else {
   message("pH sensitivity ([T5b]) skipped: no source had >=100 patients ",
           "(e.g. synthetic CLIF has no pH labs).")
+}
+
+# =============================================================================
+# 10j. Driving-pressure sensitivity ([T5c]): add LAGGED worst-of-day DP to the
+#      IPCW denominator on the plateau-recorded subset. DP is NOT forward-filled
+#      (recorded plateaus only), so eligibility is restricted to days following a
+#      recorded plateau, and base vs adjusted run on that SAME day-set:
+#        subset_no_dp_adj    -- RD on the DP-recorded subset, no DP in the model
+#        subset_with_dp_adj  -- same day-set WITH lagged worst DP (Amato/ARMA rule)
+#      Stability = the strain effect survives adjustment for the plateau/DP-driven
+#      titration behavior clinicians actually use at the bedside.
+# =============================================================================
+dp_ids   <- unique(dp_daily$hospitalization_id)
+panel_dp <- panel %>% filter(hospitalization_id %in% dp_ids) %>%
+  left_join(dp_daily, by = c("hospitalization_id", "vent_day"))   # NO fill: recorded plateaus only
+n_dp <- n_distinct(panel_dp$hospitalization_id)
+if (n_dp >= 100) {
+  d_dp_base <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_dp, conf = "dp", conf_in_model = FALSE)
+  d_dp_adj  <- build_design(C_LOW, C_HIGH, GRACE, DAYW_CAP, "simple", panel_dp, conf = "dp", conf_in_model = TRUE)
+  dp_sens <- tibble(
+    spec = c("full_cohort_primary", "dp_subset_no_dp_adj", "dp_subset_with_dp_adj"),
+    rd = c(unname(point["rd"]), unname(rd_from(d_dp_base$long)["rd"]),
+           unname(rd_from(d_dp_adj$long)["rd"])),
+    n_patients = c(length(ids), n_dp, n_dp),
+    frac_of_cohort = round(c(1, n_dp / length(ids), n_dp / length(ids)), 3))
+  write_csv(dp_sens, file.path(final_dir, paste0("tte_ccw_sens_dp_", site_name, ".csv")))
+  cat("\n=== driving-pressure sensitivity ([T5c]: lagged worst-of-day DP) ===\n")
+  print(as.data.frame(dp_sens %>% mutate(rd = round(rd, 3))), row.names = FALSE)
+} else {
+  message("DP sensitivity ([T5c]) skipped: ", n_dp,
+          " patients with a recorded plateau (<100).")
 }
 
 # =============================================================================
@@ -494,4 +548,5 @@ p <- ggplot(cc, aes(day, 100 * cuminc, colour = arm)) +
   theme_minimal(base_size = 10) + theme(legend.position = "top")
 ggsave(file.path(final_dir, paste0("tte_ccw_cuminc_", site_name, ".pdf")), p, width = 8, height = 5)
 message("Wrote CCW tables + 1 figure to ", final_dir,
-        "  [T1-T4,T6,T7 done; T5b pH sensitivity added; T5 lactate excluded by decision]")
+        "  [T1-T4,T6,T7 done; T5b pH + T5c driving-pressure sensitivities added; ",
+        "T5 lactate excluded by decision]")
