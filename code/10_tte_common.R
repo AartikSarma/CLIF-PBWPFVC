@@ -46,9 +46,15 @@ RNGkind("L'Ecuyer-CMRG"); set.seed(20260617)
 # --- design knobs (provisional; see [T3]) ------------------------------------
 C_LOW        <- as.numeric(Sys.getenv("PBWPFVC_TTE_CLOW", "11"))   # strain-limiting ceiling, VT/PFVC %
 C_HIGH       <- as.numeric(Sys.getenv("PBWPFVC_TTE_CHIGH", "16"))  # permissive ceiling (~ usual care)
-                        # env-overridable so the FVC_age25 normalizer arm can re-calibrate/sweep
-                        # the ceiling (FVC_age25 > PFVC in the old => same numeric ceiling is more
-                        # lenient there). C_LOW < C_HIGH enforced below once both are read.
+                        # ARMA-ANCHORED: on the PFVC strain scale the proven-protective LTV arm
+                        # (6 mL/kg PBW) delivered VT/PFVC p75 = 11.2 -> C_LOW = 11 is "the strain
+                        # ~75% of the protective arm met" (an achievable ceiling, not the over-
+                        # stringent LTV median ~10 which also tightens positivity). The harmful HTV
+                        # arm (12 mL/kg) sat at VT/PFVC p25 = 17.4 -> C_HIGH = 16 is just under HTV
+                        # territory. Alternatives are swept in 11_sensitivities.R (strain-threshold
+                        # sweep). env-overridable so the FVC_age25 normalizer arm can re-calibrate
+                        # (FVC_age25 > PFVC => same numeric ceiling is more lenient there; ARMA
+                        # FVC_age25 anchors = LTV p75 9.4 / HTV p25 16.9). C_LOW < C_HIGH enforced below.
 stopifnot(is.finite(C_LOW), is.finite(C_HIGH), C_LOW < C_HIGH)
 GRACE        <- 1L      # days allowed above ceiling before deviation. 1d (one calendar
                         # day to titrate to protective settings, then enforce) mirrors
@@ -402,7 +408,11 @@ ess_frac <- function(w) { w <- trunc_w(w); (sum(w)^2 / sum(w^2)) / length(w) }
 arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
                       pnl = panel, conf = NULL, conf_in_model = TRUE,
                       keep_pday = FALSE, num_spec = "time_only",
-                      trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC) {
+                      trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf") {
+  # sf_term: the lagged-oxygenation term in the deviation DENOMINATOR model. Default "l_sf"
+  # (linear) = the primary. 11_sensitivities.R passes a richer spec (ns(l_sf,3)+l_sf:disc_grp)
+  # to address the residual stratum-varying l_sf imbalance the 11.X TV-balance found. Additive:
+  # default reproduces the primary den_rhs exactly.
   p <- pnl %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
     mutate(above = vent_day > grace & vtpfvc > ceiling, lead_vt = lead(vtpfvc),
            # deviation rule. "simple": any post-grace exceedance. "corrected":
@@ -433,7 +443,7 @@ arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
   num_rhs <- if (identical(num_spec, "time_only")) "ns(vent_day, 3)" else
     "ns(vent_day, 3) + age10 + sex_category + race_category + sofa_total"
   num <- glm(as.formula(paste("viol ~", num_rhs)), data = fr, family = binomial)
-  den_rhs <- paste("ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr + l_sf + l_map +",
+  den_rhs <- paste("ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr +", sf_term, "+ l_map +",
                    "l_pressor + age10 + sex_category + race_category + sofa_total",
                    if (!is.null(conf) && conf_in_model) "+ l_conf" else "")
   den <- glm(as.formula(paste("viol ~", den_rhs)), data = fr, family = binomial)
@@ -492,9 +502,9 @@ make_long <- function(b, arm_lab) {
 build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple",
                          pnl = panel, conf = NULL, conf_in_model = TRUE,
                          keep_pday = FALSE, num_spec = "time_only",
-                         trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC) {
-  bl <- arm_build(c_low, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac)
-  bh <- arm_build(c_high, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac)
+                         trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf") {
+  bl <- arm_build(c_low, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term)
+  bh <- arm_build(c_high, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term)
   long <- bind_rows(make_long(bl, "strain_limiting"), make_long(bh, "permissive")) %>%
     mutate(arm = factor(arm, levels = c("permissive", "strain_limiting")))
   lib <- bind_rows(bl$idsum %>% mutate(arm = "strain_limiting"),

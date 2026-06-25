@@ -374,63 +374,61 @@ write_csv(disc_balance, file.path(final_dir, paste0("tte_ccw_disc_balance_", sit
 max_wsmd <- disc_balance %>% group_by(disc_grp) %>%
   summarise(worst_abs_weighted_smd = max(abs(smd_weighted)), .groups = "drop")
 
-# --- D2. TIME-VARYING confounder balance within each discordance stratum --------------
-# Read D checked BASELINE covariates; but the IPCW exists to balance the TIME-VARYING drivers
-# of the deviation decision (concurrent strain VT/PFVC, oxygenation S/F, MAP, pressor use).
-# Whether THOSE balance between arms within the Discordant stratum -- where censoring is
-# heaviest -- is the direct test that the informative censoring is actually handled there. For
-# each arm we take the at-risk (uncensored, alive) clones at day d, their concurrent panel
-# confounders, weighted by the cumulative IPCW; the strain - permissive weighted SMD
-# (standardized by the full-panel SD) is the residual imbalance the weights leave. |SMD| < 0.1
-# in the Discordant arm-contrast = the deviation-censoring is well-corrected where it bites most.
-TV_COVS <- c("vtpfvc", "sf", "map", "on_pressor")
-tv_ref  <- panel %>% summarise(across(all_of(TV_COVS), ~ sd(., na.rm = TRUE), .names = "{.col}__s"))
-tv_means <- function(b, d) {        # weighted at-risk concurrent-confounder means by stratum, one arm
-  w_at_d <- b$wday %>% filter(vent_day <= d) %>% group_by(hospitalization_id) %>%
-    arrange(vent_day) %>% summarise(w = last(cumw), .groups = "drop")
-  b$idsum %>% filter(dev_day > d, trim_day > d, is.na(death_day) | death_day >= d) %>%
-    select(hospitalization_id, disc_grp) %>%
-    inner_join(panel %>% filter(vent_day == d) %>% select(hospitalization_id, all_of(TV_COVS)),
-               by = "hospitalization_id") %>%
-    left_join(w_at_d, by = "hospitalization_id") %>% mutate(w = trunc_w(coalesce(w, 1))) %>%
-    group_by(disc_grp) %>%
-    summarise(across(all_of(TV_COVS), ~ weighted.mean(., w, na.rm = TRUE)), n = n(), .groups = "drop")
+# --- D2. TIME-VARYING balance: does the IPCW make deviation independent of the LAGGED
+#         confounders within each stratum? (weighted deviation regression) -----------------------
+# Replaces an exposure-contaminated, single-day-conditioned SMD that collapsed to noise. The
+# right IPCW-validity question: among the eligible deviation-decision days (not yet deviated, past
+# grace), does the lagged physiologic state still predict deviation AFTER weighting? Per tertile
+# (STRAIN arm = heaviest censoring), early window (vent-days 2-7), a weighted logistic regression
+# of the deviation indicator on z-scored lagged confounders (l_sf, l_map, l_pressor; the strain
+# EXPOSURE is excluded), weighted by the cumulative IPCW, with patient-cluster-robust CIs. A
+# weighted log-OR/SD shrinking to ~0 = the (pooled) weights balance the censoring in that stratum;
+# a residual weighted coefficient in the Discordant tertile = within-stratum imbalance. The
+# Discordant strain arm has near-universal deviation (the positivity limit) -> its model is near-
+# degenerate; the reported deviation_rate + degenerate flag make that explicit instead of hiding
+# it as wide CIs. Confounders/eligibility are reconstructed from `panel` (simple deviation rule).
+library(sandwich); library(lmtest)
+dev_elig <- panel %>%
+  select(hospitalization_id, vent_day, vtpfvc, sf, map, on_pressor, disc_grp, death_day) %>%
+  group_by(hospitalization_id) %>% arrange(vent_day) %>%
+  mutate(viol = vent_day > GRACE & vtpfvc > C_LOW,
+         prior_dev = lag(cumsum(viol), default = 0) > 0,
+         l_sf = lag(sf), l_map = lag(map), l_pressor = lag(on_pressor),
+         alive = is.na(death_day) | vent_day <= death_day) %>% ungroup() %>%
+  filter(!prior_dev, vent_day > GRACE, vent_day %in% 2:7, alive,
+         !is.na(l_sf), !is.na(l_map), !is.na(l_pressor)) %>%
+  left_join(des$bl$wday, by = c("hospitalization_id", "vent_day")) %>%
+  mutate(cumw = trunc_w(coalesce(cumw, 1)), z_l_sf = as.numeric(scale(l_sf)),
+         z_l_map = as.numeric(scale(l_map)), z_l_pressor = as.numeric(scale(l_pressor)))
+tv_zf <- viol ~ z_l_sf + z_l_map + z_l_pressor
+tvfit <- function(g) {
+  d <- dev_elig %>% filter(as.character(disc_grp) == g); nd <- nrow(d); ndev <- sum(d$viol)
+  base_row <- tibble(disc_grp = g, confounder = c("l_sf", "l_map", "l_pressor"),
+                     n_eligible_days = nd, n_patients = n_distinct(d$hospitalization_id),
+                     deviation_rate = round(if (nd) ndev / nd else NA_real_, 3))
+  if (nd < 50 || ndev < 10 || ndev > nd - 10)            # near-degenerate => positivity limit
+    return(base_row %>% mutate(est_unw = NA_real_, est_wt = NA_real_, lo_wt = NA_real_,
+                               hi_wt = NA_real_, degenerate = TRUE))
+  zr  <- c("z_l_sf", "z_l_map", "z_l_pressor")
+  m_u <- suppressWarnings(glm(tv_zf, data = d, family = binomial))
+  m_w <- suppressWarnings(glm(tv_zf, data = d, family = binomial, weights = cumw))
+  ctw <- coeftest(m_w, vcov = sandwich::vcovCL(m_w, cluster = d$hospitalization_id))
+  base_row %>% mutate(est_unw = unname(coef(m_u)[zr]), est_wt = unname(ctw[zr, "Estimate"]),
+                      lo_wt = unname(ctw[zr, "Estimate"] - 1.96 * ctw[zr, "Std. Error"]),
+                      hi_wt = unname(ctw[zr, "Estimate"] + 1.96 * ctw[zr, "Std. Error"]),
+                      degenerate = FALSE)
 }
-tv_balance <- map_dfr(c(2L, 7L, 14L), function(d) {
-  j <- inner_join(tv_means(des$bl, d), tv_means(des$bh, d), by = "disc_grp", suffix = c("_s", "_p"))
-  out <- tibble(disc_grp = j$disc_grp, day = d, n_strain = j$n_s, n_perm = j$n_p)
-  for (cv in TV_COVS)
-    out[[paste0("smd_", cv)]] <- (j[[paste0(cv, "_s")]] - j[[paste0(cv, "_p")]]) / tv_ref[[paste0(cv, "__s")]]
-  out
-}) %>% mutate(disc_grp = factor(disc_grp, DISC_LEVELS)) %>% arrange(disc_grp, day)
+tv_balance <- map_dfr(DISC_LEVELS, tvfit) %>% mutate(disc_grp = factor(disc_grp, DISC_LEVELS))
 write_csv(tv_balance, file.path(final_dir, paste0("tte_ccw_disc_tvbalance_", site_name, ".csv")))
-tv_worst <- tv_balance %>% rowwise() %>%
-  mutate(rmax = max(abs(c_across(starts_with("smd_"))), na.rm = TRUE)) %>% ungroup() %>%
-  group_by(disc_grp) %>% summarise(worst_abs_tv_smd = max(rmax), .groups = "drop")
+tv_summary <- tv_balance %>% group_by(disc_grp) %>%
+  summarise(deviation_rate = first(deviation_rate), degenerate = first(degenerate),
+            worst_abs_wt_logOR = if (all(is.na(est_wt))) NA_real_ else max(abs(est_wt), na.rm = TRUE),
+            .groups = "drop")
 
-# =============================================================================
-# E. Gradient robustness to common-support trim + day-weight cap (informative-censoring stress)
-# =============================================================================
-# Does the Discordant-Concordant gradient survive stricter/looser positivity handling? The
-# Discordant RD leans on the thin-support, heavily-censored tail; if the gradient flips or
-# collapses under a stricter trim, it is a tail artifact. POINT estimates only (rebuilds the
-# design per setting; no per-setting bootstrap), via the same pooled SOFA-adjusted standardizer.
-grad_for_design <- function(trim_a, cap_a) {
-  dd <- build_design(C_LOW, C_HIGH, GRACE, cap_a, "simple", trim = trim_a)
-  lj <- dd$long %>% left_join(base %>% select(hospitalization_id, sofa_total), by = "hospitalization_id")
-  pj <- lj %>% distinct(hospitalization_id, disc_grp, sofa_total)
-  f  <- suppressWarnings(glm(FORM, data = lj, family = binomial, weights = ipcw))
-  r  <- vapply(DISC_LEVELS, function(g) unname(std_rd(f, pj, g)["rd"]), numeric(1))
-  tibble(trim = trim_a, cap = cap_a, rd_concordant = r["Concordant"], rd_discordant = r["Discordant"],
-         gradient = unname(r["Discordant"] - r["Concordant"]))
-}
-sweep_grid <- list(c(TRIM_ALPHA, DAYW_CAP),                       # primary (reference row)
-                   c(0, DAYW_CAP), c(0.01, DAYW_CAP), c(0.05, DAYW_CAP),  # trim sweep
-                   c(TRIM_ALPHA, 3), c(TRIM_ALPHA, 10))                   # weight-cap sweep
-message("11.X gradient robustness: rebuilding ", length(sweep_grid), " designs (trim x cap) ...")
-grad_sweep <- map_dfr(sweep_grid, function(s) grad_for_design(s[1], s[2])) %>%
-  mutate(setting = if_else(trim == TRIM_ALPHA & cap == DAYW_CAP, "PRIMARY", "sensitivity"), .before = 1)
-write_csv(grad_sweep, file.path(final_dir, paste0("tte_ccw_disc_gradient_sweep_", site_name, ".csv")))
+# NOTE: the design-rebuilding sweeps -- trim x weight-cap (censoring) AND the strain-threshold
+# C_LOW x C_HIGH sweep -- were moved to code/11_sensitivities.R (lead-site/supplement) to keep
+# this every-site leaf lean. The cheap censoring-robustness read (per-tertile E-value, above)
+# stays here; both use the same pooled SOFA-adjusted standardized estimator (FORM/std_rd).
 
 # =============================================================================
 # Figure: RD by discordance tertile (with gradient) + dose correction the ceiling delivers
@@ -497,18 +495,13 @@ print(as.data.frame(disc_balance %>% filter(day %in% c(2L, 28L)) %>%
                   smd_unw = round(smd_unweighted, 3), smd_wt = round(smd_weighted, 3))), row.names = FALSE)
 cat("    Worst |weighted SMD| (baseline) by stratum:\n")
 print(as.data.frame(max_wsmd %>% mutate(worst_abs_weighted_smd = round(worst_abs_weighted_smd, 3))), row.names = FALSE)
-cat("    Worst |weighted SMD| (TIME-VARYING confounders the IPCW targets) by stratum:\n")
-print(as.data.frame(tv_worst %>% mutate(worst_abs_tv_smd = round(worst_abs_tv_smd, 3))), row.names = FALSE)
-cat("    (Discordant-stratum baseline AND time-varying SMD < 0.1 = informative censoring corrected where it bites most)\n")
+cat("\n--- Time-varying balance: weighted deviation ~ lagged-confounder log-OR/SD (strain arm, days 2-7) ---\n")
+print(as.data.frame(tv_summary %>% mutate(worst_abs_wt_logOR = round(worst_abs_wt_logOR, 3))), row.names = FALSE)
+cat("    (weighted log-OR/SD ~0 => weights balance the censoring in that stratum; deviation_rate~1 + degenerate=TRUE in Discordant = the positivity limit, not imbalance)\n")
 
 cat("\n--- Discordance-stratified E-value (robustness to unmeasured censoring-confounding) ---\n")
 print(as.data.frame(disc_eval %>% mutate(across(where(is.numeric), ~ round(., 2)))), row.names = FALSE)
 cat("    (Discordant E-value >= Concordant => the EXTRA benefit needs an unmeasured confounder concentrated in the misdosed)\n")
-
-cat("\n--- Gradient robustness to trim x weight-cap (point estimates; PRIMARY = trim", TRIM_ALPHA, "cap", DAYW_CAP, ") ---\n")
-print(as.data.frame(grad_sweep %>% transmute(setting, trim, cap,
-        rd_disc_pp = round(100 * rd_discordant, 2), rd_conc_pp = round(100 * rd_concordant, 2),
-        gradient_pp = round(100 * gradient, 2))), row.names = FALSE)
-cat("    (gradient stays negative across trim/cap = not a thin-support / weight-tail artifact)\n")
-message("Wrote tte_ccw_disc_{hte,gradient,evalue,cate_curve,cate_slope,overlap_*,dose_correction,balance,tvbalance,gradient_sweep}_",
+cat("\n    (trim x weight-cap and strain-threshold C_LOW x C_HIGH sweeps -> code/11_sensitivities.R)\n")
+message("Wrote tte_ccw_disc_{hte,gradient,evalue,cate_curve,cate_slope,overlap_*,dose_correction,balance,tvbalance}_",
         site_name, ".csv + benefit .pdf to ", final_dir)
