@@ -60,3 +60,9 @@ code/explore_*.R
 # per-site deliverable)
 code/pooled_estimates.R
 code/pooled_tte.R
+
+# session-local data exports at repo root -- never commit patient-derived data
+arma_pfvc_data*.csv
+
+# python bytecode cache for the figures/*.py scripts
+figures/__pycache__/
