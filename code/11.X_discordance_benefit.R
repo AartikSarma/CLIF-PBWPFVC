@@ -340,7 +340,9 @@ write_csv(dose_tbl, file.path(final_dir, paste0("tte_ccw_disc_dose_correction_",
 # WEIGHTED so the weights' work is visible. |SMD| < 0.1 = well balanced. NOTE: standardized
 # by the FULL-cohort SD (as in 11.U, for cross-comparability); within the Discordant tertile
 # PFVC's range is compressed, so its weighted SMD here is if anything CONSERVATIVE (small).
-# "All" reproduces 11.U's strain_minus_permissive row as a cross-check.
+# "All" reproduces 11.U's strain_minus_permissive row as a cross-check. A per-tertile
+# survivorship-floor column accompanies the SOFA rows (arm-blind selection in the at-risk set,
+# common to both arms so it cancels in the between-arm SMD) to contextualize the late-day reads.
 BAL_COVS <- c("pfvc", "sofa_total", "age10")   # size axis (the known +SMD concern) + severity + age
 BAL_DAYS <- c(2L, 7L, 14L, 28L)                # day 2 = first deviation (cleanest); 7-28 = arms diverge
 ref_bal  <- base %>% summarise(across(all_of(BAL_COVS),
@@ -373,6 +375,28 @@ disc_balance <- map_dfr(c("All", DISC_LEVELS), function(g) map_dfr(BAL_DAYS, fun
 write_csv(disc_balance, file.path(final_dir, paste0("tte_ccw_disc_balance_", site_name, ".csv")))
 max_wsmd <- disc_balance %>% group_by(disc_grp) %>%
   summarise(worst_abs_weighted_smd = max(abs(smd_weighted)), .groups = "drop")
+
+# Survivorship floor (context for the late-day SMDs): arm-blind baseline-SOFA shift among
+# survivors-to-d vs that stratum's OWN baseline mean, in full-cohort SD units (11.U convention,
+# computed per tertile). This selection is COMMON to both arms, so it largely cancels in the
+# between-arm smd_weighted above -- only the *differential* (arm-unequal, treatment-effect-
+# driven) part leaks in. It is reported so the depleted late-day at-risk set is read for what
+# it is: a floor that GROWS by day 28 while smd_weighted stays flat = the weights are not being
+# overwhelmed by selection, NOT a quantity to subtract from the SMD.
+surv_floor <- map_dfr(c("All", DISC_LEVELS), function(g) {
+  bg  <- if (g == "All") base else base %>% filter(as.character(disc_grp) == g)
+  mu0 <- mean(bg$sofa_total, na.rm = TRUE)
+  map_dfr(BAL_DAYS, function(d) {
+    surv <- is.na(bg$death_day) | bg$death_day >= d
+    tibble(disc_grp = g, day = d,
+           sofa_survivorship_floor = (mean(bg$sofa_total[surv], na.rm = TRUE) - mu0) /
+                                      ref_bal$sofa_total__s)
+  })
+}) %>% mutate(disc_grp = factor(disc_grp, c("All", DISC_LEVELS)))
+disc_balance <- disc_balance %>%
+  left_join(surv_floor, by = c("disc_grp", "day")) %>%
+  mutate(sofa_survivorship_floor = if_else(covariate == "sofa_total",
+                                           sofa_survivorship_floor, NA_real_))
 
 # --- D2. TIME-VARYING balance: does the IPCW make deviation independent of the LAGGED
 #         confounders within each stratum? (weighted deviation regression) -----------------------
@@ -492,7 +516,11 @@ cat("    (vtpbw ~6-8 across tertiles = all look LTVV-compliant; vtpfvc + dose-cu
 cat("\n--- Within-tertile IPCW balance (weighted strain - permissive SMD; |SMD|<0.1 = balanced) ---\n")
 print(as.data.frame(disc_balance %>% filter(day %in% c(2L, 28L)) %>%
         transmute(disc_grp, day, covariate, n_strain, n_perm,
-                  smd_unw = round(smd_unweighted, 3), smd_wt = round(smd_weighted, 3))), row.names = FALSE)
+                  smd_unw = round(smd_unweighted, 3), smd_wt = round(smd_weighted, 3),
+                  surv_floor = round(sofa_survivorship_floor, 3))), row.names = FALSE)
+cat("    (surv_floor = arm-blind baseline-SOFA shift among survivors-to-day vs that stratum's baseline (full-cohort SD);\n")
+cat("     COMMON to both arms => it largely CANCELS in the between-arm smd_wt -- selection context, not a term to subtract.\n")
+cat("     Floor grows by day 28 (more selection) while smd_wt stays flat => weights not overwhelmed by depletion. NA = non-SOFA covariate.)\n")
 cat("    Worst |weighted SMD| (baseline) by stratum:\n")
 print(as.data.frame(max_wsmd %>% mutate(worst_abs_weighted_smd = round(worst_abs_weighted_smd, 3))), row.names = FALSE)
 cat("\n--- Time-varying balance: weighted deviation ~ lagged-confounder log-OR/SD (strain arm, days 2-7) ---\n")

@@ -79,11 +79,12 @@ HORIZON      <- 28L     # days, primary outcome (28-d: bulk of ICU mortality, ~=
 MAX_VENT_DAY <- 27L     # ventilation/adherence window
 WT_TRUNC     <- c(0.01, 0.99)
 is_synthetic <- identical(site_name, "synthetic_clif")
-# cluster bootstrap reps; override on real data via PBWPFVC_NBOOT (each rep refits
-# the MSM on a resampled long panel, so this is the dominant cost at real scale)
-N_BOOT       <- if (is_synthetic) 100L else
-  suppressWarnings(as.integer(Sys.getenv("PBWPFVC_NBOOT", "500")))
-if (is.na(N_BOOT)) N_BOOT <- 500L
+# cluster bootstrap reps; override on ANY site via PBWPFVC_NBOOT (e.g. =25 to prototype fast --
+# each rep refits the MSM on a resampled long panel, so this is the dominant cost at real scale).
+# Unset -> 100 (synthetic) / 500 (real).
+N_BOOT       <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_NBOOT", unset = NA)))
+if (is.na(N_BOOT)) N_BOOT <- if (is_synthetic) 100L else 500L
+message("TTE: N_BOOT = ", N_BOOT, "  (PBWPFVC_NBOOT env = '", Sys.getenv("PBWPFVC_NBOOT"), "')")
 # bootstrap worker count; override with PBWPFVC_CORES (default leaves 1 core free)
 N_CORES      <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_CORES", unset = NA)))
 if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)

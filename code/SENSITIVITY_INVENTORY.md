@@ -5,11 +5,31 @@ The federated per-site deliverable is the PRIMARY analysis only:
 (diagnostics), `11.X` (discordance-HTE primary). The scripts below were moved to the
 gitignored `code/archive/` (kept locally, not shipped to sites).
 
-**Plan:** once the primary is finalized (ARMA-derived strain thresholds set, `11.X`
-optimized), the `11.*` sensitivities below are to be **rebuilt into a single
-consolidated sensitivity script**, plus a new **strain-threshold sensitivity** (sweep the
-`C_LOW`/`C_HIGH` ceilings around the ARMA-derived values). This file is the checklist of
-what that consolidated script must cover.
+**Active lead-site supplements** (run locally at the lead site, NOT in `11_run_all`, NOT
+shipped to the federated sites):
+- `11.Y_mppbw_additive_hte.R` — additive (normalizer-dependent) MP/PBW power-reduction, DR-LMTP
+  CATE by discordance + PFVC; the mechanical-power sibling to `11.X` (triangulation by exposure
+  + estimator). Saves `mppbw_additive_{cate,slope}_*`.
+- `11.Z_within_demographic_hte.R` — does the `11.X` discordance slope survive demographics?
+  Residualized (height-driven) slope vs raw + within-stratum slopes. **Result: discordance is ~99%
+  demographics (R²≈0.987), residualized slope null at both sites** → repositioned from "linchpin" to
+  a who-benefits characterization (the titration target is demographically patterned; physiology is
+  in 05). Saves `tte_ccw_within_demo_{slope,strata,curve}_*`.
+- `11_vtpbw_titration.R` — the bedside-direct titration: an additive VT/PBW −0.5 mL/kg modified
+  treatment policy (DR-LMTP), CATE/slope/gradient by discordance + PFVC. Identifiable where a static
+  VT/PBW ceiling is not (feasible shift stays in support); normalizer-dependent → targets the
+  misdosed; less severity-confounded than the MP sibling (`11.Y`). Saves `vtpbw_titration_{cate,slope}_*`.
+- **Split discordance-gradient sensitivity suite** — `11_sens_common.R` (shared estimator +
+  guarded engine build + lazy VR-panel builder) sourced by independently-runnable pieces:
+  `11_sens_thresholds.R` (C_LOW×C_HIGH), `11_sens_censoring.R` (trim×cap), `11_sens_weightmodel.R`
+  (richer S/F + weight-timing), `11_sens_deadspace.R` (VR), `11_sens_severity_ladder.R` (daily
+  SOFA / VR / DP ladder). `11_sensitivities.R` is now a run-all wrapper over these. Output
+  filenames unchanged from the old monolith (report + pooling unaffected). Run a single piece to
+  add/rerun one test without rebuilding the others.
+
+**Plan:** the `11.*` sensitivities below (still in `code/archive/`) are to be folded into the split
+suite above as needed — each becomes (or extends) one `11_sens_*.R` piece. This file is the
+checklist of what that suite should eventually cover.
 
 ## TTE sensitivities to consolidate (`11.C`–`11.W`)
 
@@ -54,7 +74,7 @@ Mostly null or superseded; kept for reference, not part of the deliverable.
 | 12.E_mp_hte_discordance | MP-reduction HTE by discordance tertile (null) |
 | 12.F_mp_cate_continuous | continuous CATE of MP reduction vs discordance (null) |
 | 12.G_mpcrs_cate | MP/Crs specific-power CATE by measured compliance |
-| 12.H_mppbw_cate | PBW-anchored continuous CATE |
+| 12.H_mppbw_cate | PBW-anchored continuous CATE, *multiplicative* shift (normalizer-INVARIANT) → **promoted + reworked to active `11.Y_mppbw_additive_hte.R`**: switched to an *additive* MP/PBW reduction (normalizer-DEPENDENT), the LMTP/MP sibling to `11.X`. Standalone supplement, NOT in `11_run_all`. |
 
 ## Also archived
 `05b_predicted_risk_grids.R` (secondary predicted-risk grids), `calc_external_pfvc.R`
