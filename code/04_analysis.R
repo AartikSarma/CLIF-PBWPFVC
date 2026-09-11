@@ -1240,6 +1240,7 @@ nc_sd <- cross_sectional %>%
 nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height",
                   vtpbw = "VT/PBW", vtpfvc = "VT/PFVC")
 nc_age_forms <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
+NC_MIN_EVENTS <- as.integer(Sys.getenv("PBWPFVC_NC_MIN_EVENTS", "10"))   # min deaths per cell (lower only to test plumbing)
 
 nc_fit_one <- function(df, expo, cohort_lab) {
   d <- df %>% filter(nc_cohort == cohort_lab) %>%
@@ -1249,7 +1250,7 @@ nc_fit_one <- function(df, expo, cohort_lab) {
   out <- tibble()
   for (af in names(nc_age_forms)) {
     rhs <- paste("z +", nc_age_forms[[af]], "+ sex_category + race_category")
-    if (nrow(d) >= 50 && n_death >= 10) {
+    if (nrow(d) >= 50 && n_death >= NC_MIN_EVENTS) {
       m <- glm(as.formula(paste("deceased ~", rhs)), data = d, family = binomial)
       cf <- summary(m)$coefficients["z", ]
       out <- bind_rows(out, tibble(age_form = af, outcome = "In-hospital mortality", estimate_type = "OR",
@@ -1257,7 +1258,7 @@ nc_fit_one <- function(df, expo, cohort_lab) {
         conf_high = exp(cf["Estimate"] + 1.96 * cf["Std. Error"]), std_error = cf["Std. Error"],
         p_value = cf["Pr(>|z|)"], n = nrow(d), events = n_death))
     }
-    if (nrow(d) >= 50 && n_death60 >= 10) {
+    if (nrow(d) >= 50 && n_death60 >= NC_MIN_EVENTS) {
       d60 <- d %>% filter(!is.na(surv_time), surv_time > 0)
       m <- survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)), data = d60)
       cf <- summary(m)$coefficients["z", ]
@@ -1291,6 +1292,103 @@ nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
          cohort = factor(cohort, nc_cohort_levels)) %>% arrange(cohort)
 write_csv(nc_results, file.path(final_dir, paste0("negative_control_", site_name, ".csv")))
 write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", site_name, ".csv")))
+
+# --- Identifying variation: what is left of each exposure after the adjusters -------
+# The ratio is ~99% demographics, so after age, sex and race its coefficient is
+# estimated from a sliver of residual variation (height plus the convex part of the
+# age curve); PFVC keeps height's full variation. The share of each exposure's
+# variance that survives the adjustment set explains the CI widths in one number and
+# is the reason the ratio cannot carry the primary mortality model. Reported per
+# cohort, under linear and spline age, with and without VT/PBW (ventilated cohorts).
+nc_idvar <- map_dfr(nc_cohort_levels, function(cl) {
+  d <- nc_frames %>% filter(nc_cohort == cl)
+  map_dfr(names(nc_exposures), function(e) {
+    z <- d[[e]]; ok <- is.finite(z)
+    if (sum(ok) < 50) return(tibble())
+    map_dfr(names(nc_age_forms), function(af) {
+      map_dfr(c("demographics", "demographics + VT/PBW"), function(adj) {
+        if (adj == "demographics + VT/PBW" && (e == "vtpbw" || all(is.na(d$vtpbw)))) return(tibble())
+        rhs <- paste(nc_age_forms[[af]], "+ sex_category + race_category",
+                     if (adj == "demographics + VT/PBW") "+ vtpbw" else "")
+        dd <- d[ok, ]; if (adj == "demographics + VT/PBW") dd <- dd %>% filter(is.finite(vtpbw))
+        if (nrow(dd) < 50) return(tibble())
+        fit <- lm(as.formula(paste(e, "~", rhs)), data = dd)
+        tibble(cohort = cl, exposure = nc_exposures[[e]], age_form = af, adjustment = adj,
+               n = nrow(dd), r2_on_adjusters = summary(fit)$r.squared,
+               residual_variance_share = 1 - summary(fit)$r.squared,
+               residual_sd_in_analytic_sd = sd(resid(fit)) / nc_sd[[e]])
+      })
+    })
+  })
+}) %>% mutate(site = site_name)
+write_csv(nc_idvar, file.path(final_dir, paste0("negative_control_identifying_variation_", site_name, ".csv")))
+cat("--- identifying variation (share of exposure variance left after the adjusters; linear age) ---\n")
+print(as.data.frame(nc_idvar %>% filter(age_form == "linear") %>%
+        transmute(cohort, exposure, adjustment, n, resid_share = round(residual_variance_share, 3))), row.names = FALSE)
+
+# --- Formal cohort contrast: does the exposure's effect differ where tidal volume is set? --
+# One model over the stacked cohorts with cohort-specific effects of every adjuster
+# (equivalent to fitting each cohort separately) and an exposure x cohort interaction;
+# the LRT against the no-interaction model tests heterogeneity, and the pairwise
+# contrasts (analytic minus each control, log scale) say where it lies. Cox models
+# stratify the baseline hazard by cohort. Linear age. The contrasts are poolable
+# across sites (random effects on the log difference); the p-values by Fisher.
+nc_interaction <- map_dfr(names(nc_exposures), function(e) {
+  d <- nc_frames %>% mutate(z = .data[[e]] / nc_sd[[e]]) %>% filter(is.finite(z))
+  keep <- d %>% count(nc_cohort) %>% filter(n >= 50) %>% pull(nc_cohort)
+  d <- d %>% filter(nc_cohort %in% keep) %>%
+    mutate(cohort = factor(nc_cohort, levels = intersect(nc_cohort_levels, keep)))
+  if (n_distinct(d$cohort) < 2) return(tibble())
+  ref <- levels(d$cohort)[1]
+  one <- function(outcome_lab) {
+    if (outcome_lab == "In-hospital mortality") {
+      ev_ok <- d %>% group_by(cohort) %>% summarise(ev = sum(deceased == 1), .groups = "drop")
+      dd <- d %>% filter(cohort %in% ev_ok$cohort[ev_ok$ev >= NC_MIN_EVENTS]) %>% droplevels()
+      if (n_distinct(dd$cohort) < 2) return(tibble())
+      f0 <- glm(deceased ~ z + cohort * (age10 + sex_category + race_category), data = dd, family = binomial)
+      f1 <- glm(deceased ~ z * cohort + cohort * (age10 + sex_category + race_category), data = dd, family = binomial)
+      V <- vcov(f1); b <- coef(f1); est_type <- "OR"
+    } else {
+      dd <- d %>% filter(!is.na(surv_time), surv_time > 0)
+      ev_ok <- dd %>% group_by(cohort) %>% summarise(ev = sum(mortality_event_60 == 1), .groups = "drop")
+      dd <- dd %>% filter(cohort %in% ev_ok$cohort[ev_ok$ev >= NC_MIN_EVENTS]) %>% droplevels()
+      if (n_distinct(dd$cohort) < 2) return(tibble())
+      f0 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z + cohort:(age10 + sex_category + race_category) +
+                              survival::strata(cohort), data = dd)
+      f1 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z * cohort + cohort:(age10 + sex_category + race_category) +
+                              survival::strata(cohort), data = dd)
+      V <- vcov(f1); b <- coef(f1); est_type <- "HR"
+    }
+    lrt <- 2 * (as.numeric(logLik(f1)) - as.numeric(logLik(f0)))
+    df  <- n_distinct(dd$cohort) - 1
+    int_terms <- grep("^z:cohort", names(b), value = TRUE)
+    contrasts <- map_dfr(int_terms, function(tm) {
+      cl <- sub("^z:cohort", "", tm)
+      tibble(contrast = paste0(cl, " minus ", ref), log_diff = unname(b[tm]),
+             se = sqrt(V[tm, tm]), ratio_of_effects = exp(unname(b[tm])),
+             lo = exp(unname(b[tm]) - 1.96 * sqrt(V[tm, tm])), hi = exp(unname(b[tm]) + 1.96 * sqrt(V[tm, tm])))
+    })
+    bind_rows(tibble(contrast = "LRT: exposure x cohort", log_diff = NA_real_, se = NA_real_,
+                     ratio_of_effects = NA_real_, lo = NA_real_, hi = NA_real_),
+              contrasts) %>%
+      mutate(outcome = outcome_lab, estimate_type = est_type, lrt_chi2 = lrt, lrt_df = df,
+             lrt_p = pchisq(lrt, df, lower.tail = FALSE), reference_cohort = ref,
+             cohorts = paste(levels(dd$cohort), collapse = " | "), n = nrow(dd), .before = 1)
+  }
+  res <- bind_rows(one("In-hospital mortality"), one("60-day mortality"))
+  if (nrow(res) == 0) return(tibble())   # mutate() on an empty tibble would manufacture a row
+  res %>% mutate(exposure = nc_exposures[[e]], .before = 1)
+})
+if (nrow(nc_interaction)) nc_interaction <- nc_interaction %>%
+  mutate(scale = "effect per analytic-cohort SD; ratio_of_effects = control / analytic (< 1 = attenuated)",
+         site = site_name)
+write_csv(nc_interaction, file.path(final_dir, paste0("negative_control_interaction_", site_name, ".csv")))
+if (nrow(nc_interaction)) {
+  cat("--- exposure x cohort heterogeneity (LRT) and contrasts vs the analytic cohort ---\n")
+  print(as.data.frame(nc_interaction %>% transmute(exposure, outcome, contrast,
+          ratio = ifelse(is.na(ratio_of_effects), NA, sprintf("%.2f [%.2f, %.2f]", ratio_of_effects, lo, hi)),
+          lrt_p = signif(lrt_p, 2))), row.names = FALSE)
+}
 
 if (nrow(nc_results)) {
   nc_lab <- nc_results %>% filter(age_form == "linear") %>%
