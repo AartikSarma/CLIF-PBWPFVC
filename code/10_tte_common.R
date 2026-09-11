@@ -79,12 +79,16 @@ HORIZON      <- 28L     # days, primary outcome (28-d: bulk of ICU mortality, ~=
 MAX_VENT_DAY <- 27L     # ventilation/adherence window
 WT_TRUNC     <- c(0.01, 0.99)
 is_synthetic <- identical(site_name, "synthetic_clif")
-# cluster bootstrap reps; override on ANY site via PBWPFVC_NBOOT (e.g. =25 to prototype fast --
-# each rep refits the MSM on a resampled long panel, so this is the dominant cost at real scale).
-# Unset -> 100 (synthetic) / 500 (real).
+# Cluster bootstrap reps. Each rep refits the MSM on a resampled long panel, so this is the
+# dominant cost at real scale. DEFAULT IS 50, a PROTOTYPING value: it fixes the point estimates
+# and gives percentile intervals accurate enough to see whether an effect is there, but 50 reps
+# put a large Monte-Carlo error on the interval ENDPOINTS. Raise it with PBWPFVC_NBOOT for any
+# run whose numbers leave this machine -- 500 for the federated per-site deliverable, and the
+# same for the weight-refit intervals (PBWPFVC_CEIL_REFIT_BOOT), which are the primary CIs.
 N_BOOT       <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_NBOOT", unset = NA)))
-if (is.na(N_BOOT)) N_BOOT <- if (is_synthetic) 100L else 500L
-message("TTE: N_BOOT = ", N_BOOT, "  (PBWPFVC_NBOOT env = '", Sys.getenv("PBWPFVC_NBOOT"), "')")
+if (is.na(N_BOOT)) N_BOOT <- 50L
+message("TTE: N_BOOT = ", N_BOOT, "  (PBWPFVC_NBOOT env = '", Sys.getenv("PBWPFVC_NBOOT"), "')",
+        if (N_BOOT < 200L) "  *** PROTOTYPING setting: raise PBWPFVC_NBOOT to >= 500 for reported intervals ***" else "")
 # bootstrap worker count; override with PBWPFVC_CORES (default leaves 1 core free)
 N_CORES      <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_CORES", unset = NA)))
 if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
