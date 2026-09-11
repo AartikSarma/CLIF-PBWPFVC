@@ -178,6 +178,14 @@ base <- cs %>%
             pfvc = .data[[tte_norm]],   # the CEILING normalizer (switch); downstream stays normalizer-agnostic
             pfvc_age25,                 # ALWAYS carry the structural normalizer (12 secondary CATE + positivity)
             pbw, death_day,
+            # measured mechanics at the index timepoint (plateau subset only, so often NA).
+            # ers (cmH2O/L) x the size normalizer is SPECIFIC elastance: near-constant across
+            # lungs if the normalizer is right about this patient's aerated volume (Chiumello),
+            # ABOVE that value when the aerated lung is smaller than predicted. Unlike PBW/PFVC
+            # it is MEASURED, so it varies within demographic strata -- the one mis-sizing index
+            # in this project that is not a deterministic function of age/sex/race/height.
+            # bmi rides along because respiratory-system elastance includes the chest wall.
+            ers, bmi, height_cm,
             age10 = age_at_admission / 10, sex_category, race_category, sofa_total,
             age_grp = cut(age_at_admission, c(-Inf, age_breaks, Inf),
                           labels = c("Young", "Middle", "Old")),

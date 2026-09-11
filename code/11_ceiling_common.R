@@ -5,8 +5,11 @@
 # (PFVC) rather than PREDICTED BODY WEIGHT (PBW) change outcomes? Two prescribable protocols are
 # emulated with the clone-censor-weight engine of 11.A / 11.X, on one of two EXPOSURE FAMILIES:
 #
-#   PBWPFVC_TTE_EXPO_FAMILY = "vt"  (PRIMARY)  tidal volume: VT/PFVC (% pred FVC) vs VT/PBW (mL/kg)
-#                           = "mp"  (secondary) mechanical power: MP/PFVC (J/min/L) vs MP/PBW (J/min/kg)
+#   PBWPFVC_TTE_EXPO_FAMILY = "vt"   (PRIMARY)  tidal volume: VT/PFVC (% pred FVC) vs VT/PBW (mL/kg)
+#                           = "mp"   (secondary) mechanical power: MP/PFVC (J/min/L) vs MP/PBW (J/min/kg)
+#                           = "work" (secondary) work per breath: W/PFVC (J/breath/L) vs W/PBW -- power
+#                             with the respiratory rate removed, so the shared numerator varies less
+#                             and the normalizer contrast is correspondingly larger (see section 1)
 #
 # Two designs per family (section 3):
 #   HEAD-TO-HEAD ("ceiling"):  X/PFVC <= TAU_PFVC   vs   X/PBW <= TAU_PBW, BITE-MATCHED -- each ceiling
@@ -52,7 +55,7 @@
 library(here); library(patchwork)
 source(here::here("code", "10_tte_engine.R"))
 FAM <- Sys.getenv("PBWPFVC_TTE_EXPO_FAMILY", "vt")
-stopifnot(FAM %in% c("vt", "mp"))
+stopifnot(FAM %in% c("vt", "mp", "work"))
 .ceil_key <- paste(site_name, FAM)
 # guard: rebuild only if never built this session, or the engine/family changed
 if (!exists(".ceil_loaded_key") || !identical(.ceil_loaded_key, .ceil_key)) {
@@ -64,9 +67,11 @@ if (!exists(".ceil_loaded_key") || !identical(.ceil_loaded_key, .ceil_key)) {
   DISC_LEVELS <- c("Concordant", "Mid", "Discordant")
   # x_pfvc = x_pbw x (PBW/PFVC) x K_CONV: VT/PFVC is in % of predicted FVC (x 0.1), MP/PFVC in J/min/L
   K_CONV <- if (FAM == "vt") 0.1 else 1
-  UNITS  <- if (FAM == "vt") c(raw = "VT (mL)", pbw = "VT/PBW (mL/kg)", pfvc = "VT/PFVC (% pred FVC)")
-            else             c(raw = "MP (J/min)", pbw = "MP/PBW (J/min/kg)", pfvc = "MP/PFVC (J/min/L)")
-  FAM_LAB <- if (FAM == "vt") "tidal-volume" else "mechanical-power"
+  UNITS  <- switch(FAM,
+    vt   = c(raw = "VT (mL)", pbw = "VT/PBW (mL/kg)", pfvc = "VT/PFVC (% pred FVC)"),
+    mp   = c(raw = "MP (J/min)", pbw = "MP/PBW (J/min/kg)", pfvc = "MP/PFVC (J/min/L)"),
+    work = c(raw = "W (J/breath)", pbw = "W/PBW (J/breath/kg)", pfvc = "W/PFVC (J/breath/L)"))
+  FAM_LAB <- switch(FAM, vt = "tidal-volume", mp = "mechanical-power", work = "work-per-breath")
   PFX     <- paste0("tte_", FAM, "_")
 
   # =============================================================================
@@ -79,7 +84,14 @@ if (!exists(".ceil_loaded_key") || !identical(.ceil_loaded_key, .ceil_key)) {
       filter(is.finite(x_pbw), is.finite(x_pfvc))
   } else {
     # Raw `wf` is cache-blocklisted, so the waterfall is re-read. Filters are 11.Y's. Daily MEDIAN
-    # of the per-record peak MP + daily median PIP (a lagged confounder for this family only).
+    # of the per-record exposure + daily median PIP (a lagged confounder for these families).
+    #   mp   = 0.098 x RR x VT[L] x PIP   (J/min)     -- power, carries the respiratory rate
+    #   work = 0.098 x      VT[L] x PIP   (J/breath)  -- the same thing per CYCLE, rate removed
+    # Work per breath is the energy of one stress-strain event, and stripping the rate removes
+    # the component with the widest spread. Because the two ceilings of a head-to-head differ
+    # ONLY by the (demographic) normalizer ratio, their disagreement is largest when the shared
+    # numerator varies least: VT (protocolized 6-8 mL/kg) gave ~20% of days, MP ~7%, and work per
+    # breath should sit between them. That is the point of running this family.
     KC <- 0.098
     x_daily <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
       select(hospitalization_id, recorded_dttm, tidal_volume_set, resp_rate_set, peep_set,
@@ -91,9 +103,10 @@ if (!exists(".ceil_loaded_key") || !identical(.ceil_loaded_key, .ceil_key)) {
              !is.na(resp_rate_set), between(resp_rate_set, 4, 60),
              !is.na(peep_set), !is.na(peak_inspiratory_pressure_obs),
              between(peak_inspiratory_pressure_obs, 5, 80)) %>%
-      mutate(mp_raw = KC * resp_rate_set * (tidal_volume_set / 1000) * peak_inspiratory_pressure_obs) %>%
+      mutate(rate_term = if (FAM == "mp") resp_rate_set else 1,
+             x_rec = KC * rate_term * (tidal_volume_set / 1000) * peak_inspiratory_pressure_obs) %>%
       group_by(hospitalization_id, vent_day) %>%
-      summarise(x_raw = median(mp_raw), pip = median(peak_inspiratory_pressure_obs), .groups = "drop")
+      summarise(x_raw = median(x_rec), pip = median(peak_inspiratory_pressure_obs), .groups = "drop")
     # INNER join: an NA exposure would make `above` NA and corrupt the cumulative deviation flag
     # inside arm_build, so panel-days without a recorded peak pressure are dropped and REPORTED.
     panel_x <- panel %>%
