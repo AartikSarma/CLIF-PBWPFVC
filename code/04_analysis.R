@@ -1455,25 +1455,32 @@ print(as.data.frame(nc_results %>% filter(age_form == "linear") %>%
         transmute(cohort, exposure, outcome, n, events,
                   est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
 # =============================================================================
-# 4k. Functional form of the size term
+# 4k. The saturated log model: log VT, log PBW, log PFVC (spline age primary)
 # =============================================================================
-# After age, sex and race the identifying variation of PBW/PFVC and of PFVC is the same
-# thing, height: PBW rises about linearly with height and PFVC faster, so within a
-# demographic stratum the shorter patient has the higher ratio and, at the same VT/PBW,
-# the higher strain. The two exposures are one signal on two scales (the ratio goes
-# roughly as 1/height, PFVC as height squared), and the identifying-variation table in
-# 4j reports how much of each exposure's residual variance is height. Nothing inside
-# the analytic cohort separates height-through-mis-sizing from height-through-anything
-# -else; the negative-control cohorts (4j) carry that test. What CAN be settled here is
-# the functional form of the size term: VT/PBW + f(PFVC) for f in {linear, log, 1/x},
-# and the ratio linear vs log, same covariates, ranked by AIC -- in a log-linear model
-# 1/x is a sign flip of log x, on the natural scale they differ. Linear and spline age;
-# in-hospital (logistic) and 60-day (Cox) death; each outcome only where it has >= 10
-# events.
+# In a log-linear model every combination of VT/PBW, PFVC, PBW/PFVC and VT/PFVC lives in
+# the span of three columns, log VT, log PBW and log PFVC. The saturated model with all
+# three is the reference; each two-term model is that model plus one linear constraint,
+# and each "parameterization" is a change of basis with the same likelihood. So the
+# honest table is the saturated fit, spline age PRIMARY (the ratio's linear-age
+# association was the convex part of the age curve), linear age as the sensitivity:
+#   log PFVC at fixed VT and PBW: same breath, same PBW label, larger predicted lung --
+#       lower strain and lower ratio together (the strain-error effect; wide, because
+#       within demographics PFVC at fixed PBW varies only through age curvature)
+#   log PBW  at fixed VT and PFVC: same breath, same lung, higher PBW -- the mL/kg label
+#       falls and the ratio rises with no change in strain (label and height, no dose)
+#   log VT   at fixed PBW and PFVC: pure dose, confounded by indication within 6-8 mL/kg
+# The two-term models become tests: "VT/PBW + PFVC" imposes b_VT + b_PBW = 0; the ratio
+# model "VT/PBW + PBW/PFVC" imposes b_VT + b_PBW + b_PFVC = 0, which is SCALE INVARIANCE
+# (scale breath, body and lung together and nothing changes -- only dimensionless ratios
+# carry information), a physiologic hypothesis tested as a one-df Wald test, plus the
+# LRT of each constraint. Coefficients per log unit (x1.1 = a 10% increase). (C) keeps
+# the functional-form ladder for the size term (PFVC linear / log / 1/x; ratio linear /
+# log). In-hospital (logistic) and 60-day (Cox) death; each outcome only where it has
+# >= 10 events.
 sz <- cross_sectional %>%
   filter(vtpbw > 0, pbwpfvc > 0, pbw > 0, pfvc > 0, !is.na(sofa_total), !is.na(sf10)) %>%
-  mutate(l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_pbw = log(pbw), l_pfvc = log(pfvc),
-         l_vtpfvc = log(vtpfvc), inv_pfvc = 1 / pfvc)
+  mutate(l_vt = log(tidal_volume_set), l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_pbw = log(pbw),
+         l_pfvc = log(pfvc), l_vtpfvc = log(vtpfvc), inv_pfvc = 1 / pfvc)
 sz_age <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
 sz_base <- "sex_category + race_category + sofa_total + sf10"
 sz_fit <- function(rhs, outcome) {
@@ -1489,6 +1496,42 @@ sz_outcomes <- names(sz_events)[sz_events >= 10]
 sz_ok <- length(sz_outcomes) >= 1 && nrow(sz) >= 100
 
 if (sz_ok) {
+  # --- (A) the saturated log model + constraint tests ---------------------------------
+  sz_wald <- function(b, V, w) { est <- sum(w * b); se <- sqrt(as.numeric(t(w) %*% V %*% w)); c(est = est, se = se, p = 2 * pnorm(-abs(est / se))) }
+  size_saturated <- map_dfr(sz_outcomes, function(oc) map_dfr(c("spline", "linear"), function(af) {
+    cov <- paste(sz_age[[af]], "+", sz_base)
+    f_sat   <- sz_fit(paste("l_vt + l_pbw + l_pfvc +", cov), oc)
+    f_pfvc  <- sz_fit(paste("l_vtpbw + l_pfvc +", cov), oc)          # b_VT + b_PBW = 0
+    f_ratio <- sz_fit(paste("l_vtpbw + l_ratio +", cov), oc)         # b_VT + b_PBW + b_PFVC = 0 (scale invariance)
+    f_strain<- sz_fit(paste("l_vtpfvc +", cov), oc)                  # b_VT + b_PFVC = 0 and b_PBW = 0
+    terms <- c("l_vt", "l_pbw", "l_pfvc"); b <- coef(f_sat)[terms]; V <- vcov(f_sat)[terms, terms]
+    cf <- if (inherits(f_sat, "coxph")) summary(f_sat)$coefficients[terms, ] else summary(f_sat)$coefficients[terms, ]
+    est <- if (inherits(f_sat, "coxph")) cf[, "coef"] else cf[, "Estimate"]
+    se  <- if (inherits(f_sat, "coxph")) cf[, "se(coef)"] else cf[, "Std. Error"]
+    lrt <- function(f0) { x <- 2 * (as.numeric(logLik(f_sat)) - as.numeric(logLik(f0))); c(x, attr(logLik(f_sat), "df") - attr(logLik(f0), "df")) }
+    w_scale <- c(1, 1, 1); w_pfvc <- c(1, 1, 0)
+    ws <- sz_wald(b, V, w_scale); wp <- sz_wald(b, V, w_pfvc)
+    l_p <- lrt(f_pfvc); l_r <- lrt(f_ratio); l_s <- lrt(f_strain)
+    bind_rows(
+      tibble(row_type = "coefficient", term = terms,
+             term_label = c("log VT at fixed PBW and PFVC (dose)", "log PBW at fixed VT and PFVC (label and height, no strain change)",
+                            "log PFVC at fixed VT and PBW (strain error)"),
+             estimate = exp(est), conf_low = exp(est - 1.96 * se), conf_high = exp(est + 1.96 * se), std_error = se,
+             p_value = cf[, ncol(cf)]),
+      tibble(row_type = "constraint", term = c("b_VT + b_PBW + b_PFVC = 0", "b_VT + b_PBW = 0"),
+             term_label = c("scale invariance (only dimensionless ratios matter; the ratio model)",
+                            "VT enters only as VT/PBW (the PFVC model)"),
+             estimate = exp(c(ws["est"], wp["est"])), conf_low = exp(c(ws["est"] - 1.96 * ws["se"], wp["est"] - 1.96 * wp["se"])),
+             conf_high = exp(c(ws["est"] + 1.96 * ws["se"], wp["est"] + 1.96 * wp["se"])), std_error = c(ws["se"], wp["se"]),
+             p_value = c(ws["p"], wp["p"]),
+             lrt_chi2 = c(l_r[1], l_p[1]), lrt_df = c(l_r[2], l_p[2]), lrt_p = pchisq(c(l_r[1], l_p[1]), c(l_r[2], l_p[2]), lower.tail = FALSE)),
+      tibble(row_type = "constraint", term = "b_PBW = 0 and b_VT + b_PFVC = 0", term_label = "only strain VT/PFVC matters (the strain model)",
+             lrt_chi2 = l_s[1], lrt_df = l_s[2], lrt_p = pchisq(l_s[1], l_s[2], lower.tail = FALSE))) %>%
+      mutate(outcome = oc, age_form = af, estimate_type = if (inherits(f_sat, "coxph")) "HR" else "OR",
+             n = nobs(f_sat), aic_saturated = AIC(f_sat), .before = 1)
+  })) %>% mutate(scale = "per log unit (x1.1 = +10%); constraint rows: exp(sum of coefficients), 1 = constraint holds", site = site_name)
+  write_csv(size_saturated, file.path(final_dir, paste0("size_saturated_log_model_", site_name, ".csv")))
+
   # --- (C) functional-form ladder for the size term -------------------------------------
   sz_forms <- c("PFVC (linear)" = "pfvc", "log PFVC" = "l_pfvc", "1/PFVC" = "inv_pfvc",
                 "PBW/PFVC (linear)" = "pbwpfvc", "log PBW/PFVC" = "l_ratio",
@@ -1501,6 +1544,14 @@ if (sz_ok) {
   })) %>% mutate(site = site_name)
   write_csv(size_form, file.path(final_dir, paste0("size_functional_form_", site_name, ".csv")))
 
+  cat("\n--- 4k(A) saturated log model (per log unit): spline age primary ---\n")
+  print(as.data.frame(size_saturated %>% filter(row_type == "coefficient") %>%
+          transmute(outcome, age_form, term_label, est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
+  cat("--- constraint tests (exp(sum) with CI; Wald p; LRT p) ---\n")
+  print(as.data.frame(size_saturated %>% filter(row_type == "constraint") %>%
+          transmute(outcome, age_form, term_label,
+                    exp_sum = ifelse(is.na(estimate), NA, sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high)),
+                    wald_p = signif(p_value, 2), lrt_p = signif(lrt_p, 2))), row.names = FALSE)
   cat("--- 4k(C) functional form of the size term (delta AIC vs linear PFVC; negative = better) ---\n")
   print(as.data.frame(size_form %>% transmute(outcome, age_form, size_term, dAIC = round(delta_AIC_vs_linear_pfvc, 1))),
         row.names = FALSE)
