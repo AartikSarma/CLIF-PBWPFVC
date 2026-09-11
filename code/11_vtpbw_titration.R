@@ -150,8 +150,9 @@ cat(sprintf("    winsorized %d/%d ITEs to +-%.1f, recentered CATE to TMLE ATE %.
             n_wins, length(ite), WINSOR, 100 * ate$estimate))
 
 # --- CATE by each modifier: spline of ITE on log(modifier); slope + p90-p10 gradient -----------
-# discordance: signal expected as an UP-slope in benefit (more benefit where PBW oversizes).
-# pfvc:        signal expected as a DOWN-slope (more benefit at smaller absolute lung).
+# The CATE is a risk difference (shift - natural), so MORE NEGATIVE = MORE BENEFIT:
+# discordance: signal expected as a DOWN-slope (more benefit where PBW oversizes the lung).
+# pfvc:        signal expected as an UP-slope (more benefit at smaller absolute lung).
 cate_one <- function(mod, lab) {
   dd  <- tibble(lx = log(wide[[mod]]), ite = itew) %>% filter(is.finite(lx))
   kn  <- attr(ns(dd$lx, 3), "knots"); bd <- attr(ns(dd$lx, 3), "Boundary.knots")  # FIX basis
@@ -206,7 +207,7 @@ fig <- mk_panel(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC sa
   patchwork::plot_annotation(
     title = paste0("CATE of an ADDITIVE VT/PBW titration (-", DELTA, " mL/kg), by PFVC-derived modifiers - ", site_name,
                    if (is_synthetic) " (SYNTHETIC)" else ""),
-    subtitle = "Dashed = ATE. Up-slope (left) = a fixed bedside VT/PBW cut helps most where PBW over-doses the lung (normalizer-dependent).")
+    subtitle = "Dashed = ATE; negative = benefit. Down-slope (left) = a fixed bedside VT/PBW cut helps most where PBW over-doses the lung (normalizer-dependent).")
 ggsave(file.path(final_dir, paste0("vtpbw_titration_cate_", site_name, ".pdf")), fig, width = 12, height = 5)
 
 cat("\n=== 11_vtpbw continuous CATE of an ADDITIVE VT/PBW titration, by PFVC-derived modifiers ===\n")

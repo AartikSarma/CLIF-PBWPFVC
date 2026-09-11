@@ -82,6 +82,21 @@ pbw_pfvc_data <- cohort_demographics %>%
       gender    = sex_numeric,
       ethnicity = race_numeric,
       param     = "FVC"
+    ),
+    # FVC_age25: GLI prediction with age pinned to 25 (peak adult), keeping the
+    # patient's actual height/sex/race -- an age-STRIPPED, structural-size surrogate.
+    # It is the "structural-only" point on the age-correction spectrum:
+    #   PBW = no age correction, FVC_age25 = GLI structure but age-flat, PFVC = full.
+    # VT/FVC_age25 vs VT/PFVC isolates whether PFVC's age slope earns its keep; the
+    # triple is read as a BRACKET, not a truth -- the strain denominator's age behaviour
+    # in the old/critically ill is unidentified (statistically, physiologically,
+    # mechanically), so the analyses sweep the correction rather than pick one. See 05c.
+    pfvc_age25 = pred_GLI(
+      age       = rep(25, n()),
+      height    = height_cm / 100,
+      gender    = sex_numeric,
+      ethnicity = race_numeric,
+      param     = "FVC"
     )
   ) %>%
   filter(!is.na(pbw), !is.na(pfvc), pfvc > 0) %>%
@@ -374,18 +389,21 @@ analysis_data <- imv_timepoints %>%
   inner_join(
     pbw_pfvc_data %>% select(hospitalization_id, age_at_admission,
                               sex_category, race_category, sex_numeric,
-                              race_numeric, height_cm, pbw, pfvc, deceased),
+                              race_numeric, height_cm, pbw, pfvc, pfvc_age25, deceased),
     by = "hospitalization_id"
   ) %>%
   mutate(
     pbwpfvc = pbw / pfvc,
+    pbwpfvc_age25 = pbw / pfvc_age25,          # discordance vs the structural (age-flat) size
     vtpbw = tidal_volume_set / pbw,
     vtpfvc = tidal_volume_set / pfvc * 0.1,
+    vtpfvc_age25 = tidal_volume_set / pfvc_age25 * 0.1,   # structural-only normalizer (age stripped)
     # QC AT SOURCE: plateau <= PEEP is non-physiologic (a ventilated patient
     # receiving a tidal volume cannot have zero/negative driving pressure) and
     # reflects a charting/measurement error -> driving pressure is undefined (NA).
-    # Doing this here means every downstream script gets clean dp (and dp-derived
-    # dp_pbw/dp_pfvc), instead of each having to remember to filter dp > 0.
+    # Doing this here means every downstream script gets clean dp (and everything
+    # derived from it: crs, ers, mechanical power), instead of each having to remember
+    # to filter dp > 0.
     dp = if_else(
       !is.na(plateau_pressure_obs) & !is.na(peep_set) & plateau_pressure_obs > peep_set,
       plateau_pressure_obs - peep_set,
@@ -398,6 +416,7 @@ analysis_data <- imv_timepoints %>%
     ers = if_else(!is.na(crs) & crs > 0, 1000 / crs, NA_real_),
     ers_pbw = ers * pbw,
     ers_pfvc = ers * pfvc,
+    ers_pfvc_age25 = ers * pfvc_age25,         # specific-elastance bracket: structural-size scaling
     # --- Mechanical power (J/min), simplified equation -------------------------
     # The simplified power equation differs by inspiratory flow pattern, which is
     # set by the ventilator mode:
@@ -428,11 +447,35 @@ analysis_data <- imv_timepoints %>%
         0.098 * resp_rate_set * (tidal_volume_set / 1000) * peak_inspiratory_pressure_obs,
       TRUE ~ NA_real_
     ),
-    # Mechanical power normalized to predicted body weight (J/min/kg) vs predicted
-    # FVC (J/min/L) -- the PBW-vs-PFVC scaling comparison used by the exploratory
-    # mechanical-power script.
+    # --- Normalizations of mechanical power ---------------------------------------
+    # Unnormalized power is meaningless across lung sizes: the same J/min would shred
+    # a small lung and under-ventilate a large one. Elastic power per breath is
+    # 1/2 * VT^2 * Ers; writing VT = strain * V0 and Ers = E_spec / V0 (V0 = resting
+    # lung volume, E_spec = specific elastance) gives
+    #     power / V0 = RR * 1/2 * strain^2 * E_spec,
+    # which depends only on strain, tissue property and rate. Dividing power by a
+    # PREDICTED lung volume is therefore size-invariant by construction, and PFVC is
+    # the available proxy for V0. MP/PBW = MP/PFVC x (PFVC/PBW): it carries the PBW/PFVC
+    # discordance and under-reads power in exactly the patients PBW over-sizes.
+    #   mp_pfvc  primary size normalization (J/min per L predicted FVC)
+    #   mp_pbw   the conventional (Gattinoni) normalization, the biased comparator
+    #   mp_crs   power per unit MEASURED compliance = MP x Ers (cmH2O/mL): energy per
+    #            aerated lung, the functional-lung comparator; ~ DP^2, the most
+    #            recoil-laden of the three (scripts 08/09 use it as such)
     mp_pbw  = mechanical_power / pbw,
-    mp_pfvc = mechanical_power / pfvc
+    mp_pfvc = mechanical_power / pfvc,
+    mp_pfvc_age25 = mechanical_power / pfvc_age25,
+    mp_crs  = mechanical_power * ers / 1000,
+    # Elastic TIDAL component of power (J/min): the triangle 1/2 * VT * dP per breath,
+    # the energy stored in the lung by the tidal breath, independent of flow pattern
+    # (the mode split above concerns only the resistive/PEEP components of the total).
+    # This is the "specific elastic power" of the TTE plan when divided by PFVC; kept
+    # as a sensitivity to the total peak-pressure power. Defined wherever dP is.
+    mp_elastic      = if_else(!is.na(dp) & dp > 0 & !is.na(resp_rate_set) & !is.na(tidal_volume_set),
+                              0.098 * resp_rate_set * (tidal_volume_set / 1000) * 0.5 * dp,
+                              NA_real_),
+    mp_elastic_pbw  = mp_elastic / pbw,
+    mp_elastic_pfvc = mp_elastic / pfvc
   )
 
 message("Analysis timepoints: ", nrow(analysis_data), " rows, ",

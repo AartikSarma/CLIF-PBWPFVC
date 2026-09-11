@@ -120,12 +120,11 @@ cells <- analytic %>% group_by(age_grp, sex_grp, race_grp, height_grp) %>%
   summarise(vt_p05 = quantile(vtpfvc, 0.05), vt_p95 = quantile(vtpfvc, 0.95), .groups = "drop")
 analytic <- analytic %>% left_join(cells, by = c("age_grp", "sex_grp", "race_grp", "height_grp"))
 
-# MP/Crs = specific power referenced to MEASURED (not predicted) lung size. From
-# script 03, ers = 1000/crs, so MP/Crs = MP * ers / 1000. Positivity-safe (Crs has
-# non-demographic variation, unlike PFVC) and ~ DP-like (MP/Crs ~ DP^2), so it may
-# rescue the paradoxical raw-MP instrument. Caveat: more compliance-laden than DP,
-# so the mediator/collider concern is correspondingly stronger.
-analytic <- analytic %>% mutate(mp_crs = mechanical_power * ers / 1000)
+# MP/Crs (from script 03: MP * ers / 1000) = power referenced to MEASURED (not
+# predicted) lung size. Positivity-safe (Crs has non-demographic variation, unlike
+# PFVC) and ~ DP-like (MP/Crs ~ DP^2), so it may rescue the paradoxical raw-MP
+# instrument. Caveat: more compliance-laden than DP, so the mediator/collider
+# concern is correspondingly stronger.
 
 vtpbw_rng <- range(analytic$vtpbw)
 message("Analytic n = ", nrow(analytic), " | VT/PBW range ", round(vtpbw_rng[1], 2), "-",

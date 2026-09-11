@@ -204,7 +204,7 @@ walk(unique(stratum_slopes$subgroup), ~ message("  ", .x, ": p = ",
 # and should be more age-invariant. PREDICTION: the per-SD age-slope difference
 # (old - young) shrinks along VT/PFVC -> DP -> MP/Crs. A residual interaction in
 # MP/Crs would be susceptibility/baseline-risk, NOT recoil.
-recoil_dat <- analytic %>% mutate(mp_crs = mechanical_power * ers / 1000)
+recoil_dat <- analytic          # mp_crs (MP x Ers, power per unit measured compliance) comes from script 03
 ladder  <- tribble(~var, ~label, "vtpfvc", "VT/PFVC", "dp", "DP", "mp_crs", "MP/Crs")
 sev_age <- "sofa_total + sf_ratio + bmi"
 

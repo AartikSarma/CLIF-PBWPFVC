@@ -8,8 +8,9 @@
 # under the PBW-anchored yardstick clinicians actually dose on. Two PFVC-derived modifiers:
 #   1. PBW/PFVC discordance -- higher = PBW oversizes the lung (PFVC says it is smaller);
 #   2. PFVC (absolute predicted size, L) -- lower = smaller lung regardless of the PBW gap.
-# Up-sloping CATE in discordance and/or down-sloping in PFVC => power-reduction helps most in
-# exactly the patients PBW over-sizes -- the MP analogue of the 11.X discordance gradient.
+# CATE is a mortality risk difference (shift - natural), so MORE NEGATIVE = more benefit. A
+# DOWN-sloping CATE in discordance and/or an UP-sloping CATE in PFVC => power-reduction helps
+# most in exactly the patients PBW over-sizes -- the MP analogue of the 11.X discordance gradient.
 #
 # WHY ADDITIVE (the normalizer-DEPENDENT choice, deliberately): a *multiplicative* "MP/PBW x
 # (1-delta)" is normalizer-INVARIANT -- identical to "MP x (1-delta)" and to "MP/PFVC x
@@ -19,7 +20,7 @@
 # lung terms DELTA x (PBW/PFVC) = DELTA x discordance. So a fixed PBW-anchored decrement cuts
 # the MISDOSED hardest per unit of actual lung -- the policy is normalizer-DEPENDENT on the
 # discordance axis exactly as the 11.X VT/PFVC ceiling is, and the resulting discordance
-# up-slope is the genuine MP parallel (NOT a relabelling artifact). DELTA is in (J/min)/kg PBW;
+# down-slope (more benefit at higher discordance) is the genuine MP parallel (NOT a relabelling artifact). DELTA is in (J/min)/kg PBW;
 # default 0.05 ~ a 3 J/min absolute cut at PBW 60 kg. Feasible MTP: never reduced below FLOOR.
 #
 # Design = the validated 12.D/F estimator: doubly-robust binomial LMTP (lmtp, mtp=TRUE), shift
@@ -161,8 +162,8 @@ cat(sprintf("    winsorized %d/%d ITEs to +-%.1f, recentered CATE to TMLE ATE %.
             n_wins, length(ite), WINSOR, 100 * ate$estimate))
 
 # --- CATE by each modifier: spline of ITE on log(modifier); slope on a linear fit -------
-# discordance: signal expected as an UP-slope (more benefit where PBW oversizes).
-# pfvc:        signal expected as a DOWN-slope (more benefit at smaller absolute lung).
+# discordance: signal expected as a DOWN-slope (RD more negative where PBW oversizes).
+# pfvc:        signal expected as an UP-slope (RD more negative at smaller absolute lung).
 cate_one <- function(mod, lab) {
   dd  <- tibble(lx = log(wide[[mod]]), ite = itew) %>% filter(is.finite(lx))
   kn  <- attr(ns(dd$lx, 3), "knots"); bd <- attr(ns(dd$lx, 3), "Boundary.knots")  # FIX basis
@@ -220,7 +221,7 @@ fig <- mk_panel(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC sa
   patchwork::plot_annotation(
     title = paste0("CATE of an ADDITIVE MP/PBW power-reduction MTP, by PFVC-derived modifiers - ", site_name,
                    if (is_synthetic) " (SYNTHETIC)" else ""),
-    subtitle = "Dashed = ATE. Up-slope (left) or down-slope (right) = a fixed PBW-anchored power cut helps most where PFVC, not PBW, flags risk (normalizer-dependent).")
+    subtitle = "Dashed = ATE; negative = benefit. Down-slope (left) or up-slope (right) = a fixed PBW-anchored power cut helps most where PFVC, not PBW, flags risk (normalizer-dependent).")
 ggsave(file.path(final_dir, paste0("mppbw_additive_cate_", site_name, ".pdf")), fig, width = 12, height = 5)
 
 cat("\n=== 11.Y continuous CATE of an ADDITIVE MP/PBW reduction, by PFVC-derived modifiers ===\n")

@@ -409,13 +409,19 @@ ess_frac <- function(w) { w <- trunc_w(w); (sum(w)^2 / sum(w^2)) / length(w) }
 arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
                       pnl = panel, conf = NULL, conf_in_model = TRUE,
                       keep_pday = FALSE, num_spec = "time_only",
-                      trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf") {
+                      trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf",
+                      expo = "vtpfvc") {
   # sf_term: the lagged-oxygenation term in the deviation DENOMINATOR model. Default "l_sf"
   # (linear) = the primary. 11_sensitivities.R passes a richer spec (ns(l_sf,3)+l_sf:disc_grp)
   # to address the residual stratum-varying l_sf imbalance the 11.X TV-balance found. Additive:
   # default reproduces the primary den_rhs exactly.
+  # expo: the daily exposure column the ceiling is defined on. Default "vtpfvc" (the primary
+  # VT/PFVC strain ceiling). 11.M passes a mechanical-power column ("mp_pfvc" / "mp_pbw") so
+  # the same clone-censor-weight machinery emulates a power-ceiling trial; its lag enters the
+  # deviation model as l_expo in place of the lagged strain.
+  if (!expo %in% names(pnl)) stop("arm_build: exposure column '", expo, "' not in the panel")
   p <- pnl %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
-    mutate(above = vent_day > grace & vtpfvc > ceiling, lead_vt = lead(vtpfvc),
+    mutate(above = vent_day > grace & .data[[expo]] > ceiling, lead_vt = lead(.data[[expo]]),
            # deviation rule. "simple": any post-grace exceedance. "corrected":
            # exceedance not brought back under by next assessment ([T4]).
            # "deescalate": the de-escalation MTP ([T10]) -- above-ceiling day where
@@ -424,15 +430,15 @@ arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
            viol = if (rule == "corrected") {
                     above & (is.na(lead_vt) | lead_vt > ceiling)
                   } else if (rule == "deescalate") {
-                    above & !is.na(lead_vt) & lead_vt > vtpfvc * (1 - deesc_frac)
+                    above & !is.na(lead_vt) & lead_vt > .data[[expo]] * (1 - deesc_frac)
                   } else above,
            prior_dev = lag(cumsum(viol), default = 0) > 0,
-           l_vtpfvc = lag(vtpfvc), l_fio2 = lag(fio2), l_peep = lag(peep),
+           l_expo = lag(.data[[expo]]), l_fio2 = lag(fio2), l_peep = lag(peep),
            l_rr = lag(rr), l_sf = lag(sf), l_map = lag(map), l_pressor = lag(on_pressor)) %>%
     ungroup()
   if (!is.null(conf)) p <- p %>% group_by(hospitalization_id) %>% arrange(vent_day) %>%
     mutate(l_conf = lag(.data[[conf]])) %>% ungroup()
-  fr <- p %>% filter(!prior_dev, vent_day > grace, !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_map))
+  fr <- p %>% filter(!prior_dev, vent_day > grace, !is.na(l_expo), !is.na(l_sf), !is.na(l_map))
   if (!is.null(conf)) fr <- fr %>% filter(!is.na(l_conf))
   # Stabilizing numerator. PRIMARY is "time_only": V (age/sex/race/SOFA) is in the
   # DENOMINATOR only, so the weights balance V and the marginal outcome MSM (no V) is
@@ -444,12 +450,12 @@ arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
   num_rhs <- if (identical(num_spec, "time_only")) "ns(vent_day, 3)" else
     "ns(vent_day, 3) + age10 + sex_category + race_category + sofa_total"
   num <- glm(as.formula(paste("viol ~", num_rhs)), data = fr, family = binomial)
-  den_rhs <- paste("ns(vent_day, 3) + l_vtpfvc + l_fio2 + l_peep + l_rr +", sf_term, "+ l_map +",
+  den_rhs <- paste("ns(vent_day, 3) + l_expo + l_fio2 + l_peep + l_rr +", sf_term, "+ l_map +",
                    "l_pressor + age10 + sex_category + race_category + sofa_total",
                    if (!is.null(conf) && conf_in_model) "+ l_conf" else "")
   den <- glm(as.formula(paste("viol ~", den_rhs)), data = fr, family = binomial)
   p <- p %>% mutate(
-    elig  = !prior_dev & vent_day > grace & !is.na(l_vtpfvc) & !is.na(l_sf) & !is.na(l_map) &
+    elig  = !prior_dev & vent_day > grace & !is.na(l_expo) & !is.na(l_sf) & !is.na(l_map) &
             (if (!is.null(conf)) !is.na(l_conf) else TRUE),
     p_num = predict(num, newdata = ., type = "response"),
     p_den = predict(den, newdata = ., type = "response"),
@@ -503,9 +509,17 @@ make_long <- function(b, arm_lab) {
 build_design <- function(c_low, c_high, grace = GRACE, cap = DAYW_CAP, rule = "simple",
                          pnl = panel, conf = NULL, conf_in_model = TRUE,
                          keep_pday = FALSE, num_spec = "time_only",
-                         trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf") {
-  bl <- arm_build(c_low, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term)
-  bh <- arm_build(c_high, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term)
+                         trim = TRIM_ALPHA, deesc_frac = DEESC_FRAC, sf_term = "l_sf",
+                         expo = "vtpfvc") {
+  # expo: length 1 (both arms on one exposure column, different ceilings -- the primary) or
+  # length 2 (c(low-arm column, high-arm column) -- a head-to-head of ceilings defined on two
+  # different normalizations of the same quantity, as in 11.M's MP/PFVC vs MP/PBW).
+  # sf_term likewise length 1 (shared) or 2 (per arm): 11.M gives each arm the SAME lagged-history
+  # covariate set minus the arm's own lagged exposure (which arm_build adds as l_expo), so the two
+  # arms' deviation models span one column space and differ only through the deviation indicator.
+  expo <- rep_len(expo, 2); sf_term <- rep_len(sf_term, 2)
+  bl <- arm_build(c_low, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term[1], expo = expo[1])
+  bh <- arm_build(c_high, grace, cap, rule, pnl, conf, conf_in_model, keep_pday, num_spec, trim, deesc_frac, sf_term[2], expo = expo[2])
   long <- bind_rows(make_long(bl, "strain_limiting"), make_long(bh, "permissive")) %>%
     mutate(arm = factor(arm, levels = c("permissive", "strain_limiting")))
   lib <- bind_rows(bl$idsum %>% mutate(arm = "strain_limiting"),

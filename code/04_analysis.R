@@ -137,7 +137,8 @@ covar_labels <- list(age10 ~ "Age (per 10 yr)", sf10 ~ "SF ratio (per 10)")
 # Ers x PBW / Ers x PFVC) is additionally adjusted for BMI. Models without a
 # driving-pressure component use the standard covariate set.
 DP_DERIVED <- c("dp", "ers", "crs", "ers_pbw", "ers_pfvc",
-                "mechanical_power", "mp_pbw", "mp_pfvc")
+                "mechanical_power", "mp_pbw", "mp_pfvc", "mp_crs",
+                "mp_elastic", "mp_elastic_pbw", "mp_elastic_pfvc")
 uses_dp <- function(...) {
   vars <- trimws(unlist(strsplit(paste(c(...), collapse = " + "), "\\+")))
   any(vars %in% DP_DERIVED)
@@ -207,7 +208,10 @@ continuous_outcomes <- list(
   ers_pfvc = list(var = "ers_pfvc",         label = "Ers x PFVC"),
   mp       = list(var = "mechanical_power", label = "Mechanical power"),
   mp_pbw   = list(var = "mp_pbw",           label = "MP / PBW"),
-  mp_pfvc  = list(var = "mp_pfvc",          label = "MP / PFVC")
+  mp_pfvc  = list(var = "mp_pfvc",          label = "MP / PFVC"),
+  mp_crs   = list(var = "mp_crs",           label = "MP / Crs"),
+  # elastic tidal power per PFVC: the "specific elastic power" sensitivity to total MP
+  mp_el_pfvc = list(var = "mp_elastic_pfvc", label = "Elastic MP / PFVC")
 )
 
 continuous_models <- list()
@@ -299,7 +303,7 @@ if (!is.null(mortality_models)) {
 # variable with the size-containing exposures, so their evidence ratios are inflated
 # by the shared denominator rather than a dosing-outcome relationship. Their
 # standalone regression tables and long-format results are still produced.
-AIC_EXCLUDE <- c("ers_pbw", "ers_pfvc", "mp_pbw", "mp_pfvc")
+AIC_EXCLUDE <- c("ers_pbw", "ers_pfvc", "mp_pbw", "mp_pfvc", "mp_el_pfvc")
 for (outcome_name in setdiff(names(continuous_outcomes), AIC_EXCLUDE)) {
   aic_results[[continuous_outcomes[[outcome_name]]$label]] <- tibble(
     exposure = exposure_labels,
@@ -482,13 +486,16 @@ demo_covars_bmi <- paste(demo_covars, "+ bmi")
 # Each entry: fitted model + metadata for the unified long table.
 demo_models <- list()
 
-# z-scored linear outcomes. The elastance-normalized outcomes (Ers x PBW / PFVC)
-# are driving-pressure derivatives, so they are adjusted for BMI (matching the
-# original paper); VT/PBW and VT/PFVC are not.
+# z-scored linear outcomes. The elastance- and power-normalized outcomes are
+# driving-pressure derivatives, so they are adjusted for BMI (matching the
+# original paper); VT/PBW and VT/PFVC are not. MP/PBW vs MP/PFVC is the
+# mechanical-power parallel of the Ers x PBW vs Ers x PFVC pair: the sign of the
+# demographic term should flip with the denominator in the same way.
 demo_z_outcomes <- c(vtpbw = "VT/PBW", vtpfvc = "VT/PFVC (%)",
-                     ers_pbw = "Ers x PBW", ers_pfvc = "Ers x PFVC")
+                     ers_pbw = "Ers x PBW", ers_pfvc = "Ers x PFVC",
+                     mp_pbw = "MP / PBW", mp_pfvc = "MP / PFVC", mp_crs = "MP / Crs")
 for (v in names(demo_z_outcomes)) {
-  cov_v <- if (v %in% c("ers_pbw", "ers_pfvc")) demo_covars_bmi else demo_covars
+  cov_v <- if (uses_dp(v)) demo_covars_bmi else demo_covars
   fstr <- paste0("scale(", v, ") ~ ", cov_v)
   demo_models[[demo_z_outcomes[[v]]]] <- list(
     model = lm(as.formula(fstr), data = demo_data),

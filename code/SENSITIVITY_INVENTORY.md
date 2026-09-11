@@ -10,6 +10,22 @@ shipped to the federated sites):
 - `11.Y_mppbw_additive_hte.R` — additive (normalizer-dependent) MP/PBW power-reduction, DR-LMTP
   CATE by discordance + PFVC; the mechanical-power sibling to `11.X` (triangulation by exposure
   + estimator). Saves `mppbw_additive_{cate,slope}_*`.
+- `11.M_ceiling_tte.R` — the normalizer head-to-head TTE, now the PRIMARY design and part of
+  `11_run_all` on the tidal-volume family (`PBWPFVC_TTE_EXPO_FAMILY=vt`); the mechanical-power
+  family (`=mp`, the reframe of `11.Y`) stays a lead-site supplement. Head-to-head clone-censor-weight
+  TTE of a PFVC-anchored (X/PFVC ≤ τ) vs a PBW-anchored (X/PBW ≤ τ) ceiling, bite-matched (each binds
+  the same share of post-grace days; `PBWPFVC_CEIL_BITE`, default 0.25), so positivity is symmetric by
+  construction. RD = PFVC arm − PBW arm (negative favours PFVC), discordance HTE (tertiles +
+  continuous CATE, SOFA-adjusted, as `11.X` read A), per-tertile positivity (read B) and the per-lung
+  correction each ceiling delivers (read C). Second design, **cap-on-top** (`tte_<fam>_cap_*`): usual
+  PBW ceiling + a PFVC safety cap anchored to coincide with the PBW ceiling at the Concordant tertile's
+  median discordance, vs the PBW ceiling alone — Concordant tertile is a negative control, all contrast
+  accumulates in the discordant tail; positivity is NOT symmetric there, so it is the secondary,
+  clinical-translation design. Pieces: `11_ceiling_common.R` (guarded shared build + thresholds),
+  `11_ceiling_headtohead.R`, `11_ceiling_cap.R`, `11_ceiling_diagnostics.R` (weight-REFIT bootstrap
+  for every design — written as `tte_<fam>_<design>_overall_refit_*`, the PRIMARY interval — plus the
+  placebo no-differing-day contrast, `tte_<fam>_diag_*`). `PBWPFVC_CEIL_PIECES` selects pieces,
+  `PBWPFVC_CEIL_REFIT_BOOT` the refit rep count.
 - `11.Z_within_demographic_hte.R` — does the `11.X` discordance slope survive demographics?
   Residualized (height-driven) slope vs raw + within-stratum slopes. **Result: discordance is ~99%
   demographics (R²≈0.987), residualized slope null at both sites** → repositioned from "linchpin" to

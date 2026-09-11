@@ -773,4 +773,108 @@ best_norm <- disc_tbl %>% group_by(family) %>% slice_max(c_corrected, n = 1) %>%
 message("  best-discriminating normalization per family: ",
         paste(sprintf("%s=%s", best_norm$family, best_norm$norm), collapse = "; "))
 
+# =============================================================================
+# PART 2e -- Does a PFVC-normalized metric add prognostic value OVER driving pressure?
+# =============================================================================
+# Driving pressure (Amato) is the bedside-validated injury metric, and it is ALREADY partly
+# size-aware (dP = VT / compliance, and compliance scales with lung size -- so a small lung
+# shows a high dP at a "normal" VT/PBW). The clinical skeptic's question is therefore the
+# pressure analogue of "is PFVC just age": is PFVC just driving pressure? For each PFVC-
+# normalized metric we fit dP alone vs dP + the metric (both keep the standard covariates,
+# incl. VT/PBW dose), and report the discrimination gain, the metric's mortality OR per SD
+# NET of dP, and the nested LRT -- with and without demographic adjustment.
+#   metric adds over dP  => size-relative strain/power captures injury dP misses.
+#   metric adds nothing  => dP already captures it; PFVC's edge is then PRACTICAL -- it is
+#                           computable from routine settings + height when no plateau exists
+#                           (dP needs a measured plateau: intermittent, sedation-dependent, MNAR).
+# NB: normalized ELASTANCE is deliberately NOT tested incrementally over dP -- dP IS
+# mechanically VT x Ers, so the two carry the same information and the test is collinear
+# by construction (its PFVC-vs-PBW question is answered in the PART 2 head-to-head instead).
+# Raw MP and MP/PBW included alongside MP/PFVC: under the identifiability argument the
+# incremental-over-dP signal is the POWER itself (demographic-independent: rate, PEEP,
+# pressures), so adjusted, raw/PBW/PFVC should add over dP by ~the same -- the normalizer
+# (a demographic function) is absorbed by adjustment, just like in the multiplicative shift.
+# The unadjusted MP/PFVC vs MP/PBW gap, if any, is the discordance (demographic) encoding.
+incr_specs <- tribble(
+  ~metric_label, ~metric_var,        ~data_name,
+  "VT/PFVC",     "vtpfvc",           "base",
+  "MP (raw)",    "mechanical_power", "mp_data",
+  "MP/PBW",      "mp_pbw",           "mp_data",
+  "MP/PFVC",     "mp_pfvc",          "mp_data")
+data_map_incr <- list(base = base, mp_data = mp_data, ers_data = ers_data)
+incr_fn <- function(metric_label, metric_var, data_name, adjusted) {
+  d <- data_map_incr[[data_name]] %>%
+    filter(is.finite(dp), dp > 0, is.finite(.data[[metric_var]]), .data[[metric_var]] > 0)
+  cov <- if (adjusted) paste(base_cov, "+", demo_cov) else base_cov
+  mx  <- paste0("log(", metric_var, ")")
+  m0  <- glm(as.formula(paste("deceased ~ log(dp) +", cov)), data = d, family = binomial)
+  m1  <- glm(as.formula(paste("deceased ~ log(dp) +", mx, "+", cov)), data = d, family = binomial)
+  co  <- summary(m1)$coefficients
+  trm <- rownames(co)[grepl(metric_var, rownames(co), fixed = TRUE)][1]
+  sdl <- sd(log(d[[metric_var]]), na.rm = TRUE)
+  est <- co[trm, "Estimate"]; se <- co[trm, "Std. Error"]
+  tibble(site = site_name, metric = metric_label,
+         adjusted = if (adjusted) "adjusted" else "unadjusted",
+         c_dp_alone = auc_fn(d$deceased, fitted(m0)),
+         c_dp_plus_metric = auc_fn(d$deceased, fitted(m1)),
+         c_gain = auc_fn(d$deceased, fitted(m1)) - auc_fn(d$deceased, fitted(m0)),
+         metric_or_per_sd = exp(est * sdl),
+         or_lo = exp((est - z975 * se) * sdl), or_hi = exp((est + z975 * se) * sdl),
+         lrt_p = anova(m0, m1, test = "LRT")$`Pr(>Chi)`[2], n = nrow(d))
+}
+incr_tbl <- pmap_dfr(crossing(incr_specs, adjusted = c(FALSE, TRUE)),
+  function(metric_label, metric_var, data_name, adjusted)
+    incr_fn(metric_label, metric_var, data_name, adjusted))
+write_csv(incr_tbl, file.path(final_dir, paste0("norm_dp_incremental_", site_name, ".csv")))
+message("\nPART 2e -- incremental value of a PFVC metric OVER driving pressure (C + OR/SD net of dP):")
+incr_tbl %>% arrange(metric, adjusted) %>%
+  pwalk(function(metric, adjusted, c_dp_alone, c_gain, metric_or_per_sd, lrt_p, ...)
+    message(sprintf("  [%-10s | %-10s] C(dP)=%.3f  +metric => +%.3f  OR/SD=%.2f  LRT p=%s",
+                    metric, adjusted, c_dp_alone, c_gain, metric_or_per_sd, signif(lrt_p, 2))))
+
+# =============================================================================
+# PART 2f -- Partial-adjustment ladder + E-values: identifiability vs attenuation
+# =============================================================================
+# PFVC is a deterministic function of (height, age, sex, race), so adjusting for all of its
+# demographic parents removes its variation and its independent effect becomes UNIDENTIFIABLE
+# -- which is NOT the same as null. This walks the adjustment up one parent at a time (age,
+# +sex, +race) and reads the SIGNATURE:
+#   ATTENUATION   -- OR drifts to 1 with a TIGHT CI  => the effect was demographic confounding.
+#   DESTABILIZATION-- OR stays away from 1 but the SE/CI EXPLODE (se_inflation rises) => the
+#                     effect is UNIDENTIFIABLE (collinearity removed the variation), not absent.
+# IMPORTANT: destabilization signals unidentifiability, which is AGNOSTIC to whether the true
+# effect is real or null -- both a real-but-collinear effect and a null-but-collinear quantity
+# blow the SE up. PBW/PFVC (the discordance) is included as the NEGATIVE CONTROL: it is a pure
+# measurement-mismatch ratio of demographic functions with NO independent lung effect, yet it
+# should destabilize just like VT/PFVC -- proving the signature alone cannot certify "real".
+# What distinguishes VT/PFVC from PBW/PFVC is physiology + the instrument/trial, not this table.
+# VT/PFVC vs MP/PFVC/raw MP (which keep demographic-independent variation and stay identified)
+# is the contrast. NOTE: height (a parent) is only partly captured here via VT/PBW and BMI.
+eval_or <- function(or) {                          # VanderWeele E-value, common-outcome OR (~ sqrt(OR) -> RR)
+  o <- if (is.finite(or) && or >= 1) or else if (is.finite(or) && or > 0) 1 / or else return(NA_real_)
+  rr <- sqrt(o); if (!is.finite(rr) || rr < 1) return(1); rr + sqrt(rr * (rr - 1))
+}
+ladder_steps <- list(base = "", "+age" = "+ age10", "+age+sex" = "+ age10 + sex_category",
+                     "+age+sex+race" = "+ age10 + sex_category + race_category")
+ladder_fn <- function(metric_label, metric_var, data_name) {
+  d <- data_map_incr[[data_name]] %>% filter(is.finite(.data[[metric_var]]), .data[[metric_var]] > 0)
+  sdl <- sd(log(d[[metric_var]]), na.rm = TRUE); mx <- paste0("log(", metric_var, ")")
+  imap_dfr(ladder_steps, function(extra, step) {
+    m  <- glm(as.formula(paste("deceased ~", mx, "+", base_cov, extra)), data = d, family = binomial)
+    co <- summary(m)$coefficients[mx, ]; est <- co["Estimate"]; se <- co["Std. Error"]
+    or <- exp(est * sdl); lo <- exp((est - z975 * se) * sdl); hi <- exp((est + z975 * se) * sdl)
+    tibble(metric = metric_label, adjust = step, or_per_sd = or, lo = lo, hi = hi, se_log = se,
+           evalue_point = eval_or(or),
+           evalue_ci = if (lo > 1) eval_or(lo) else if (hi < 1) eval_or(hi) else 1)
+  }) %>% mutate(se_inflation = se_log / se_log[adjust == "base"])
+}
+ladder_specs <- bind_rows(incr_specs,   # + PBW/PFVC discordance as the null-physiology negative control
+  tibble(metric_label = "PBW/PFVC", metric_var = "pbwpfvc", data_name = "base"))
+ladder_tbl <- pmap_dfr(ladder_specs, ladder_fn) %>% mutate(site = site_name, .before = 1)
+write_csv(ladder_tbl, file.path(final_dir, paste0("norm_partial_adjust_evalue_", site_name, ".csv")))
+message("\nPART 2f -- partial-adjustment ladder + E-values (SE-inflation = collinearity; CI-explode w/o OR->1 = unidentifiable, not null):")
+ladder_tbl %>% pwalk(function(metric, adjust, or_per_sd, lo, hi, se_inflation, evalue_point, evalue_ci, ...)
+  message(sprintf("  [%-9s | %-13s] OR/SD=%.2f [%.2f,%.2f]  SEx%.1f  E(pt)=%.2f  E(CI)=%.2f",
+                  metric, adjust, or_per_sd, lo, hi, se_inflation, evalue_point, evalue_ci)))
+
 message("\nExploratory normalization discordance + prognostic utility analysis complete.")

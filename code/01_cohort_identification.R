@@ -23,6 +23,15 @@ message("File type: ", file_type)
 # Expand ~ in path
 tables_path <- path.expand(tables_path)
 
+# Fail loudly if the data DIRECTORY itself is unreachable (e.g. the remote drive is not
+# mounted). Without this, a missing mount can surface as a confusing per-file "Missing
+# table" error -- or, worse, a stale/empty mount passes every check and the pipeline runs
+# silently on empty data (see the disconnected-drive incident).
+if (!dir.exists(tables_path)) {
+  stop("CLIF data path does not exist: '", tables_path,
+       "'. Is the remote drive mounted? Check config$tables_path.")
+}
+
 # =============================================================================
 # Load CLIF tables
 # =============================================================================
@@ -85,6 +94,23 @@ message("Loaded: patient=", nrow(clif_patient), " hosp=", nrow(clif_hospitalizat
         " adt=", nrow(clif_adt), " resp=", nrow(clif_respiratory_support))
 message("Loaded (category-filtered): vitals=", nrow(clif_vitals), " labs=", nrow(clif_labs),
         " meds=", nrow(clif_meds), " assessments=", nrow(clif_assessments))
+
+# Fail LOUDLY if any CORE table loaded empty. arrow::open_dataset() does NOT error on an
+# unreachable/stale parquet path -- it opens a 0-row dataset and collect() succeeds -- so
+# a disconnected drive otherwise runs the whole pipeline on empty data and silently
+# reproduces stale outputs. The core eligibility tables are non-empty for any real CLIF
+# site, so a 0-row read here is a hard error, not a site characteristic. (labs/meds/
+# assessments may be legitimately sparse, so they are reported above but not gated here.)
+.core_counts <- c(patient = nrow(clif_patient), hospitalization = nrow(clif_hospitalization),
+                  adt = nrow(clif_adt), respiratory_support = nrow(clif_respiratory_support),
+                  vitals = nrow(clif_vitals))
+if (any(.core_counts == 0L)) {
+  stop("Empty CORE CLIF table(s) after load: ",
+       paste(names(.core_counts)[.core_counts == 0L], collapse = ", "),
+       ". A 0-row read almost always means the data path '", tables_path,
+       "' is unreachable or stale (remote drive not mounted?) -- arrow opens an empty ",
+       "dataset without erroring. Verify the mount, then rerun.")
+}
 
 # =============================================================================
 # Cohort filtering
@@ -237,8 +263,14 @@ cohort_spo2 <- clif_vitals %>%
          vital_category == "spo2") %>%
   mutate(vital_value = as.numeric(vital_value)) %>%
   select(hospitalization_id, recorded_dttm, vital_value) %>%
-  rename(spo2_value = vital_value) %>% 
-  filter(spo2_value <= 97)
+  rename(spo2_value = vital_value)
+  # SpO2 is NO LONGER capped at <= 97 here. The SF-validity bounds (80-97) live where the
+  # SF ratio is actually formed -- script 03 (filter >= 80 & <= 97 for the cross-sectional
+  # index SF) and script 10 (SpO2 clamped to [80,97] for the daily worst SF). Capping here
+  # poisoned the SHARED cohort_vitals intermediate: well-oxygenated patient-days (SpO2
+  # always >= 98) lost ALL their SpO2 rows, so script 10's longitudinal panel read them as
+  # "no SpO2 charted" and dropped them. The QC outlier threshold (spo2 50-100) now governs
+  # the upper bound in cohort_vitals_clean; downstream SF filtering is unchanged.
 
 # =============================================================================
 # Extract MAP
