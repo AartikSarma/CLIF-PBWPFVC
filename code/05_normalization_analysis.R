@@ -878,3 +878,140 @@ ladder_tbl %>% pwalk(function(metric, adjust, or_per_sd, lo, hi, se_inflation, e
                   metric, adjust, or_per_sd, lo, hi, se_inflation, evalue_point, evalue_ci)))
 
 message("\nExploratory normalization discordance + prognostic utility analysis complete.")
+
+# =============================================================================
+# PART 3 -- Do the two normalizations make DIFFERENT statements about the lung,
+#           and is either of them a universal scale?
+# =============================================================================
+# PART 2 asked which normalization predicts death better and found that, once age,
+# sex and race are adjusted, they are indistinguishable. That is a question about
+# prognosis. This part asks the MEASUREMENT question the paper's second pillar is
+# built on: Ers x PBW and Ers x PFVC (and MP/PBW vs MP/PFVC) are two scales for the
+# same physiology, they differ by exactly the PBW/PFVC discordance, and a clinician
+# reading one reaches a different conclusion about the same patient than one reading
+# the other. Two reads:
+#
+#   3a. HOW MUCH they disagree, and WHERE. The two scales have different units, so
+#       they are compared on the only common footing that needs no cohort-specific
+#       rescaling of one into the other: the patient's PERCENTILE within the cohort
+#       on each scale. The disagreement is the percentile shift, it is reported
+#       against discordance and by demographic group, and the reclassification is
+#       the share of patients who cross the top-tertile "high normalized elastance"
+#       line when the normalizer is swapped. This is the consequence of the bias for
+#       measurement, independent of any outcome.
+#
+#   3b. WHICH scale is universal, if either. A normalized measurement claims that a
+#       given value means the same thing in every patient. Test it: fit mortality on
+#       the normalized measure and severity ONLY (no demographics -- adjusting for
+#       them would absorb the discordance and force the answer), then compare the
+#       observed with the predicted mortality WITHIN discordance strata. A normalizer
+#       that sizes the lung correctly is calibrated across those strata; one that
+#       mis-sizes systematically under- or over-predicts where mis-sizing is worst.
+#       Unlike the adjusted AIC/AUC comparisons in PART 2, this can separate them.
+norm_families <- tribble(
+  ~family,             ~frame,      ~pbw_var,  ~pfvc_var, ~direction,
+  "Elastance",         "ers_data",  "ers_pbw", "ers_pfvc", "higher = stiffer",
+  "Mechanical power",  "mp_data",   "mp_pbw",  "mp_pfvc",  "higher = more power")
+
+disc_cuts <- function(x) cut(x, c(-Inf, quantile(x, c(1/3, 2/3)), Inf),
+                            labels = c("Concordant", "Mid", "Discordant"))
+MIN_CELL <- 10   # small-cell suppression for every stratum reported below (CLAUDE.md)
+
+pred_disagree <- list(); pred_recl <- list(); pred_calib <- list()
+for (i in seq_len(nrow(norm_families))) {
+  fam <- norm_families$family[i]
+  d   <- get(norm_families$frame[i]) %>%
+    mutate(x_pbw = .data[[norm_families$pbw_var[i]]], x_pfvc = .data[[norm_families$pfvc_var[i]]]) %>%
+    filter(is.finite(x_pbw), x_pbw > 0, is.finite(x_pfvc), x_pfvc > 0) %>%
+    mutate(disc_grp = disc_cuts(pbwpfvc),
+           pct_pbw  = 100 * percent_rank(x_pbw),
+           pct_pfvc = 100 * percent_rank(x_pfvc),
+           shift    = pct_pfvc - pct_pbw,               # + = the PFVC scale ranks this patient higher
+           hi_pbw   = x_pbw  > quantile(x_pbw,  2/3),   # "high normalized elastance/power"
+           hi_pfvc  = x_pfvc > quantile(x_pfvc, 2/3))
+  if (nrow(d) < 200) next
+
+  # --- 3a. disagreement, overall / by discordance decile / by demographic group ----
+  summ <- function(g) summarise(g, n = n(), median_shift = median(shift),
+                                median_abs_shift = median(abs(shift)),
+                                p90_abs_shift = quantile(abs(shift), .9),
+                                frac_shift_over_20 = mean(abs(shift) > 20), .groups = "drop")
+  pred_disagree[[fam]] <- bind_rows(
+    d %>% mutate(stratum_type = "Overall", stratum = "All") %>% group_by(stratum_type, stratum) %>% summ(),
+    d %>% mutate(stratum_type = "Discordance decile",
+                 stratum = as.character(ntile(pbwpfvc, 10))) %>% group_by(stratum_type, stratum) %>% summ(),
+    d %>% mutate(stratum_type = "Sex",  stratum = as.character(sex_category)) %>% group_by(stratum_type, stratum) %>% summ(),
+    d %>% mutate(stratum_type = "Race", stratum = as.character(race_category)) %>% group_by(stratum_type, stratum) %>% summ(),
+    d %>% mutate(stratum_type = "Age group",
+                 stratum = as.character(cut(age_at_admission, c(-Inf, 50, 65, Inf),
+                                            labels = c("<50", "50-64", ">=65")))) %>%
+      group_by(stratum_type, stratum) %>% summ()) %>%
+    filter(n >= MIN_CELL) %>% mutate(family = fam, .before = 1)
+  # how strongly the shift tracks discordance (it should: the scales differ BY discordance)
+  pred_disagree[[fam]]$shift_vs_disc_r2 <- summary(lm(shift ~ log(pbwpfvc), data = d))$r.squared
+
+  # --- 3a. reclassification across the top-tertile decision line -------------------
+  pred_recl[[fam]] <- bind_rows(
+    d %>% mutate(stratum_type = "Overall", stratum = "All"),
+    d %>% mutate(stratum_type = "Discordance tertile", stratum = as.character(disc_grp)),
+    d %>% mutate(stratum_type = "Sex",  stratum = as.character(sex_category)),
+    d %>% mutate(stratum_type = "Race", stratum = as.character(race_category))) %>%
+    group_by(stratum_type, stratum) %>%
+    summarise(n = n(), frac_high_pbw = mean(hi_pbw), frac_high_pfvc = mean(hi_pfvc),
+              frac_reclassified = mean(hi_pbw != hi_pfvc),
+              frac_pfvc_only = mean(hi_pfvc & !hi_pbw), frac_pbw_only = mean(hi_pbw & !hi_pfvc),
+              .groups = "drop") %>%
+    filter(n >= MIN_CELL) %>% mutate(family = fam, .before = 1)
+
+  # --- 3b. is either scale universal? calibration across discordance strata ---------
+  # Severity-adjusted, demographics-FREE: the normalized measure is asked to carry the
+  # size information on its own, which is what "normalized" claims.
+  calib_one <- function(var, lab) {
+    f <- glm(as.formula(paste("deceased ~ log(", var, ") + vtpbw + sofa_total + sf10 + bmi")),
+             data = d, family = binomial)
+    dd <- d %>% mutate(p = predict(f, type = "response"))
+    # per stratum: observed vs expected, and the calibration intercept (logit offset
+    # needed to correct the stratum; 0 = calibrated, >0 = the model UNDER-predicts risk)
+    dd %>% group_by(disc_grp) %>%
+      group_modify(~ {
+        # a stratum with almost no events cannot be calibrated: the offset model runs
+        # off to +-20 with an infinite CI, so report the counts and leave the intercept NA
+        n_ev <- sum(.x$deceased == 1)
+        base_out <- tibble(n = nrow(.x), events = n_ev, observed = mean(.x$deceased),
+                           expected = mean(.x$p),
+                           obs_over_exp = if (mean(.x$p) > 0) mean(.x$deceased) / mean(.x$p) else NA_real_)
+        if (n_ev < MIN_CELL || n_ev == nrow(.x))
+          return(bind_cols(base_out, tibble(calib_intercept = NA_real_, ci_lo = NA_real_, ci_hi = NA_real_)))
+        off <- qlogis(pmin(pmax(.x$p, 1e-6), 1 - 1e-6))
+        m   <- glm(deceased ~ 1, offset = off, data = .x, family = binomial)
+        ci  <- suppressMessages(confint.default(m))
+        bind_cols(base_out, tibble(calib_intercept = unname(coef(m)[1]), ci_lo = ci[1, 1], ci_hi = ci[1, 2]))
+      }) %>% ungroup() %>% mutate(normalizer = lab, .before = 1)
+  }
+  pred_calib[[fam]] <- bind_rows(calib_one("x_pbw", "PBW-normalized"),
+                                 calib_one("x_pfvc", "PFVC-normalized")) %>%
+    mutate(family = fam, .before = 1)
+}
+disagree_tbl <- bind_rows(pred_disagree) %>% mutate(site = site_name)
+recl_tbl     <- bind_rows(pred_recl)     %>% mutate(site = site_name)
+calib_tbl    <- bind_rows(pred_calib)    %>% mutate(site = site_name)
+write_csv(disagree_tbl, file.path(final_dir, paste0("norm_prediction_disagreement_", site_name, ".csv")))
+write_csv(recl_tbl,     file.path(final_dir, paste0("norm_prediction_reclassification_", site_name, ".csv")))
+write_csv(calib_tbl,    file.path(final_dir, paste0("norm_prediction_calibration_", site_name, ".csv")))
+
+message("\n=== PART 3a: the two normalizations rank the same patient differently ===")
+print(as.data.frame(disagree_tbl %>% filter(stratum_type %in% c("Overall", "Discordance decile")) %>%
+        transmute(family, stratum_type, stratum, n, median_shift = round(median_shift, 1),
+                  median_abs = round(median_abs_shift, 1), pct_over_20 = round(100 * frac_shift_over_20))),
+      row.names = FALSE)
+message("=== PART 3a: who crosses the 'high' line when the normalizer is swapped ===")
+print(as.data.frame(recl_tbl %>% transmute(family, stratum_type, stratum, n,
+        pct_reclassified = round(100 * frac_reclassified), pct_pfvc_only = round(100 * frac_pfvc_only),
+        pct_pbw_only = round(100 * frac_pbw_only))), row.names = FALSE)
+message("=== PART 3b: is either scale universal? observed/expected within discordance strata ===")
+message("    (severity-adjusted, NO demographics; O/E far from 1 = that normalizer mis-sizes there)")
+print(as.data.frame(calib_tbl %>% transmute(family, normalizer, disc_grp, n, events,
+        obs = round(100 * observed, 1), exp = round(100 * expected, 1),
+        o_over_e = round(obs_over_exp, 3),
+        calib_intercept = ifelse(is.na(calib_intercept), "(too few events)",
+                                 sprintf("%+.2f [%.2f, %.2f]", calib_intercept, ci_lo, ci_hi)))), row.names = FALSE)

@@ -27,6 +27,11 @@ AGE_BIN_EDGES     <- c(18, 30, 40, 50, 60, 70, 80, Inf)
 HEIGHT_BIN_EDGES  <- c(150, 155, 160, 165, 170, 175, 180, 185, 190, 210)
 DIST_MIN_CELL     <- 10   # group-level small-cell suppression (CLAUDE.md)
 
+# External (ARMA) constants for the DIFFERENCE parameterization of PBW vs PFVC (3d).
+# Fixed, not cohort-derived, so vt_excess_ml means the same thing at every site.
+VT_PER_KG_ARMA   <- 6    # mL/kg PBW, the low-VT arm's prescribed dose
+VT_PCT_PFVC_ARMA <- 11   # % of predicted FVC, that arm's delivered VT/PFVC (p75)
+
 # =============================================================================
 # Load cleaned intermediate data
 # =============================================================================
@@ -395,6 +400,22 @@ analysis_data <- imv_timepoints %>%
   mutate(
     pbwpfvc = pbw / pfvc,
     pbwpfvc_age25 = pbw / pfvc_age25,          # discordance vs the structural (age-flat) size
+    # --- the same disagreement as a DIFFERENCE, not a ratio ---------------------
+    # PBW is kg and PFVC is litres, so they cannot be subtracted directly, and scaling
+    # one to the other WITHIN a cohort would make the exposure depend on the cohort.
+    # Both constants below are EXTERNAL (ARMA), so the difference is comparable across
+    # sites and interpretable at the bedside:
+    #   VT_PER_KG_ARMA  6 mL/kg PBW  -- the protective dose the trial prescribed
+    #   VT_PCT_PFVC_ARMA 11% of PFVC -- the VT/PFVC that same arm actually delivered (p75)
+    # vt_excess_ml = the millilitres of tidal volume the PBW rule prescribes OVER the
+    # PFVC rule at the protective dose. Positive = PBW over-doses this patient. It is the
+    # ratio's difference-scale twin, but weighted differently: the ratio treats a 10%
+    # mis-sizing the same in a 40 kg and a 90 kg patient, the difference does not, and
+    # the difference is the quantity a clinician can act on (mL on the ventilator).
+    # pfvc_deficit_l is the same thing in litres of predicted lung (exactly proportional,
+    # ΔVT = -110 x deficit), kept because the units are the paper's size units.
+    vt_excess_ml   = VT_PER_KG_ARMA * pbw - (VT_PCT_PFVC_ARMA / 100) * pfvc * 1000,
+    pfvc_deficit_l = pfvc - (VT_PER_KG_ARMA / (VT_PCT_PFVC_ARMA * 10)) * pbw,
     vtpbw = tidal_volume_set / pbw,
     vtpfvc = tidal_volume_set / pfvc * 0.1,
     vtpfvc_age25 = tidal_volume_set / pfvc_age25 * 0.1,   # structural-only normalizer (age stripped)
