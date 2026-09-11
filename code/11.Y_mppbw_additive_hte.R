@@ -34,8 +34,14 @@
 # height, so HTE-by-them is entangled with HTE-by-demographics -- this informs TARGETING, it
 # cannot prove "strain beyond age". By the bedside logic it need not: if power-reduction helps
 # the PFVC-flagged group more, reading PFVC is the better tool whatever the mechanism.
-# PEAK-MP/PBW exposure. Standalone supplement -- NOT in 11_run_all. Synthetic mortality is
-# simulated => plumbing only. Env: PBWPFVC_MP_{DELTA,FLOOR,HORIZON,FOLDS,LEARNERS}.
+# PEAK-MP/PBW exposure. Age enters every nuisance model as ns(age10, 4), matching the engine and
+# the VT titration. This is the POWER-axis analogue of the VT co-primary (11_vtpbw_titration): an
+# additive PBW-anchored shift whose per-lung bite scales with discordance. Read it beside the MP
+# head-to-head (tte_mp_ceiling_*), where the two normalizers' ceilings disagreed on only ~7% of
+# days versus ~20% on the VT axis, because rate and pressure are shared by both normalizers and
+# dilute the denominator difference -- so a flat CATE here is a small-contrast null, not evidence
+# against the dosing hypothesis. Standalone supplement -- NOT in 11_run_all. Synthetic mortality
+# is simulated => plumbing only. Env: PBWPFVC_MP_{DELTA,FLOOR,HORIZON,FOLDS,LEARNERS}.
 # =============================================================================
 library(here); library(lmtp); library(splines); library(patchwork)
 # lmtp reports progress via progressr, OFF by default -> enable a handler so the per-fold/timepoint
@@ -118,7 +124,12 @@ wide <- long %>%
 cat(sprintf("11.Y: %d patients; PBW/PFVC discordance median %.2f, PFVC median %.2f L; ADDITIVE delta %.3f (J/min)/kg, floor %.2f, K %d, folds %d\n",
             nrow(wide), median(wide$discord), median(wide$pfvc), DELTA, FLOOR, K, FOLDS))
 
-base_cov <- c("age10", "sex_category", "race_category", "height_grp", "sofa_total")
+# age enters the nuisance models as a natural cubic spline, matching the engine's weight
+# models and the titration: the exposures are deterministic in age through the GLI equations,
+# so a linear age term leaves a curved residual correlated with any PFVC-derived modifier.
+# lmtp takes column names, so the basis is materialized as columns.
+age_basis <- splines::ns(wide$age10, 4); for (j in 1:4) wide[[paste0("age_ns", j)]] <- age_basis[, j]
+base_cov <- c(paste0("age_ns", 1:4), "sex_category", "race_category", "height_grp", "sofa_total")
 tv <- lapply(1:K, function(t) paste0(c("sf", "map", "on_pressor", "exposed"), "_", t))
 trt <- paste0("A_", 1:K)
 # ADDITIVE (normalizer-DEPENDENT) MTP: MP/PBW -> max(MP/PBW - DELTA, FLOOR), implemented on the
@@ -147,12 +158,22 @@ message("[", format(Sys.time(), "%H:%M:%S"), "] natural done (", round(difftime(
 ate <- lmtp_contrast(fs, ref = fo, type = "additive")$estimates
 
 # DR pseudo-outcomes (uncentered = estimate + EIF); ITE = shift - natural (mean = ATE/RD)
-ite <- (fs$estimate@x + fs$estimate@eif) - (fo$estimate@x + fo$estimate@eif)
+# DR pseudo-outcomes for EACH policy (uncentered = estimate + EIF). The difference is the
+# per-patient ITE (absolute scale); keeping them separate also allows the RELATIVE scale below.
+ps_dr <- fs$estimate@x + fs$estimate@eif      # pseudo-outcome under the shifted policy
+pn_dr <- fo$estimate@x + fo$estimate@eif      # pseudo-outcome under the natural course
+ite <- ps_dr - pn_dr
 stopifnot(length(ite) == nrow(wide))
 cat(sprintf("    ATE (MP/PBW -%.3f (J/min)/kg additive, PBW-anchored): risk_natural %.1f%% (CANARY ~27-32 real), RD %+.2f pp [%.2f, %.2f]\n",
             DELTA, 100 * ate$ref, 100 * ate$estimate, 100 * ate$conf.low, 100 * ate$conf.high))
 if (abs(ate$conf.high - ate$conf.low) > 0.40)
   message("  WARNING: ATE CI width ", round(100 * (ate$conf.high - ate$conf.low)), "pp -- MP/PBW shift poorly identified; read the gradient, not the level.")
+# ATE table (same columns as the titration's, so pooled_tte.R pools the two policies alike)
+write_csv(tibble(policy = "mppbw_additive", delta = DELTA, floor = FLOOR, horizon_days = K,
+                 n_patients = nrow(wide), risk_natural = ate$ref, risk_policy = ate$ref + ate$estimate,
+                 rd = ate$estimate, rd_lo = ate$conf.low, rd_hi = ate$conf.high, rd_se = ate$std.error,
+                 frac_exposed_days_shifted = mean(.exp_days$raw - DELTA > FLOOR), site = site_name),
+          file.path(final_dir, paste0("mppbw_additive_ate_", site_name, ".csv")))
 # winsorize EIF tails to tame the CATE SHAPE variance, THEN recenter to the unbiased TMLE ATE (the
 # gradient/shape is a contrast and is unchanged by recentering; the level is the honest ATE).
 n_wins <- sum(abs(ite) > WINSOR)
@@ -164,11 +185,29 @@ cat(sprintf("    winsorized %d/%d ITEs to +-%.1f, recentered CATE to TMLE ATE %.
 # --- CATE by each modifier: spline of ITE on log(modifier); slope on a linear fit -------
 # discordance: signal expected as a DOWN-slope (RD more negative where PBW oversizes).
 # pfvc:        signal expected as an UP-slope (RD more negative at smaller absolute lung).
+# Both scales. The absolute CATE (risk difference) is modified by baseline risk: a constant
+# RELATIVE effect in a higher-risk group mechanically produces a larger RD, and the modifiers
+# here (high discordance, small PFVC) mark the highest-risk patients. So the relative curve is
+# the check that decides whether a sloped RD curve is targeting or baseline risk: RR(modifier) =
+# E[pseudo_shift | modifier] / E[pseudo_natural | modifier], each fitted on the SAME spline basis.
+# A flat RR with a sloped RD => baseline risk. A sloped RR => genuine effect modification.
 cate_one <- function(mod, lab) {
-  dd  <- tibble(lx = log(wide[[mod]]), ite = itew) %>% filter(is.finite(lx))
+  dd  <- tibble(lx = log(wide[[mod]]), ite = itew, ps = ps_dr, pn = pn_dr) %>% filter(is.finite(lx))
   kn  <- attr(ns(dd$lx, 3), "knots"); bd <- attr(ns(dd$lx, 3), "Boundary.knots")  # FIX basis
   fit_spl <- function(d) lm(ite ~ ns(lx, knots = kn, Boundary.knots = bd), data = d)
   spl <- fit_spl(dd)
+  # relative scale: fit each policy's pseudo-outcome mean, take the ratio of the fitted curves.
+  # Pseudo-outcomes are risks smeared by the influence function, so individual values can fall
+  # outside [0,1]; the fitted MEANS are the estimable objects, and the ratio is reported only
+  # where the fitted natural-course risk exceeds RR_FLOOR (dividing by a near-zero risk is noise).
+  RR_FLOOR <- 0.05
+  fit_rr <- function(d) {
+    a <- lm(ps ~ ns(lx, knots = kn, Boundary.knots = bd), data = d)
+    b <- lm(pn ~ ns(lx, knots = kn, Boundary.knots = bd), data = d)
+    function(newd) { num <- predict(a, newd); den <- predict(b, newd)
+                     ifelse(den > RR_FLOOR, num / den, NA_real_) }
+  }
+  rr_f <- fit_rr(dd)
   tr  <- summary(lm(ite ~ lx, data = dd))$coefficients["lx", ]   # per-log-unit linear slope
   g   <- tibble(lx = quantile(dd$lx, seq(0.1, 0.9, 0.1)))
   pr  <- predict(spl, g, se.fit = TRUE)
@@ -181,48 +220,91 @@ cate_one <- function(mod, lab) {
   # -- same approximation as the per-log slope CI; does NOT propagate first-stage LMTP uncertainty).
   qg  <- quantile(dd$lx, c(0.1, 0.9))
   grad_pt <- diff(as.numeric(predict(spl, tibble(lx = qg))))
-  bs  <- vapply(seq_len(BGRAD), function(b) {
-    fb <- tryCatch(fit_spl(dd[sample.int(nrow(dd), replace = TRUE), ]), error = function(e) NULL)
-    if (is.null(fb)) NA_real_ else diff(as.numeric(predict(fb, tibble(lx = qg))))
-  }, numeric(1))
-  bs <- bs[is.finite(bs)]
+  rr_pt <- as.numeric(rr_f(tibble(lx = qg)))          # RR at p10 and p90
+  rr_ratio_pt <- rr_pt[2] / rr_pt[1]                  # >1 or <1 = the relative effect differs
+  bsm <- vapply(seq_len(BGRAD), function(b) {
+    d2 <- dd[sample.int(nrow(dd), replace = TRUE), ]
+    fb <- tryCatch(fit_spl(d2), error = function(e) NULL)
+    g  <- if (is.null(fb)) NA_real_ else diff(as.numeric(predict(fb, tibble(lx = qg))))
+    rb <- tryCatch({ r <- as.numeric(fit_rr(d2)(tibble(lx = qg))); r[2] / r[1] }, error = function(e) NA_real_)
+    c(g, rb)
+  }, numeric(2))
+  bs <- bsm[1, ][is.finite(bsm[1, ])]
+  bs_rr <- bsm[2, ][is.finite(bsm[2, ])]
   slope <- tibble(modifier = lab,
     statistic   = c("per_log_unit_slope", "grad_p90_minus_p10"),
     estimate_pp = round(100 * c(tr["Estimate"], grad_pt), 2),
     lo = round(100 * c(tr["Estimate"] - 1.96 * tr["Std. Error"], quantile(bs, 0.025)), 2),
     hi = round(100 * c(tr["Estimate"] + 1.96 * tr["Std. Error"], quantile(bs, 0.975)), 2),
     p  = c(signif(tr["Pr(>|t|)"], 2), NA_real_), n_boot = c(NA_integer_, length(bs)))
+  # the relative-scale companion to grad_p90_minus_p10: the RATIO of risk ratios at p90 vs p10
+  slope <- bind_rows(slope, tibble(modifier = lab, statistic = "rr_ratio_p90_over_p10",
+    estimate_pp = round(rr_ratio_pt, 3),
+    lo = round(unname(quantile(bs_rr, 0.025)), 3), hi = round(unname(quantile(bs_rr, 0.975)), 3),
+    p = NA_real_, n_boot = length(bs_rr)))
   fg  <- tibble(lx = seq(quantile(dd$lx, 0.02), quantile(dd$lx, 0.98), length.out = 60))
   fp  <- predict(spl, fg, se.fit = TRUE)
   fig <- tibble(modifier = lab, x = exp(fg$lx), cate = 100 * fp$fit,
                 lo = 100 * (fp$fit - 1.96 * fp$se.fit), hi = 100 * (fp$fit + 1.96 * fp$se.fit))
-  list(tbl = tbl, trend = tr, fig = fig, slope = slope)
+  # relative curve + its bootstrap band, on the same grid
+  rr_grid <- as.numeric(rr_f(fg))
+  rr_bs <- vapply(seq_len(min(BGRAD, 400)), function(b) {
+    d2 <- dd[sample.int(nrow(dd), replace = TRUE), ]
+    tryCatch(as.numeric(fit_rr(d2)(fg)), error = function(e) rep(NA_real_, nrow(fg)))
+  }, numeric(nrow(fg)))
+  fig_rr <- tibble(modifier = lab, x = exp(fg$lx), rr = rr_grid,
+                   lo = apply(rr_bs, 1, quantile, 0.025, na.rm = TRUE),
+                   hi = apply(rr_bs, 1, quantile, 0.975, na.rm = TRUE))
+  # rug: the modifier's observed distribution, so the reader sees where the spline is constrained
+  rug <- tibble(modifier = lab, x = exp(dd$lx))
+  list(tbl = tbl, trend = tr, fig = fig, fig_rr = fig_rr, rug = rug, slope = slope)
 }
 ct_disc <- cate_one("discord", "PBW/PFVC discordance")
 ct_pfvc <- cate_one("pfvc",    "PFVC (predicted size, L)")
-cate_tbl <- bind_rows(ct_disc$tbl, ct_pfvc$tbl)
+cate_tbl <- bind_rows(ct_disc$tbl, ct_pfvc$tbl) %>% mutate(policy = "mppbw_additive", site = site_name)
 write_csv(cate_tbl, file.path(final_dir, paste0("mppbw_additive_cate_", site_name, ".csv")))
-slope_tbl <- bind_rows(ct_disc$slope, ct_pfvc$slope)
+slope_tbl <- bind_rows(ct_disc$slope, ct_pfvc$slope) %>% mutate(policy = "mppbw_additive", site = site_name)
 write_csv(slope_tbl, file.path(final_dir, paste0("mppbw_additive_slope_", site_name, ".csv")))
 
 # --- figure: one panel per modifier, ATE reference line --------------------------------
 ate_pp <- 100 * ate$estimate   # official TMLE ATE as the figure reference (not the winsorized mean)
+POLICY_LAB <- sprintf("MP/PBW -%.3f (J/min)/kg", DELTA)
 mk_panel <- function(ct, xlab) {
   ggplot(ct$fig, aes(x, cate)) +
     geom_hline(yintercept = ate_pp, linetype = "dashed", colour = "grey55") +
     geom_hline(yintercept = 0, colour = "grey80") +
     geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, fill = "#0072B2") +
     geom_line(colour = "#0072B2", linewidth = 1) +
+    geom_rug(data = ct$rug %>% slice_sample(n = min(nrow(ct$rug), 2000)), aes(x = x),
+             inherit.aes = FALSE, alpha = 0.06, length = unit(0.03, "npc")) +
     labs(x = xlab, y = sprintf("CATE: 28-d mortality RD of MP/PBW -%.3f (pp)", DELTA), title = ct$fig$modifier[1]) +
     theme_minimal(base_size = 11)
 }
-fig <- mk_panel(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC says smaller)") +
-  mk_panel(ct_pfvc, "PFVC (L) - lower = smaller predicted lung") +
+mk_panel_rr <- function(ct, xlab) {
+  ggplot(ct$fig_rr, aes(x, rr)) +
+    geom_hline(yintercept = 1, colour = "grey80") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, fill = "#D55E00") +
+    geom_line(colour = "#D55E00", linewidth = 1) +
+    geom_rug(data = ct$rug %>% slice_sample(n = min(nrow(ct$rug), 2000)), aes(x = x),
+             inherit.aes = FALSE, alpha = 0.06, length = unit(0.03, "npc")) +
+    scale_y_log10() +
+    labs(x = xlab, y = "Relative CATE: risk ratio (policy / natural)", title = NULL) +
+    theme_minimal(base_size = 11)
+}
+rr_tbl <- bind_rows(ct_disc$fig_rr, ct_pfvc$fig_rr) %>% mutate(site = site_name)
+write_csv(rr_tbl, file.path(final_dir, paste0("mppbw_additive_cate_rr_", site_name, ".csv")))
+# 2 x 2: absolute risk difference (top) and relative risk ratio (bottom) for each modifier,
+# with a rug of the modifier's distribution under every panel. Read the two rows together: an
+# absolute curve that bends where the relative curve is flat is baseline risk, not targeting.
+fig <- (mk_panel(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC says smaller)") | mk_panel(ct_pfvc, "PFVC (L) - lower = smaller predicted lung")) /
+       (mk_panel_rr(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC says smaller)") | mk_panel_rr(ct_pfvc, "PFVC (L) - lower = smaller predicted lung")) +
   patchwork::plot_annotation(
-    title = paste0("CATE of an ADDITIVE MP/PBW power-reduction MTP, by PFVC-derived modifiers - ", site_name,
-                   if (is_synthetic) " (SYNTHETIC)" else ""),
-    subtitle = "Dashed = ATE; negative = benefit. Down-slope (left) or up-slope (right) = a fixed PBW-anchored power cut helps most where PFVC, not PBW, flags risk (normalizer-dependent).")
-ggsave(file.path(final_dir, paste0("mppbw_additive_cate_", site_name, ".pdf")), fig, width = 12, height = 5)
+    title = paste0("CATE of an ADDITIVE MP/PBW power-reduction MTP, by PFVC-derived modifiers - ", site_name, if (is_synthetic) " (SYNTHETIC)" else ""),
+    subtitle = paste0("Top: absolute CATE (risk difference); dashed = ATE; negative = benefit. ",
+                      "Bottom: relative CATE (risk ratio, policy / natural course); 1 = no effect. ",
+                      "Rug = the modifier's distribution. A sloped absolute curve with a flat relative curve is ",
+                      "baseline risk (the modifiers mark the highest-risk patients), not effect modification."))
+ggsave(file.path(final_dir, paste0("mppbw_additive_cate_", site_name, ".pdf")), fig, width = 12, height = 9)
 
 cat("\n=== 11.Y continuous CATE of an ADDITIVE MP/PBW reduction, by PFVC-derived modifiers ===\n")
 cat("--- effect-modification trends (read the SHAPE, not the level: confounding-by-severity inflates the ATE) ---\n")
