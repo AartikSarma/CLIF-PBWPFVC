@@ -13,6 +13,12 @@
 # Usage (from the project root, or anywhere — the script locates the repo):
 #   Rscript code/00_run_pipeline.R
 #   Rscript code/00_run_pipeline.R --site_name my_site --site_path /data/clif [--file_type parquet]
+#   Rscript code/00_run_pipeline.R --analysis_only
+#
+# --analysis_only skips the data-preparation scripts (01 cohort, 02 QC, 03 variables)
+# and runs only the analyses (04, 05) against the script-03 outputs already on disk
+# for the site -- for re-running the analyses after a code change without rebuilding
+# the cohort. It fails loudly if those outputs are missing.
 #
 # The optional arguments override the matching fields of config/config.json for
 # this run only (config.json is not edited): --site_name sets config$site_name,
@@ -57,11 +63,15 @@ setwd(repo_root)
 parse_pipeline_args <- function(args) {
   known <- c(site_name = "PBWPFVC_SITE_NAME", site_path = "PBWPFVC_TABLES_PATH",
              file_type = "PBWPFVC_FILE_TYPE")
+  flags <- c("analysis_only")
   usage <- paste0("Usage: Rscript code/00_run_pipeline.R [--site_name NAME] [--site_path DIR] ",
-                  "[--file_type parquet|csv|fst]")
+                  "[--file_type parquet|csv|fst] [--analysis_only]")
   out <- list(); i <- 1L
   while (i <= length(args)) {
     a <- args[[i]]
+    if (a %in% paste0("--", flags)) {                    # boolean flag
+      out[[sub("^--", "", a)]] <- TRUE; i <- i + 1L; next
+    }
     if (grepl("^--[a-z_]+=", a)) {                       # --flag=value
       key <- sub("^--([a-z_]+)=.*$", "\\1", a); val <- sub("^--[a-z_]+=", "", a); i <- i + 1L
     } else if (grepl("^--[a-z_]+$", a)) {                # --flag value
@@ -76,7 +86,9 @@ parse_pipeline_args <- function(args) {
   }
   out
 }
-cli_overrides <- parse_pipeline_args(commandArgs(trailingOnly = TRUE))
+cli_args <- parse_pipeline_args(commandArgs(trailingOnly = TRUE))
+analysis_only <- isTRUE(cli_args$analysis_only); cli_args$analysis_only <- NULL
+cli_overrides <- cli_args
 if (length(cli_overrides)) {
   if (!is.null(cli_overrides$PBWPFVC_TABLES_PATH)) {
     p <- path.expand(cli_overrides$PBWPFVC_TABLES_PATH)
@@ -96,6 +108,7 @@ message("Repository root: ", repo_root)
 if (length(cli_overrides)) {
   for (k in names(cli_overrides)) message("Override ", k, " = ", cli_overrides[[k]])
 } else message("Config: config/config.json (no command-line overrides)")
+if (analysis_only) message("--analysis_only: skipping 01-03, running the analyses on the existing script-03 outputs")
 message("=============================================================")
 
 # --- 1. Restore the project environment --------------------------------------
@@ -107,13 +120,27 @@ renv::restore(prompt = FALSE)
 message("[00] renv environment restored.\n")
 
 # --- 2. Run the numbered pipeline scripts in order ---------------------------
-pipeline_scripts <- c(
+preparation_scripts <- c(
   "01_cohort_identification.R",
   "02_quality_checks.R",
-  "03_variable_derivation.R",
+  "03_variable_derivation.R"
+)
+analysis_scripts <- c(
   "04_analysis.R",                 # outcome analyses (replication, survival, bias)
   "05_normalization_analysis.R"    # PBW vs PFVC normalization discordance + prognostics
 )
+pipeline_scripts <- if (analysis_only) analysis_scripts else c(preparation_scripts, analysis_scripts)
+if (analysis_only) {
+  # the analyses read script 03's outputs; refuse to start if they are not on disk
+  site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
+                  else jsonlite::fromJSON("config/config.json")$site_name
+  stage_dir <- file.path("output", paste0(site_for_dir, "_output"), "intermediate")
+  needed <- file.path(stage_dir, c("analysis_cross_sectional.parquet", "analysis_negative_control.parquet"))
+  missing <- needed[!file.exists(needed)]
+  if (length(missing))
+    stop("--analysis_only needs the script-03 outputs, which are missing:\n  ",
+         paste(missing, collapse = "\n  "), "\nRun the full pipeline first.")
+}
 # NOTE: cross-cohort pooling (code/pooled_estimates.R) is NOT part of the per-site
 # pipeline. It is run centrally by the study coordinator after every site returns
 # its `final/` outputs, and is kept local (not in the repository).
