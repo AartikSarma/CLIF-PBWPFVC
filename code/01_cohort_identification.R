@@ -346,11 +346,94 @@ message("Demographics: ", nrow(cohort_demographics), " rows")
 message("Mortality rate: ", round(mean(cohort_demographics$deceased) * 100, 1), "%")
 
 # =============================================================================
+# Negative-control cohorts: adult ICU patients OUTSIDE the analytic cohort
+# =============================================================================
+# The analytic cohort is hypoxemic AND ventilated with a set tidal volume, so any
+# PBW/PFVC -> mortality association in it could run through tidal-volume dosing or
+# through what the ratio's inputs (age, sex, race, height) index on their own. Two
+# cohorts in which no lung-protective dosing decision was made test that: if the
+# ratio (and height) predict death equally in (a) NON-hypoxemic, NON-ventilated ICU
+# adults and (b) NON-hypoxemic VENTILATED adults, the association is not ventilatory.
+# Script 03 derives PBW/PFVC for them, script 04 fits the models (section 4j).
+#
+# One row per patient (last adult ICU admission, as for the analytic cohort).
+# Hypoxemia is classified from every SpO2 in the hospitalization: each SpO2 is
+# joined to the most recent respiratory-support record within 4 h; FiO2 comes from
+# fio2_set (fractions), from room-air device category (0.21), or from nasal-cannula
+# flow (0.21 + 0.03 x L/min, capped at 0.60); a SpO2 with no support record within
+# 4 h is taken as room air. Hypoxemic = any SF < 315 among SpO2 80-97 with a known
+# FiO2, or any SpO2 < 80. Patients with no SpO2 at all cannot be classified and are
+# dropped. This is deliberately lighter than the analytic cohort's waterfall (no
+# hourly scaffold), because it runs on every adult ICU hospitalization.
+
+nc_hosp <- clif_hospitalization %>%
+  filter(age_at_admission >= 18, hospitalization_id %in% icu_ids) %>%
+  arrange(desc(admission_dttm)) %>%
+  distinct(patient_id, .keep_all = TRUE) %>%
+  mutate(imv_set_vt = hospitalization_id %in% imv_ids)
+
+# heights: mean in the index hospitalization, else the patient's median elsewhere
+nc_height_all <- clif_vitals %>%
+  filter(vital_category == "height_cm", !is.na(vital_value)) %>%
+  mutate(height_cm = as.numeric(vital_value)) %>%
+  summarize(height_cm = mean(height_cm), .by = hospitalization_id) %>%
+  inner_join(clif_hospitalization %>% distinct(hospitalization_id, patient_id), by = "hospitalization_id")
+nc_heights <- nc_hosp %>% select(patient_id, hospitalization_id) %>%
+  left_join(nc_height_all %>% select(hospitalization_id, height_cm), by = "hospitalization_id") %>%
+  left_join(nc_height_all %>% summarize(median_height = median(height_cm), .by = patient_id), by = "patient_id") %>%
+  mutate(height_cm = coalesce(height_cm, median_height)) %>%
+  select(hospitalization_id, height_cm)
+
+# FiO2 timeline from the raw respiratory-support table (all NC hospitalizations)
+nc_fio2 <- clif_respiratory_support %>%
+  filter(hospitalization_id %in% nc_hosp$hospitalization_id) %>%
+  mutate(device_category = tolower(device_category),
+         fio2_num = suppressWarnings(as.numeric(fio2_set)),
+         fio2_num = if_else(!is.na(fio2_num) & fio2_num > 1, fio2_num / 100, fio2_num),
+         lpm_num  = suppressWarnings(as.numeric(lpm_set)),
+         fio2_est = case_when(
+           !is.na(fio2_num) & fio2_num >= 0.21 & fio2_num <= 1 ~ fio2_num,
+           replace_na(device_category == "room air", FALSE)     ~ 0.21,
+           replace_na(device_category == "nasal cannula", FALSE) & !is.na(lpm_num) ~ pmin(0.21 + 0.03 * lpm_num, 0.60),
+           TRUE ~ NA_real_)) %>%
+  filter(!is.na(fio2_est), !is.na(recorded_dttm)) %>%
+  transmute(hospitalization_id, fio2_dttm = as.numeric(recorded_dttm), fio2_est)
+nc_spo2 <- clif_vitals %>%
+  filter(hospitalization_id %in% nc_hosp$hospitalization_id, vital_category == "spo2") %>%
+  mutate(spo2 = as.numeric(vital_value)) %>%
+  filter(!is.na(spo2), spo2 >= 50, spo2 <= 100, !is.na(recorded_dttm)) %>%
+  transmute(hospitalization_id, spo2_dttm = as.numeric(recorded_dttm), spo2)
+nc_fio2_dt <- as.data.table(nc_fio2); setkey(nc_fio2_dt, hospitalization_id, fio2_dttm)
+nc_spo2_dt <- as.data.table(nc_spo2); setkey(nc_spo2_dt, hospitalization_id, spo2_dttm)
+nc_sf <- nc_fio2_dt[nc_spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, fio2_dttm = spo2_dttm)] %>%
+  as_tibble() %>%
+  mutate(fio2_est = coalesce(fio2_est, 0.21),          # no support record within 4 h = room air
+         sf = spo2 / fio2_est,
+         hypox_obs = spo2 < 80 | (spo2 <= 97 & sf < 315)) %>%
+  summarize(n_spo2 = n(), hypoxemic = any(hypox_obs), min_sf = min(sf), .by = hospitalization_id)
+
+nc_cohort <- nc_hosp %>%
+  left_join(clif_patient, by = "patient_id") %>%
+  mutate(race_category = case_when(race_category == "White" ~ "WHITE",
+                                   race_category == "Black or African American" ~ "BLACK",
+                                   TRUE ~ "OTHER"),
+         deceased = if_else(discharge_category == "Expired", 1L, 0L, missing = 0L)) %>%
+  inner_join(nc_sf, by = "hospitalization_id") %>%        # drops patients with no SpO2
+  left_join(nc_heights, by = "hospitalization_id") %>%
+  select(hospitalization_id, patient_id, age_at_admission, sex_category, race_category,
+         height_cm, admission_dttm, discharge_dttm, death_dttm, deceased,
+         imv_set_vt, hypoxemic, n_spo2, min_sf)
+message("Negative-control frame: ", nrow(nc_cohort), " adult ICU patients with SpO2; ",
+        sum(!nc_cohort$hypoxemic & !nc_cohort$imv_set_vt), " non-hypoxemic non-ventilated, ",
+        sum(!nc_cohort$hypoxemic & nc_cohort$imv_set_vt), " non-hypoxemic ventilated")
+
+# =============================================================================
 # Save intermediates
 # =============================================================================
 
 output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+write_parquet(nc_cohort, file.path(output_dir, "nc_cohort.parquet"))
 
 saveRDS(eligible_hospitalizations, file.path(output_dir, "cohort_hospitalization_ids.rds"))
 write_parquet(resp_waterfall, file.path(output_dir, "resp_support_waterfall.parquet"))

@@ -60,7 +60,8 @@ cross_sectional <- cross_sectional %>%
     # Per-10-unit covariates so the adjusted age and SF-ratio coefficients are
     # reported per 10 years / 10 SF units (Table 1 keeps the raw scales).
     age10 = age_at_admission / 10,
-    sf10  = sf_ratio / 10
+    sf10  = sf_ratio / 10,
+    height10 = height_cm / 10
   )
 
 # =============================================================================
@@ -289,13 +290,30 @@ tbl_merge(vfd_cr_tables, tab_spanner = exposure_labels) %>%
 
 aic_results <- list()
 
+# Two DIAGNOSTIC rungs, fit here only (not in the regression tables), to read the
+# gap between "VT/PBW + PFVC" and the ratio models. log PFVC = log PBW - log(PBW/PFVC)
+# and log PBW = f(height, sex), so the PFVC model is the ratio model PLUS a height
+# main effect, which the adjustment set deliberately omits. Rung 1 adds height to the
+# ratio model: if its AIC matches the PFVC model, the whole gap is height. Rung 2
+# swaps PFVC for FVC_age25 (age pinned to 25): how much of the PFVC fit is the
+# structural (height/sex/race) leg versus the age slope.
+aic_extra_specs <- c(
+  "VT/PBW + PBW/PFVC + height" = "vtpbw + pbwpfvc + height10",
+  "VT/PBW + FVC_age25"         = "vtpbw + pfvc_age25"
+)
+aic_row <- function(models, extra_models, n_obs) {
+  tibble(exposure = c(exposure_labels, names(aic_extra_specs)),
+         AIC = c(map_dbl(models, AIC), map_dbl(extra_models, AIC)),
+         n_obs = n_obs) %>%
+    mutate(is_reference = exposure == "VT/PBW")
+}
+
 # Mortality
 if (!is.null(mortality_models)) {
-  aic_results[["Mortality"]] <- tibble(
-    exposure = exposure_labels,
-    AIC = map_dbl(mortality_models, AIC),
-    is_reference = exposure == "VT/PBW"
-  )
+  mort_extra <- map(aic_extra_specs, ~ glm(as.formula(paste("deceased ~", .x, "+", model_covariates(.x))),
+                                          data = cross_sectional, family = binomial))
+  aic_results[["Mortality"]] <- aic_row(mortality_models, mort_extra,
+                                        sum(complete.cases(cross_sectional[, c("deceased", "vtpbw", "pbwpfvc")])))
 }
 
 # Continuous outcomes. Exclude the normalized-mechanics outcomes (Ers x PBW/PFVC,
@@ -305,20 +323,18 @@ if (!is.null(mortality_models)) {
 # standalone regression tables and long-format results are still produced.
 AIC_EXCLUDE <- c("ers_pbw", "ers_pfvc", "mp_pbw", "mp_pfvc", "mp_el_pfvc")
 for (outcome_name in setdiff(names(continuous_outcomes), AIC_EXCLUDE)) {
-  aic_results[[continuous_outcomes[[outcome_name]]$label]] <- tibble(
-    exposure = exposure_labels,
-    AIC = map_dbl(continuous_models[[outcome_name]], AIC),
-    is_reference = exposure == "VT/PBW"
-  )
+  outcome_var <- continuous_outcomes[[outcome_name]]$var
+  cont_extra <- map(aic_extra_specs, ~ lm(as.formula(paste(outcome_var, "~", .x, "+", model_covariates(outcome_var))),
+                                         data = cross_sectional))
+  aic_results[[continuous_outcomes[[outcome_name]]$label]] <-
+    aic_row(continuous_models[[outcome_name]], cont_extra, sum(!is.na(cross_sectional[[outcome_var]])))
 }
 
 # 28-day VFDs (competing-risks Fine-Gray models). AICs are comparable within the
 # outcome and referenced to the VT/PBW model, as elsewhere.
-aic_results[["28-day VFDs"]] <- tibble(
-  exposure = exposure_labels,
-  AIC = map_dbl(vfd_cr_models, AIC),
-  is_reference = exposure == "VT/PBW"
-)
+vfd_extra <- map(aic_extra_specs, fit_vfd_finegray)
+aic_results[["28-day VFDs"]] <- aic_row(vfd_cr_models, vfd_extra,
+                                        sum(!is.na(cross_sectional$vfd_time) & cross_sectional$vfd_time > 0))
 
 # Evidence ratios are all referenced to the VT/PBW-alone model WITHIN each
 # outcome: ER = exp(-0.5 * (AIC_model - AIC_VT/PBW)). ER > 1 means more support
@@ -336,15 +352,26 @@ aic_all <- bind_rows(aic_results, .id = "outcome") %>%
       evidence_ratio > ER_CEIL  ~ ">1000",
       evidence_ratio < ER_FLOOR ~ "<0.001",
       TRUE                      ~ formatC(evidence_ratio, format = "g", digits = 2)
-    )
+    ),
+    # Sample-size-standardized: delta_AIC per 1000 patients and its evidence ratio,
+    # so the figure separates models the raw ratio saturates at 1000 and cohorts of
+    # different size are comparable (pooled_estimates.R uses the same scale).
+    delta_AIC_per_1k = delta_AIC / n_obs * 1000,
+    er_per_1k        = exp(-0.5 * delta_AIC_per_1k),
+    er_per_1k_trunc  = pmin(pmax(er_per_1k, ER_FLOOR), ER_CEIL),
+    er_per_1k_label  = case_when(
+      er_per_1k > ER_CEIL  ~ ">1000",
+      er_per_1k < ER_FLOOR ~ "<0.001",
+      TRUE                 ~ formatC(er_per_1k, format = "g", digits = 2))
   ) %>%
   ungroup() %>%
   # Column order: clinical outcomes first, then compliance/elastance, then static
-  # driving pressure and mechanical power.
-  mutate(outcome = factor(outcome, levels = intersect(
-    c("Mortality", "28-day VFDs", "Compliance", "Elastance",
-      "Static DP", "Mechanical power"),
-    unique(outcome))))
+  # driving pressure and mechanical power; any other outcome label keeps its place
+  # at the end instead of becoming NA.
+  mutate(outcome = factor(outcome, levels = {
+    known <- c("Mortality", "28-day VFDs", "Compliance", "Elastance", "Static DP", "Mechanical power")
+    c(intersect(known, unique(outcome)), setdiff(unique(outcome), known))
+  }))
 
 # Row order: exposure specs by the strongest evidence ratio they reach in any
 # outcome (best at the top). Raw AIC is not comparable across outcomes, so the
@@ -364,22 +391,25 @@ print(aic_all)
 
 write_csv(aic_all, file.path(final_dir, paste0("aic_comparison_all_", site_name, ".csv")))
 
-# Evidence ratio heatmap: divergent log10 colour scale, white = 1 (no difference
-# from VT/PBW), blue = less support, red = more support; truncated to [0.001, 1000].
+# Evidence ratio heatmap on the per-1000-patient scale: divergent log10 colour
+# scale, white = 1 (no difference from VT/PBW), blue = less support, red = more
+# support. Each cell shows the evidence ratio per 1000 patients and the delta_AIC
+# per 1000 patients; the raw (untruncated) delta_AIC is in the CSV.
 er_heatmap <- ggplot(aic_all,
                      aes(x = outcome, y = exposure,
-                         fill = log10(evidence_ratio_trunc))) +
+                         fill = log10(er_per_1k_trunc))) +
   geom_tile(color = "grey80", linewidth = 0.5) +
-  geom_text(aes(label = er_label), size = 3.5) +
+  geom_text(aes(label = sprintf("%s\n(dAIC %+.1f)", er_per_1k_label, delta_AIC_per_1k)),
+            size = 2.9, lineheight = 0.9) +
   scale_fill_gradient2(
-    name = "Evidence ratio\n(vs VT/PBW)",
+    name = "Evidence ratio per\n1000 pts (vs VT/PBW)",
     low = "#2166AC", mid = "white", high = "#B2182B",
     midpoint = 0, limits = c(log10(ER_FLOOR), log10(ER_CEIL)),
     breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")
   ) +
   labs(
-    title = "Evidence ratios across models and outcomes",
-    subtitle = "Each cell vs the VT/PBW-alone model within that outcome; truncated to [0.001, 1000]",
+    title = "Evidence ratios across models and outcomes (per 1000 patients)",
+    subtitle = "Each cell vs the VT/PBW-alone model within that outcome; delta_AIC / N x 1000; ER = exp(-dAIC/2)",
     x = "Outcome",
     y = "Exposure specification"
   ) +
@@ -1167,6 +1197,95 @@ dist_fig <- (p_sex | p_race) / (p_age | p_height) +
 ggsave(file.path(final_dir, paste0("distribution_pbwpfvc_", site_name, ".pdf")),
        dist_fig, width = 11, height = 9)
 message("PBW:PFVC distribution figure saved")
+
+# =============================================================================
+# 4j. Negative-control cohorts: PBW/PFVC, PFVC and height vs mortality
+# =============================================================================
+# If the PBW/PFVC (or height) association with death is ventilatory, it should be
+# present in the analytic cohort (hypoxemic, ventilated, VT/PBW 6-8) and attenuated
+# or absent where no lung-protective dosing decision was made: non-hypoxemic
+# ventilated adults, and non-hypoxemic non-ventilated adults (script 01 / 03k).
+# The three cohorts share ONE adjustment set (age, sex, race) because SOFA and the
+# SF ratio exist only for the analytic cohort; the analytic cohort's fully adjusted
+# estimates live in 4c/4f. Each exposure is standardized by the ANALYTIC cohort's
+# SD so the ORs / HRs are on one scale across cohorts. Outcomes: in-hospital death
+# (logistic) and 60-day all-cause death (Cox). Cells with < 10 deaths are skipped.
+nc_file <- file.path(output_dir, "analysis_negative_control.parquet")
+nc_data <- read_parquet(nc_file) %>%
+  select(hospitalization_id, nc_cohort, age_at_admission, sex_category, race_category,
+         height_cm, pbw, pfvc, pfvc_age25, pbwpfvc, deceased, mortality_event_60, surv_time)
+nc_frames <- bind_rows(
+  cross_sectional %>%
+    transmute(hospitalization_id, nc_cohort = "Hypoxemic, ventilated (analytic)",
+              age_at_admission, sex_category, race_category, height_cm, pbw, pfvc, pfvc_age25,
+              pbwpfvc, deceased, mortality_event_60, surv_time),
+  nc_data) %>%
+  mutate(age10 = age_at_admission / 10,
+         sex_category  = factor(sex_category,  levels = c("Male", "Female")),
+         race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")))
+nc_sd <- cross_sectional %>% summarise(pbwpfvc = sd(pbwpfvc, na.rm = TRUE), pfvc = sd(pfvc, na.rm = TRUE),
+                                       height_cm = sd(height_cm, na.rm = TRUE))
+nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height")
+nc_cohort_levels <- c("Hypoxemic, ventilated (analytic)", "Ventilated, non-hypoxemic",
+                      "Not ventilated, non-hypoxemic")
+
+nc_fit_one <- function(df, expo, cohort_lab) {
+  d <- df %>% filter(nc_cohort == cohort_lab) %>%
+    mutate(z = .data[[expo]] / nc_sd[[expo]]) %>%
+    filter(is.finite(z))
+  n_death <- sum(d$deceased == 1, na.rm = TRUE); n_death60 <- sum(d$mortality_event_60 == 1, na.rm = TRUE)
+  out <- tibble()
+  if (nrow(d) >= 50 && n_death >= 10) {
+    m <- glm(deceased ~ z + age10 + sex_category + race_category, data = d, family = binomial)
+    cf <- summary(m)$coefficients["z", ]
+    out <- bind_rows(out, tibble(outcome = "In-hospital mortality", estimate_type = "OR",
+      estimate = exp(cf["Estimate"]), conf_low = exp(cf["Estimate"] - 1.96 * cf["Std. Error"]),
+      conf_high = exp(cf["Estimate"] + 1.96 * cf["Std. Error"]), std_error = cf["Std. Error"],
+      p_value = cf["Pr(>|z|)"], n = nrow(d), events = n_death))
+  }
+  if (nrow(d) >= 50 && n_death60 >= 10) {
+    d60 <- d %>% filter(!is.na(surv_time), surv_time > 0)
+    m <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z + age10 + sex_category + race_category, data = d60)
+    cf <- summary(m)$coefficients["z", ]
+    out <- bind_rows(out, tibble(outcome = "60-day mortality", estimate_type = "HR",
+      estimate = cf["exp(coef)"], conf_low = exp(cf["coef"] - 1.96 * cf["se(coef)"]),
+      conf_high = exp(cf["coef"] + 1.96 * cf["se(coef)"]), std_error = cf["se(coef)"],
+      p_value = cf["Pr(>|z|)"], n = nrow(d60), events = n_death60))
+  }
+  if (nrow(out)) out %>% mutate(cohort = cohort_lab, exposure = nc_exposures[[expo]],
+                                scale = "per analytic-cohort SD", .before = 1) else out
+}
+nc_results <- map_dfr(nc_cohort_levels, function(cl)
+  map_dfr(names(nc_exposures), function(e) nc_fit_one(nc_frames, e, cl))) %>%
+  mutate(adjustment = "age + sex + race", site = site_name)
+nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
+  summarise(n = n(), deaths_inhosp = sum(deceased == 1, na.rm = TRUE),
+            deaths_60d = sum(mortality_event_60 == 1, na.rm = TRUE),
+            median_age = median(age_at_admission), pct_female = mean(sex_category == "Female"),
+            median_pbwpfvc = median(pbwpfvc, na.rm = TRUE), .groups = "drop") %>%
+  mutate(across(c(n, deaths_inhosp, deaths_60d), ~ if_else(.x < 10, NA_integer_, as.integer(.x))))   # min cell n >= 10
+write_csv(nc_results, file.path(final_dir, paste0("negative_control_", site_name, ".csv")))
+write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", site_name, ".csv")))
+
+if (nrow(nc_results)) {
+  nc_fig <- ggplot(nc_results %>% mutate(cohort = factor(cohort, rev(nc_cohort_levels))),
+                   aes(x = estimate, y = cohort, colour = cohort)) +
+    geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.25) +
+    geom_point(size = 2.4) +
+    facet_grid(exposure ~ outcome, scales = "free_x") +
+    scale_x_log10() +
+    scale_colour_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
+    labs(title = paste0("Negative-control cohorts - ", site_name),
+         subtitle = "OR / HR per analytic-cohort SD, adjusted for age, sex, race. A ventilatory pathway predicts attenuation outside the analytic cohort.",
+         x = "OR / HR per SD (log scale)", y = NULL) +
+    theme_minimal(base_size = 10)
+  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 10, height = 6)
+}
+message("Negative-control models: ", nrow(nc_results), " estimates across ",
+        n_distinct(nc_results$cohort), " cohort(s)")
+print(as.data.frame(nc_results %>% transmute(cohort, exposure, outcome, n, events,
+        est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
 
 message("All outputs saved to: ", final_dir)
 message("Script 04 complete.")

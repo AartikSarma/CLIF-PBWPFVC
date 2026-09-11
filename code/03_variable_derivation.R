@@ -986,6 +986,36 @@ message("Attrition log written (7 steps): ",
         paste(attrition$n_remaining, collapse = " -> "))
 
 # =============================================================================
+# 3k. Negative-control cohorts: PBW/PFVC + survival fields (from script 01)
+# =============================================================================
+# Non-hypoxemic patients, ventilated and not, in which no lung-protective dosing
+# decision was made (see script 01). The same Devine / GLI-2012 derivation and the
+# same height window as the analytic cohort; the same 60-day all-cause survival
+# fields. Script 04 (4j) fits PBW/PFVC, PFVC and height against mortality in each.
+nc_cohort <- read_parquet(file.path(output_dir, "nc_cohort.parquet")) %>%
+  filter(!hypoxemic, !is.na(height_cm), height_cm >= 150, height_cm <= 210,
+         !is.na(age_at_admission), sex_category %in% c("Male", "Female")) %>%
+  mutate(
+    nc_cohort = if_else(imv_set_vt, "Ventilated, non-hypoxemic", "Not ventilated, non-hypoxemic"),
+    sex_numeric  = if_else(sex_category == "Male", 1L, 2L),
+    race_numeric = case_when(race_category == "WHITE" ~ 1L, race_category == "BLACK" ~ 2L, TRUE ~ 5L),
+    pbw = if_else(sex_numeric == 1L, 50.0 + 2.3 * (height_cm / 2.54 - 60), 45.5 + 2.3 * (height_cm / 2.54 - 60)),
+    pfvc = pred_GLI(age = age_at_admission, height = height_cm / 100, gender = sex_numeric,
+                    ethnicity = race_numeric, param = "FVC"),
+    pfvc_age25 = pred_GLI(age = rep(25, n()), height = height_cm / 100, gender = sex_numeric,
+                          ethnicity = race_numeric, param = "FVC"),
+    pbwpfvc = pbw / pfvc,
+    sex_category  = factor(sex_category,  levels = c("Male", "Female")),
+    race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
+    death_day = as.numeric(difftime(death_dttm, admission_dttm, units = "days")),
+    mortality_event_60 = if_else(!is.na(death_day) & death_day >= 0 & death_day <= 60, 1L, 0L),
+    surv_time = if_else(mortality_event_60 == 1L, death_day, 60)
+  ) %>%
+  filter(!is.na(pfvc), pfvc > 0)
+write_parquet(nc_cohort, file.path(output_dir, "analysis_negative_control.parquet"))
+message("Negative-control cohorts: ", paste(capture.output(print(table(nc_cohort$nc_cohort))), collapse = " | "))
+
+# =============================================================================
 # 3j. Federated PBW:PFVC distribution exports (site-specific; poolable)
 # =============================================================================
 # Aggregated summaries of the PBW:PFVC ratio by demographic group only -- no
