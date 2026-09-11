@@ -150,12 +150,19 @@ model_covariates <- function(..., adjusted = TRUE) {
 }
 
 # Define all exposure specifications
+# vt_excess_ml (script 03) is the DIFFERENCE parameterization of the same PBW-vs-PFVC
+# disagreement the pbwpfvc ratio carries: the millilitres of tidal volume the PBW rule
+# prescribes over the PFVC rule at the protective dose, from two EXTERNAL (ARMA)
+# constants, so nothing is scaled within the cohort. It is not a restatement of the
+# ratio -- the ratio treats a 10% mis-sizing alike in a 40 kg and a 90 kg patient, the
+# difference does not -- and it is the quantity a clinician can act on (mL on the vent).
 exposure_specs <- list(
   vtpfvc        = "vtpfvc",
   vtpbw         = "vtpbw",
   vtpfvc_vtpbw  = "vtpfvc + vtpbw",
   vtpbw_pfvc    = "vtpbw + pfvc",
-  vtpbw_pbwpfvc = "vtpbw + pbwpfvc"
+  vtpbw_pbwpfvc = "vtpbw + pbwpfvc",
+  vtpbw_excess  = "vtpbw + vt_excess_ml"
 )
 
 exposure_labels <- c(
@@ -163,7 +170,8 @@ exposure_labels <- c(
   vtpbw         = "VT/PBW",
   vtpfvc_vtpbw  = "VT/PFVC + VT/PBW",
   vtpbw_pfvc    = "VT/PBW + PFVC",
-  vtpbw_pbwpfvc = "VT/PBW + PBW/PFVC"
+  vtpbw_pbwpfvc = "VT/PBW + PBW/PFVC",
+  vtpbw_excess  = "VT/PBW + VT excess (mL)"
 )
 
 # =============================================================================
@@ -1224,7 +1232,8 @@ message("PBW:PFVC distribution figure saved")
 nc_file <- file.path(output_dir, "analysis_negative_control.parquet")
 nc_data <- read_parquet(nc_file) %>%
   select(hospitalization_id, nc_cohort, age_at_admission, sex_category, race_category,
-         height_cm, pbw, pfvc, pfvc_age25, pbwpfvc, vtpbw, vtpfvc, deceased, mortality_event_60, surv_time)
+         height_cm, pbw, pfvc, pfvc_age25, pbwpfvc, vt_excess_ml, vtpbw, vtpfvc,
+         deceased, mortality_event_60, surv_time)
 nc_cohort_levels <- c("Hypoxemic, ventilated (analytic)",
                       "Ventilated, non-hypoxemic (dosed, uninjured lung)",
                       "Not ventilated (no tidal volume)")
@@ -1232,15 +1241,15 @@ nc_frames <- bind_rows(
   cross_sectional %>%
     transmute(hospitalization_id, nc_cohort = nc_cohort_levels[1],
               age_at_admission, sex_category, race_category, height_cm, pbw, pfvc, pfvc_age25,
-              pbwpfvc, vtpbw, vtpfvc, deceased, mortality_event_60, surv_time),
+              pbwpfvc, vt_excess_ml, vtpbw, vtpfvc, deceased, mortality_event_60, surv_time),
   nc_data) %>%
   mutate(age10 = age_at_admission / 10,
          sex_category  = factor(sex_category,  levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")))
 nc_sd <- cross_sectional %>%
-  summarise(across(c(pbwpfvc, pfvc, height_cm, vtpbw, vtpfvc), ~ sd(.x, na.rm = TRUE)))
+  summarise(across(c(pbwpfvc, pfvc, height_cm, vt_excess_ml, vtpbw, vtpfvc), ~ sd(.x, na.rm = TRUE)))
 nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height",
-                  vtpbw = "VT/PBW", vtpfvc = "VT/PFVC")
+                  vt_excess_ml = "VT excess (mL)", vtpbw = "VT/PBW", vtpfvc = "VT/PFVC")
 nc_age_forms <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
 NC_MIN_EVENTS <- as.integer(Sys.getenv("PBWPFVC_NC_MIN_EVENTS", "10"))   # min deaths per cell (lower only to test plumbing)
 
@@ -1399,7 +1408,7 @@ if (nrow(nc_interaction)) {
 # Figure: the three size exposures only. VT/PBW and VT/PFVC stay in the CSV but not the
 # figure: without SOFA / SF in this shared adjustment set their estimates are confounded
 # by severity (clinicians lower VT in sicker patients).
-NC_FIG_EXPOSURES <- c("Height", "PFVC", "PBW/PFVC")
+NC_FIG_EXPOSURES <- c("Height", "PFVC", "PBW/PFVC", "VT excess (mL)")
 if (nrow(nc_results)) {
   nc_lab <- nc_results %>% filter(age_form == "linear", exposure %in% NC_FIG_EXPOSURES) %>%
     transmute(cohort, exposure, outcome, lab = sprintf("n=%s, d=%s", format(n, big.mark = ","), events))

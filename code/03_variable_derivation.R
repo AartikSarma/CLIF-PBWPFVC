@@ -1035,6 +1035,7 @@ nc_cohort <- read_parquet(file.path(output_dir, "nc_cohort.parquet")) %>%
     pfvc_age25 = pred_GLI(age = rep(25, n()), height = height_cm / 100, gender = sex_numeric,
                           ethnicity = race_numeric, param = "FVC"),
     pbwpfvc = pbw / pfvc,
+    vt_excess_ml = VT_PER_KG_ARMA * pbw - (VT_PCT_PFVC_ARMA / 100) * pfvc * 1000,
     sex_category  = factor(sex_category,  levels = c("Male", "Female")),
     race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
     death_day = as.numeric(difftime(death_dttm, admission_dttm, units = "days")),
