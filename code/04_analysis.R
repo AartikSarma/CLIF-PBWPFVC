@@ -1448,5 +1448,130 @@ print(as.data.frame(nc_counts %>% transmute(cohort, n, deaths_inhosp, deaths_60d
 print(as.data.frame(nc_results %>% filter(age_form == "linear") %>%
         transmute(cohort, exposure, outcome, n, events,
                   est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
+# =============================================================================
+# 4k. Size decomposition, dose-vs-error equality, and the functional form of the size term
+# =============================================================================
+# At a fixed VT/PBW, delivered strain = VT/PBW x PBW/PFVC, so the ratio is the factor by
+# which estimated strain misstates true strain. PFVC on its own has no such meaning:
+# with VT/PBW in the model and PBW absent, log PFVC = log PBW - log(PBW/PFVC), so the
+# PFVC coefficient mixes the strain-error effect with an absolute-size effect (PBW, i.e.
+# height at a fixed per-kg dose). This section fits both channels at once, on the log
+# scale, in the analytic cohort:
+#     outcome ~ log(VT/PBW) + log(PBW/PFVC) + log(PBW) + age + sex + race + SOFA + SF
+# (A) DECOMPOSITION: the coefficient on log(PBW/PFVC) is the strain-error effect at a fixed
+#     absolute size; on log(PBW) the absolute-size effect at a fixed error and dose. The
+#     model nests "VT/PBW + PFVC" exactly. Fit under linear and spline age.
+# (B) DOSE-vs-ERROR EQUALITY: log strain = log(VT/PBW) + log(PBW/PFVC), so if strain is
+#     what matters a unit of mis-sizing is as harmful as a unit of per-kg dose: test
+#     beta(log VT/PBW) = beta(log PBW/PFVC) (Wald), and the locked model log(VT/PFVC)
+#     against the separate one (LRT). Also the log(VT/PBW) x log(PBW/PFVC) interaction: a
+#     pure multiplicative strain model predicts none on the log-odds scale. VT/PBW is
+#     protocol-restricted to 6-8 mL/kg here, so these are low-powered by design.
+# (C) FUNCTIONAL FORM of the size term: VT/PBW + f(PFVC), f in {linear, log, 1/x}, and
+#     the ratio linear vs log, same covariates -- closes the "1/PFVC vs PFVC" question with
+#     an AIC. In a log-linear model 1/x is a sign flip of log x; on the natural scale they
+#     differ, and the ladder says whether that matters.
+# Outcomes: in-hospital death (logistic) and 60-day death (Cox). Estimates per SD of the
+# log-exposure so the two channels are on one scale.
+sz <- cross_sectional %>%
+  filter(vtpbw > 0, pbwpfvc > 0, pbw > 0, pfvc > 0, !is.na(sofa_total), !is.na(sf10)) %>%
+  mutate(l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_pbw = log(pbw), l_pfvc = log(pfvc),
+         l_vtpfvc = log(vtpfvc), inv_pfvc = 1 / pfvc)
+sz_sd <- sz %>% summarise(across(c(l_vtpbw, l_ratio, l_pbw, l_pfvc, l_vtpfvc), sd))
+sz <- sz %>% mutate(across(c(l_vtpbw, l_ratio, l_pbw, l_pfvc, l_vtpfvc), ~ .x / sd(.x)))   # per SD
+sz_age <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
+sz_base <- "sex_category + race_category + sofa_total + sf10"
+sz_fit <- function(rhs, outcome) {
+  if (outcome == "In-hospital mortality")
+    glm(as.formula(paste("deceased ~", rhs)), data = sz, family = binomial)
+  else survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)),
+                       data = sz %>% filter(!is.na(surv_time), surv_time > 0))
+}
+sz_coef <- function(fit, term, outcome) {
+  cf <- if (inherits(fit, "coxph")) summary(fit)$coefficients else summary(fit)$coefficients
+  est <- if (inherits(fit, "coxph")) cf[term, "coef"] else cf[term, "Estimate"]
+  se  <- if (inherits(fit, "coxph")) cf[term, "se(coef)"] else cf[term, "Std. Error"]
+  tibble(term = term, estimate = exp(est), conf_low = exp(est - 1.96 * se), conf_high = exp(est + 1.96 * se),
+         std_error = se, p_value = cf[term, ncol(cf)],
+         estimate_type = if (inherits(fit, "coxph")) "HR" else "OR")
+}
+# each outcome runs only where it has >= 10 events (the synthetic site has none in-hospital)
+sz_events <- c("In-hospital mortality" = sum(sz$deceased == 1, na.rm = TRUE),
+               "60-day mortality" = sum(sz$mortality_event_60 == 1, na.rm = TRUE))
+sz_outcomes <- names(sz_events)[sz_events >= 10]
+sz_ok <- length(sz_outcomes) >= 1 && nrow(sz) >= 100
+
+if (sz_ok) {
+  # --- (A) decomposition ----------------------------------------------------------------
+  size_decomp <- map_dfr(sz_outcomes, function(oc) map_dfr(names(sz_age), function(af) {
+    cov <- paste(sz_age[[af]], "+", sz_base)
+    f_dec <- sz_fit(paste("l_vtpbw + l_ratio + l_pbw +", cov), oc)
+    f_pf  <- sz_fit(paste("l_vtpbw + l_pfvc +", cov), oc)            # the nested "VT/PBW + PFVC"
+    bind_rows(
+      map_dfr(c("l_vtpbw", "l_ratio", "l_pbw"), ~ sz_coef(f_dec, .x, oc)) %>% mutate(model = "log VT/PBW + log PBW/PFVC + log PBW"),
+      map_dfr(c("l_vtpbw", "l_pfvc"), ~ sz_coef(f_pf, .x, oc)) %>% mutate(model = "log VT/PBW + log PFVC")) %>%
+      mutate(outcome = oc, age_form = af, n = nobs(f_dec), aic = AIC(f_dec), .before = 1)
+  })) %>%
+  mutate(term_label = recode(term, l_vtpbw = "log VT/PBW (dose)", l_ratio = "log PBW/PFVC (strain error)",
+                             l_pbw = "log PBW (absolute size)", l_pfvc = "log PFVC"),
+         scale = "per SD of the log exposure", site = site_name)
+  write_csv(size_decomp, file.path(final_dir, paste0("size_decomposition_", site_name, ".csv")))
+
+  # --- (B) dose-vs-error equality + interaction -----------------------------------------
+  size_equal <- map_dfr(sz_outcomes, function(oc) map_dfr(names(sz_age), function(af) {
+    cov <- paste(sz_age[[af]], "+", sz_base)
+    # equality is tested on the RAW log scale (same units on both sides), so refit unscaled
+    raw <- sz %>% mutate(r_vtpbw = l_vtpbw * sz_sd$l_vtpbw, r_ratio = l_ratio * sz_sd$l_ratio,
+                         r_strain = r_vtpbw + r_ratio)
+    fit_raw <- function(rhs) {
+      if (oc == "In-hospital mortality") glm(as.formula(paste("deceased ~", rhs)), data = raw, family = binomial)
+      else survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)),
+                           data = raw %>% filter(!is.na(surv_time), surv_time > 0))
+    }
+    f_sep <- fit_raw(paste("r_vtpbw + r_ratio + l_pbw +", cov))
+    f_lock <- fit_raw(paste("r_strain + l_pbw +", cov))
+    f_int <- fit_raw(paste("r_vtpbw * r_ratio + l_pbw +", cov))
+    b <- coef(f_sep); V <- vcov(f_sep)
+    d <- unname(b["r_vtpbw"] - b["r_ratio"]); v <- V["r_vtpbw", "r_vtpbw"] + V["r_ratio", "r_ratio"] - 2 * V["r_vtpbw", "r_ratio"]
+    lrt_lock <- 2 * (as.numeric(logLik(f_sep)) - as.numeric(logLik(f_lock)))
+    lrt_int  <- 2 * (as.numeric(logLik(f_int)) - as.numeric(logLik(f_sep)))
+    bi <- coef(f_int); Vi <- vcov(f_int); it <- grep(":", names(bi), value = TRUE)[1]
+    tibble(outcome = oc, age_form = af, n = nobs(f_sep),
+           beta_log_vtpbw = unname(b["r_vtpbw"]), beta_log_ratio = unname(b["r_ratio"]),
+           diff_dose_minus_error = d, diff_se = sqrt(v), wald_p_equal = 2 * pnorm(-abs(d / sqrt(v))),
+           lrt_locked_vs_separate = lrt_lock, lrt_locked_p = pchisq(lrt_lock, 1, lower.tail = FALSE),
+           aic_separate = AIC(f_sep), aic_locked = AIC(f_lock),
+           interaction_beta = unname(bi[it]), interaction_se = sqrt(Vi[it, it]),
+           lrt_interaction = lrt_int, lrt_interaction_p = pchisq(lrt_int, 1, lower.tail = FALSE),
+           vtpbw_range = paste(signif(range(sz$vtpbw), 3), collapse = "-"))
+  })) %>% mutate(scale = "raw log exposures (per log unit)", site = site_name)
+  write_csv(size_equal, file.path(final_dir, paste0("size_dose_error_equality_", site_name, ".csv")))
+
+  # --- (C) functional-form ladder for the size term -------------------------------------
+  sz_forms <- c("PFVC (linear)" = "pfvc", "log PFVC" = "l_pfvc", "1/PFVC" = "inv_pfvc",
+                "PBW/PFVC (linear)" = "pbwpfvc", "log PBW/PFVC" = "l_ratio",
+                "log PBW/PFVC + log PBW" = "l_ratio + l_pbw")
+  size_form <- map_dfr(sz_outcomes, function(oc) map_dfr(names(sz_age), function(af) {
+    cov <- paste(sz_age[[af]], "+", sz_base)
+    aics <- map_dbl(sz_forms, ~ AIC(sz_fit(paste("vtpbw +", .x, "+", cov), oc)))
+    tibble(outcome = oc, age_form = af, size_term = names(sz_forms), rhs = paste("vtpbw +", unname(sz_forms)),
+           AIC = aics, delta_AIC_vs_linear_pfvc = aics - aics[["PFVC (linear)"]], n = nrow(sz))
+  })) %>% mutate(site = site_name)
+  write_csv(size_form, file.path(final_dir, paste0("size_functional_form_", site_name, ".csv")))
+
+  cat("\n--- 4k(A) size decomposition: per-SD OR/HR (linear age | spline age) ---\n")
+  print(as.data.frame(size_decomp %>% filter(model == "log VT/PBW + log PBW/PFVC + log PBW") %>%
+          transmute(outcome, age_form, term_label, est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))),
+        row.names = FALSE)
+  cat("--- 4k(B) dose-vs-error equality (beta log VT/PBW vs beta log PBW/PFVC) and interaction ---\n")
+  print(as.data.frame(size_equal %>% transmute(outcome, age_form, b_dose = round(beta_log_vtpbw, 2),
+          b_error = round(beta_log_ratio, 2), p_equal = signif(wald_p_equal, 2), p_locked = signif(lrt_locked_p, 2),
+          p_interaction = signif(lrt_interaction_p, 2))), row.names = FALSE)
+  cat("--- 4k(C) functional form of the size term (delta AIC vs linear PFVC; negative = better) ---\n")
+  print(as.data.frame(size_form %>% transmute(outcome, age_form, size_term, dAIC = round(delta_AIC_vs_linear_pfvc, 1))),
+        row.names = FALSE)
+} else {
+  message("4k skipped: no outcome with >= 10 events, or fewer than 100 complete rows in the analytic cohort")
+}
 message("All outputs saved to: ", final_dir)
 message("Script 04 complete.")
