@@ -8,6 +8,9 @@
 #                               PFVC-anchored vs PBW-anchored VT ceiling (bite-matched), the
 #                               cap-on-top secondary, and the weight-refit bootstrap that is
 #                               the primary interval (PBWPFVC_TTE_EXPO_FAMILY=vt)
+#   11_vtpbw_titration.R        CO-PRIMARY: one-step titration toward the PFVC-anchored target
+#                               (bounded modified treatment policy, LMTP); the plain additive
+#                               shift is its sensitivity (PBWPFVC_VT_POLICY=additive)
 #   11.A_primary.R              strain-limiting (VT/PFVC <= 11%) vs permissive (<= 16%) ceiling
 #   11.B_diagnostics.R          its diagnostics
 #   11.X_discordance_benefit.R  its discordance-HTE reads
@@ -27,6 +30,7 @@ Sys.setenv(PBWPFVC_TTE_EXPO_FAMILY = "vt")
 
 leaves <- c(
   "11.M_ceiling_tte.R",
+  "11_vtpbw_titration.R",
   "11.A_primary.R",
   "11.B_diagnostics.R",
   "11.X_discordance_benefit.R")

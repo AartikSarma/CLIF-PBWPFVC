@@ -447,11 +447,18 @@ arm_build <- function(ceiling, grace = GRACE, cap = DAYW_CAP, rule = "simple",
   # which then requires V in the MSM). "baseline" (V in the numerator) is retained for
   # the 10k consistency check. ESS is near-identical between the two (10k), so time_only
   # costs ~nothing in efficiency while keeping subgroups/bootstrap on the cheap marginal MSM.
+  # Age enters the weight models as a natural cubic spline (4 df), never linearly: the
+  # exposures are deterministic in age through the GLI equations, so a linear age term
+  # leaves a curved residual correlated with adherence to any PFVC-anchored ceiling, and
+  # the cross-sectional models showed that residual masquerading as a size effect. The
+  # same spline is used in the "baseline" numerator so the two specifications differ only
+  # in where V sits, not in how age is modeled.
+  AGE_TERM <- "ns(age10, 4)"
   num_rhs <- if (identical(num_spec, "time_only")) "ns(vent_day, 3)" else
-    "ns(vent_day, 3) + age10 + sex_category + race_category + sofa_total"
+    paste("ns(vent_day, 3) +", AGE_TERM, "+ sex_category + race_category + sofa_total")
   num <- glm(as.formula(paste("viol ~", num_rhs)), data = fr, family = binomial)
   den_rhs <- paste("ns(vent_day, 3) + l_expo + l_fio2 + l_peep + l_rr +", sf_term, "+ l_map +",
-                   "l_pressor + age10 + sex_category + race_category + sofa_total",
+                   "l_pressor +", AGE_TERM, "+ sex_category + race_category + sofa_total",
                    if (!is.null(conf) && conf_in_model) "+ l_conf" else "")
   den <- glm(as.formula(paste("viol ~", den_rhs)), data = fr, family = binomial)
   p <- p %>% mutate(

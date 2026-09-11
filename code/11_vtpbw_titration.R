@@ -1,34 +1,37 @@
 # =============================================================================
-# Script 11_vtpbw_titration: CATE of an ADDITIVE VT/PBW titration MTP, by discordance + PFVC
+# Script 11_vtpbw_titration: CO-PRIMARY TTE -- a one-step titration TOWARD PFVC dosing (LMTP)
 # =============================================================================
-# The bedside-DIRECT titration sibling to 11.X. 11.X is a clone-censor-weight TTE of a VT/PFVC
-# strain-limiting CEILING. This leaf studies the intervention a clinician actually performs on the
-# yardstick they actually use: "turn the tidal volume down half a click" -- an additive
-# MODIFIED TREATMENT POLICY, VT/PBW -> VT/PBW - DELTA (default 0.5 mL/kg PBW), estimated by
-# doubly-robust LMTP, with CATE by two PFVC-derived modifiers (PBW/PFVC discordance; PFVC).
+# The head-to-head ceiling TTE (11_ceiling_*) is the primary: two prescribable protocols. This
+# leaf is its co-primary and the bedside-intuitive version of the same question, estimated by
+# doubly-robust LMTP as a MODIFIED TREATMENT POLICY on the yardstick clinicians use (VT/PBW):
 #
-# WHY THIS POLICY, FOR THE TITRATION OBJECTIVE:
-#  * IDENTIFIABLE where a VT/PBW CEILING is not. VT/PBW is protocolized to ~6-8 in the data (no
-#    static dose contrast), but a -DELTA *shift* stays inside observed support (~5.5-7.5), so the
-#    feasible-MTP positivity holds. This is the modified-treatment-policy positivity workaround.
-#  * NORMALIZER-DEPENDENT geometry => it targets the misdosed for free. A fixed -DELTA mL/kg PBW
-#    removes DELTA x (PBW/PFVC) = DELTA x discordance of true (PFVC-normalized) strain, so the
-#    discordant get the bigger strain cut -- the same gradient mechanism as the 11.X ceiling.
-#  * LESS severity-confounded than the MP sibling (11.Y): VT/PBW is protocolized, so it carries
-#    little severity-driven variation, unlike MP (which carries RR + airway pressures).
+#   step_to_pfvc (PRIMARY policy): on each ventilated day, if the delivered VT/PBW is above the
+#       patient's PFVC-anchored target, turn it down by at most DELTA mL/kg PBW toward that
+#       target; patients already at or below their target are untouched. The target is the
+#       bite-matched PFVC ceiling of the head-to-head (TAU_PFVC % of predicted FVC, the same
+#       quantile rule as 11_ceiling_common; PBWPFVC_VT_TARGET_PFVC overrides, e.g. 11 = ARMA),
+#       expressed per patient on the VT/PBW scale: target_i = TAU_PFVC x 10 x PFVC_i / PBW_i.
+#       This IS "dose toward PFVC" as a feasible shift: it acts only where PBW over-doses, by an
+#       amount bounded by DELTA so the shifted value stays inside observed support (the MTP
+#       positivity condition), and it leaves concordant patients alone.
+#   additive (sensitivity): VT/PBW -> max(VT/PBW - DELTA, FLOOR) for everyone -- the plain
+#       "half a click down" shift. It answers "does a small VT reduction help?", with the
+#       normalizer entering only through the discordance gradient; kept as the sensitivity
+#       that separates "toward PFVC" from "less VT for all".
 #
-# READING IT (titration is the objective; the PHYSIOLOGIC case is made separately in 05). Per 11.Z
-# discordance is ~deterministic in demographics (R^2~0.99), so "the misdosed" = the demographic
-# groups PBW over-doses -- the targeting is demographically PATTERNED (the equity reading), NOT a
-# claim of orthogonal physiology. Confounding-by-severity inflates the ATE *level*, so read the
-# discordance GRADIENT (which a uniform severity bias does not generate), not the level.
+# WHY A SHIFT AND NOT A STATIC TARGET: VT/PFVC is near-deterministic in demographics, so a static
+# "everyone <= 11%" contrast has no overlap (the cross-sectional positivity wall). A bounded step
+# stays in support by construction; the density-ratio trim and the ATE-width warning below are
+# the positivity diagnostics. Per 11.Z the discordance gradient is demographically patterned
+# (who is re-dosed), not a mechanism claim.
 #
-# Design = the validated 12.D/F LMTP estimator (binomial, mtp=TRUE; shift bites only on
-# on-vent-and-alive days; 28-day all-cause mortality). CATE via the DR-learner (Kennedy): DR
-# pseudo-outcome per patient, ITE = pseudo(shift) - pseudo(natural) (mean = ATE/RD), regress on a
-# spline of the log-modifier -> CATE(modifier) + per-log slope + p90-p10 gradient (bootstrap CI).
-# Standalone supplement -- NOT in 11_run_all. Synthetic mortality is simulated => plumbing only.
-# Env: PBWPFVC_VT_{DELTA,FLOOR,HORIZON,FOLDS,LEARNERS,BOOT}.
+# Estimator: lmtp_tmle (binomial, mtp = TRUE; shift bites only on on-vent-and-alive days; 28-day
+# all-cause mortality); CATE by discordance and PFVC via the DR-learner (Kennedy): per-patient DR
+# pseudo-outcome, ITE = pseudo(shift) - pseudo(natural), spline of the log-modifier -> continuous
+# CATE, per-log slope and p90-p10 gradient (bootstrap CI). Age enters every nuisance model as
+# ns(age10, 4). In 11_run_all as the co-primary. Synthetic mortality is simulated => plumbing only.
+# Env: PBWPFVC_VT_POLICY (step_to_pfvc|additive), PBWPFVC_VT_TARGET_PFVC, PBWPFVC_CEIL_BITE,
+# PBWPFVC_VT_{DELTA,FLOOR,HORIZON,FOLDS,LEARNERS,BOOT}.
 # =============================================================================
 library(here); library(lmtp); library(splines); library(patchwork)
 # lmtp reports progress via progressr, OFF by default -> enable a handler so the per-fold/timepoint
@@ -39,7 +42,8 @@ if (!identical(Sys.getenv("PBWPFVC_PROGRESS", "1"), "0") && requireNamespace("pr
 }
 source(here::here("code", "10_tte_engine.R"))
 
-DELTA <- as.numeric(Sys.getenv("PBWPFVC_VT_DELTA", "0.5"))    # ADDITIVE cut, mL/kg PBW (half a click)
+POLICY <- Sys.getenv("PBWPFVC_VT_POLICY", "step_to_pfvc"); stopifnot(POLICY %in% c("step_to_pfvc", "additive"))
+DELTA <- as.numeric(Sys.getenv("PBWPFVC_VT_DELTA", "0.5"))    # maximum step, mL/kg PBW (half a click)
 FLOOR <- as.numeric(Sys.getenv("PBWPFVC_VT_FLOOR", "4.0"))    # never reduce VT/PBW below this (feasible MTP)
 K     <- as.integer(Sys.getenv("PBWPFVC_VT_HORIZON", "14"))
 FOLDS <- as.integer(Sys.getenv("PBWPFVC_VT_FOLDS", "5"))
@@ -79,6 +83,11 @@ vtd <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet"
   summarise(vt = median(tidal_volume_set), pbw = first(pbw), .groups = "drop") %>%
   transmute(hospitalization_id, vent_day, A = log(vt / pbw)) %>% filter(is.finite(A))   # log(mL/kg)
 
+# PFVC-anchored target: the head-to-head's bite-matched ceiling (same rule as 11_ceiling_common:
+# the (1 - BITE) quantile of daily VT/PFVC over post-grace patient-days), unless overridden.
+BITE <- as.numeric(Sys.getenv("PBWPFVC_CEIL_BITE", "0.25"))
+TAU_ENV <- suppressWarnings(as.numeric(Sys.getenv("PBWPFVC_VT_TARGET_PFVC", unset = NA)))
+TAU_PFVC <- if (is.finite(TAU_ENV)) TAU_ENV else unname(quantile(panel$vtpfvc[panel$vent_day > GRACE], 1 - BITE))
 state <- panel %>% select(hospitalization_id, vent_day, sf, map, on_pressor)
 demo  <- base %>% select(hospitalization_id, age10, sex_category, race_category,
                          height_grp, sofa_total, death_day, imv_extub_day)
@@ -94,6 +103,9 @@ bad <- long %>% filter(is.na(A) | is.na(sf) | is.na(map)) %>% pull(hospitalizati
 long <- long %>% filter(!hospitalization_id %in% bad)
 
 mods <- base %>% transmute(hospitalization_id, discord = pbw / pfvc, pfvc = pfvc,
+                           # the patient's PFVC-anchored target on the VT/PBW scale (mL/kg):
+                           # VT/PFVC% = VT/PFVC x 0.1  =>  VT/PBW = VT/PFVC% x 10 x PFVC/PBW
+                           vt_target = TAU_PFVC * 10 * pfvc / pbw,
                            Y = as.integer(!is.na(death_day) & death_day <= 28)) %>%
   filter(!is.na(discord), !is.na(pfvc))
 wide <- long %>%
@@ -102,24 +114,47 @@ wide <- long %>%
   pivot_wider(id_cols = c(hospitalization_id, age10, sex_category, race_category, height_grp, sofa_total),
               names_from = vent_day, values_from = c(A, sf, map, on_pressor, exposed), names_sep = "_") %>%
   inner_join(mods, by = "hospitalization_id") %>% as.data.frame()
-cat(sprintf("11_vtpbw: %d patients; PBW/PFVC discordance median %.2f, PFVC median %.2f L; ADDITIVE delta %.2f mL/kg, floor %.1f, K %d, folds %d\n",
-            nrow(wide), median(wide$discord), median(wide$pfvc), DELTA, FLOOR, K, FOLDS))
+cat(sprintf("11_vtpbw [%s]: %d patients; PBW/PFVC discordance median %.2f, PFVC median %.2f L; PFVC target %.1f%% (VT/PBW-scale target median %.2f mL/kg); step %.2f mL/kg, floor %.1f, K %d, folds %d\n",
+            POLICY, nrow(wide), median(wide$discord), median(wide$pfvc), TAU_PFVC, median(wide$vt_target), DELTA, FLOOR, K, FOLDS))
 
-base_cov <- c("age10", "sex_category", "race_category", "height_grp", "sofa_total")
+# age enters the nuisance models as a natural cubic spline: lmtp takes column names, so the
+# basis is materialized as columns (fixed knots from the analytic cohort)
+age_basis <- splines::ns(wide$age10, 4); for (j in 1:4) wide[[paste0("age_ns", j)]] <- age_basis[, j]
+# vt_target is a baseline covariate: the shift depends on it, and lmtp hands the shift
+# function only the model columns (a non-model column comes back NULL and empties the shift)
+base_cov <- c(paste0("age_ns", 1:4), "sex_category", "race_category", "height_grp", "sofa_total", "vt_target")
 tv <- lapply(1:K, function(t) paste0(c("sf", "map", "on_pressor", "exposed"), "_", t))
 trt <- paste0("A_", 1:K)
-# ADDITIVE (normalizer-DEPENDENT) MTP: VT/PBW -> max(VT/PBW - DELTA, FLOOR), on the log scale the
-# treatment density learners see. A fixed PBW-normalized decrement = a larger true (VT/PFVC) strain
-# cut in the misdosed, by DELTA x (PBW/PFVC). Floored so already-low days are untouched.
+# The policy on the VT/PBW scale (mL/kg), applied on the log scale the density learners see.
+#   step_to_pfvc: A' = max(FLOOR, max(A - DELTA, min(A, target)))  -- down by at most DELTA, never
+#                 below the patient's PFVC target, untouched if already at or below it
+#   additive:     A' = max(A - DELTA, FLOOR) for everyone
+apply_policy <- function(a, target) {
+  if (POLICY == "step_to_pfvc") pmax(FLOOR, pmax(a - DELTA, pmin(a, target))) else pmax(a - DELTA, FLOOR)
+}
 shift_fun <- function(data, t) { i <- sub("^A_", "", t); ex <- data[[paste0("exposed_", i)]]
-  out <- data[[t]]; reduced <- log(pmax(exp(out) - DELTA, FLOOR))
+  out <- data[[t]]; reduced <- log(apply_policy(exp(out), data[["vt_target"]]))
   out[ex == 1L] <- reduced[ex == 1L]; out }
-# realized intervention intensity (audit the feasible-MTP bite): mean cut + fraction floor-bound
-.exp_days <- long %>% filter(exposed == 1L) %>% mutate(raw = exp(A))
-cat(sprintf("    realized cut: median VT/PBW %.2f -> %.2f mL/kg; mean reduction %.1f%%; %.1f%% of exposed days hit the floor\n",
-            median(.exp_days$raw), median(pmax(.exp_days$raw - DELTA, FLOOR)),
-            100 * mean(1 - pmax(.exp_days$raw - DELTA, FLOOR) / .exp_days$raw),
-            100 * mean(.exp_days$raw - DELTA < FLOOR)))
+# realized intervention intensity (audit the feasible-MTP bite)
+.exp_days <- long %>% filter(exposed == 1L) %>%
+  inner_join(mods %>% select(hospitalization_id, vt_target, discord), by = "hospitalization_id") %>%
+  mutate(raw = exp(A), shifted = apply_policy(raw, vt_target), binds = shifted < raw - 1e-9,
+         reaches_target = POLICY == "step_to_pfvc" & binds & shifted <= vt_target + 1e-9)
+bite_tbl <- .exp_days %>%
+  mutate(disc_grp = cut(discord, quantile(discord, c(0, 1/3, 2/3, 1)), include.lowest = TRUE,
+                        labels = c("Concordant", "Mid", "Discordant"))) %>%
+  group_by(disc_grp) %>%
+  summarise(n_days = n(), frac_days_shifted = mean(binds), mean_cut_mlkg = mean(raw - shifted),
+            frac_shifted_days_reaching_target = if (any(binds)) mean(reaches_target[binds]) else NA_real_,
+            median_vtpbw = median(raw), median_target = median(vt_target), .groups = "drop") %>%
+  mutate(policy = POLICY, tau_pfvc = TAU_PFVC, delta = DELTA, site = site_name)
+write_csv(bite_tbl, file.path(final_dir, paste0("vtpbw_titration_bite_", site_name, ".csv")))
+cat(sprintf("    realized cut: %.1f%% of exposed days shifted; median VT/PBW %.2f -> %.2f mL/kg; mean cut %.2f mL/kg; %.1f%% of shifted days reach the PFVC target in one step\n",
+            100 * mean(.exp_days$binds), median(.exp_days$raw), median(.exp_days$shifted),
+            mean(.exp_days$raw - .exp_days$shifted),
+            100 * mean(.exp_days$reaches_target[.exp_days$binds])))
+print(as.data.frame(bite_tbl %>% transmute(disc_grp, n_days, pct_shifted = round(100 * frac_days_shifted), mean_cut = round(mean_cut_mlkg, 2),
+        pct_reach_target = round(100 * frac_shifted_days_reaching_target))), row.names = FALSE)
 
 args <- list(data = wide, trt = trt, outcome = "Y", baseline = base_cov, time_vary = tv,
              mtp = TRUE, outcome_type = "binomial", learners_outcome = LRN, learners_trt = LRN_TRT,
@@ -135,8 +170,13 @@ ate <- lmtp_contrast(fs, ref = fo, type = "additive")$estimates
 
 ite <- (fs$estimate@x + fs$estimate@eif) - (fo$estimate@x + fo$estimate@eif)
 stopifnot(length(ite) == nrow(wide))
-cat(sprintf("    ATE (VT/PBW -%.2f mL/kg additive titration): risk_natural %.1f%% (CANARY ~27-32 real), RD %+.2f pp [%.2f, %.2f]\n",
-            DELTA, 100 * ate$ref, 100 * ate$estimate, 100 * ate$conf.low, 100 * ate$conf.high))
+cat(sprintf("    ATE [%s, step <= %.2f mL/kg]: risk_natural %.1f%% (CANARY ~27-32 real), RD %+.2f pp [%.2f, %.2f]\n",
+            POLICY, DELTA, 100 * ate$ref, 100 * ate$estimate, 100 * ate$conf.low, 100 * ate$conf.high))
+write_csv(tibble(policy = POLICY, tau_pfvc = TAU_PFVC, delta = DELTA, floor = FLOOR, horizon_days = K,
+                 n_patients = nrow(wide), risk_natural = ate$ref, risk_policy = ate$ref + ate$estimate,
+                 rd = ate$estimate, rd_lo = ate$conf.low, rd_hi = ate$conf.high, rd_se = ate$std.error,
+                 frac_exposed_days_shifted = mean(.exp_days$binds), site = site_name),
+          file.path(final_dir, paste0("vtpbw_titration_ate_", site_name, ".csv")))
 if (abs(ate$conf.high - ate$conf.low) > 0.40)
   message("  WARNING: ATE CI width ", round(100 * (ate$conf.high - ate$conf.low)), "pp -- VT/PBW shift still poorly identified ",
           "(positivity: protocolized treatment). Read as 'no estimable PBW-scale contrast', not a result.")
@@ -186,9 +226,9 @@ cate_one <- function(mod, lab) {
 }
 ct_disc <- cate_one("discord", "PBW/PFVC discordance")
 ct_pfvc <- cate_one("pfvc",    "PFVC (predicted size, L)")
-cate_tbl <- bind_rows(ct_disc$tbl, ct_pfvc$tbl)
+cate_tbl <- bind_rows(ct_disc$tbl, ct_pfvc$tbl) %>% mutate(policy = POLICY, site = site_name)
 write_csv(cate_tbl, file.path(final_dir, paste0("vtpbw_titration_cate_", site_name, ".csv")))
-slope_tbl <- bind_rows(ct_disc$slope, ct_pfvc$slope)
+slope_tbl <- bind_rows(ct_disc$slope, ct_pfvc$slope) %>% mutate(policy = POLICY, site = site_name)
 write_csv(slope_tbl, file.path(final_dir, paste0("vtpbw_titration_slope_", site_name, ".csv")))
 
 # --- figure: one panel per modifier, ATE reference line ---------------------------------------
@@ -199,18 +239,18 @@ mk_panel <- function(ct, xlab) {
     geom_hline(yintercept = 0, colour = "grey80") +
     geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, fill = "#0072B2") +
     geom_line(colour = "#0072B2", linewidth = 1) +
-    labs(x = xlab, y = sprintf("CATE: 28-d mortality RD of VT/PBW -%.2f mL/kg (pp)", DELTA), title = ct$fig$modifier[1]) +
+    labs(x = xlab, y = sprintf("CATE: 28-d mortality RD of the %s policy (pp)", POLICY), title = ct$fig$modifier[1]) +
     theme_minimal(base_size = 11)
 }
 fig <- mk_panel(ct_disc, "PBW/PFVC discordance - higher = PBW oversizes (PFVC says smaller)") +
   mk_panel(ct_pfvc, "PFVC (L) - lower = smaller predicted lung") +
   patchwork::plot_annotation(
-    title = paste0("CATE of an ADDITIVE VT/PBW titration (-", DELTA, " mL/kg), by PFVC-derived modifiers - ", site_name,
+    title = paste0("CATE of the ", POLICY, " titration (step <= ", DELTA, " mL/kg PBW), by PFVC-derived modifiers - ", site_name,
                    if (is_synthetic) " (SYNTHETIC)" else ""),
     subtitle = "Dashed = ATE; negative = benefit. Down-slope (left) = a fixed bedside VT/PBW cut helps most where PBW over-doses the lung (normalizer-dependent).")
 ggsave(file.path(final_dir, paste0("vtpbw_titration_cate_", site_name, ".pdf")), fig, width = 12, height = 5)
 
-cat("\n=== 11_vtpbw continuous CATE of an ADDITIVE VT/PBW titration, by PFVC-derived modifiers ===\n")
+cat(sprintf("\n=== 11_vtpbw [%s] continuous CATE by PFVC-derived modifiers ===\n", POLICY))
 cat("--- effect-modification trends (read the SHAPE, not the level: confounding-by-severity inflates the ATE) ---\n")
 print(as.data.frame(slope_tbl), row.names = FALSE)
 cat("    (discordance grad_p90_minus_p10 MORE NEGATIVE => the misdosed gain more from a fixed bedside VT/PBW cut;\n")
