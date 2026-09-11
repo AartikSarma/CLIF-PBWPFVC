@@ -412,6 +412,50 @@ nc_sf <- nc_fio2_dt[nc_spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, fio2
          hypox_obs = spo2 < 80 | (spo2 <= 97 & sf < 315)) %>%
   summarize(n_spo2 = n(), hypoxemic = any(hypox_obs), min_sf = min(sf), .by = hospitalization_id)
 
+# The ventilated control is valid only if the patient stayed non-hypoxemic for the
+# WHOLE ventilated period, and the SpO2-based rule above cannot see hypoxemia masked
+# by a high FiO2 (SpO2 99% on FiO2 0.60 yields no computable SF). So, over the IMV
+# rows of the waterfall (these patients are in the IMV cohort): every SpO2 must give
+# SF >= 315, no PaO2/FiO2 may fall below 300, and FiO2 may never exceed 0.40. IMV
+# without any documented FiO2 is unclassifiable (NA) and excluded from the control.
+imv_rows <- resp_waterfall %>%
+  filter(device_category == "imv", !is.na(recorded_dttm)) %>%
+  transmute(hospitalization_id, t = as.numeric(recorded_dttm), fio2_set)
+imv_span <- imv_rows %>% summarize(t_start = min(t), t_end = max(t),
+                                   fio2_documented = any(!is.na(fio2_set)),
+                                   max_fio2 = suppressWarnings(max(fio2_set, na.rm = TRUE)), .by = hospitalization_id)
+imv_fio2_dt <- imv_rows %>% filter(!is.na(fio2_set)) %>% rename(fio2_t = t) %>% as.data.table()
+setkey(imv_fio2_dt, hospitalization_id, fio2_t)
+vent_spo2 <- cohort_spo2 %>%
+  transmute(hospitalization_id, spo2_t = as.numeric(recorded_dttm), spo2 = spo2_value) %>%
+  filter(!is.na(spo2), spo2 >= 50, spo2 <= 100) %>%
+  inner_join(imv_span, by = "hospitalization_id") %>%
+  filter(spo2_t >= t_start, spo2_t <= t_end) %>%
+  select(hospitalization_id, spo2_t, spo2) %>% as.data.table()
+setkey(vent_spo2, hospitalization_id, spo2_t)
+vent_spo2 <- imv_fio2_dt[vent_spo2, roll = 4 * 3600, on = .(hospitalization_id, fio2_t = spo2_t)] %>%
+  as_tibble() %>%
+  summarize(spo2_hypox = any(spo2 < 80 | (spo2 <= 97 & !is.na(fio2_set) & spo2 / fio2_set < 315)),
+            .by = hospitalization_id)
+vent_pao2 <- clif_labs %>%
+  filter(lab_category == "po2_arterial", hospitalization_id %in% imv_span$hospitalization_id) %>%
+  transmute(hospitalization_id, pao2_t = as.numeric(lab_result_dttm), pao2 = as.numeric(lab_value)) %>%
+  filter(!is.na(pao2), !is.na(pao2_t)) %>%
+  inner_join(imv_span, by = "hospitalization_id") %>%
+  filter(pao2_t >= t_start, pao2_t <= t_end) %>%
+  select(hospitalization_id, pao2_t, pao2) %>% as.data.table()
+setkey(vent_pao2, hospitalization_id, pao2_t)
+vent_pao2 <- imv_fio2_dt[vent_pao2, roll = 4 * 3600, on = .(hospitalization_id, fio2_t = pao2_t)] %>%
+  as_tibble() %>%
+  summarize(pf_hypox = any(!is.na(fio2_set) & pao2 / fio2_set < 300), .by = hospitalization_id)
+vent_hypox <- imv_span %>%
+  left_join(vent_spo2, by = "hospitalization_id") %>%
+  left_join(vent_pao2, by = "hospitalization_id") %>%
+  transmute(hospitalization_id, vent_fio2_documented = fio2_documented,
+            hypoxemic_during_vent = case_when(
+              !fio2_documented ~ NA,
+              TRUE ~ coalesce(spo2_hypox, FALSE) | coalesce(pf_hypox, FALSE) | max_fio2 > 0.40))
+
 nc_cohort <- nc_hosp %>%
   left_join(clif_patient, by = "patient_id") %>%
   mutate(race_category = case_when(race_category == "White" ~ "WHITE",
@@ -420,12 +464,16 @@ nc_cohort <- nc_hosp %>%
          deceased = if_else(discharge_category == "Expired", 1L, 0L, missing = 0L)) %>%
   inner_join(nc_sf, by = "hospitalization_id") %>%        # drops patients with no SpO2
   left_join(nc_heights, by = "hospitalization_id") %>%
+  left_join(vent_hypox, by = "hospitalization_id") %>%
   select(hospitalization_id, patient_id, age_at_admission, sex_category, race_category,
          height_cm, admission_dttm, discharge_dttm, death_dttm, deceased,
-         imv_set_vt, hypoxemic, n_spo2, min_sf)
+         imv_set_vt, hypoxemic, hypoxemic_during_vent, vent_fio2_documented, n_spo2, min_sf)
 message("Negative-control frame: ", nrow(nc_cohort), " adult ICU patients with SpO2; ",
         sum(!nc_cohort$hypoxemic & !nc_cohort$imv_set_vt), " non-hypoxemic non-ventilated, ",
-        sum(!nc_cohort$hypoxemic & nc_cohort$imv_set_vt), " non-hypoxemic ventilated")
+        sum(!nc_cohort$hypoxemic & nc_cohort$imv_set_vt &
+              !coalesce(nc_cohort$hypoxemic_during_vent, TRUE)),
+        " ventilated and non-hypoxemic throughout ventilation (",
+        sum(nc_cohort$imv_set_vt & is.na(nc_cohort$hypoxemic_during_vent)), " unclassifiable: no FiO2 during IMV)")
 
 # =============================================================================
 # Save intermediates

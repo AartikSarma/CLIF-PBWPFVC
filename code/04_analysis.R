@@ -1199,35 +1199,47 @@ ggsave(file.path(final_dir, paste0("distribution_pbwpfvc_", site_name, ".pdf")),
 message("PBW:PFVC distribution figure saved")
 
 # =============================================================================
-# 4j. Negative-control cohorts: PBW/PFVC, PFVC and height vs mortality
+# 4j. Negative-control cohorts: PBW/PFVC, PFVC, height (and dose) vs mortality
 # =============================================================================
-# If the PBW/PFVC (or height) association with death is ventilatory, it should be
-# present in the analytic cohort (hypoxemic, ventilated, VT/PBW 6-8) and attenuated
-# or absent where no lung-protective dosing decision was made: non-hypoxemic
-# ventilated adults, and non-hypoxemic non-ventilated adults (script 01 / 03k).
+# The analytic cohort is hypoxemic AND ventilated with PBW-dosed tidal volumes. Two
+# non-hypoxemic cohorts (script 01 / 03k) separate the pathways:
+#   * Ventilated, non-hypoxemic (dosed, uninjured lung): still receives PBW-dosed
+#     tidal volumes, often 8-10 mL/kg because nobody protects an uninjured lung.
+#     A NEGATIVE control for hypoxemia-specific mechanisms and a POSITIVE control
+#     for the dosing pathway: PBW/PFVC harm should persist (or grow) here.
+#   * Not ventilated (no tidal volume): the true no-dose control. A ventilatory
+#     pathway predicts attenuation of PBW/PFVC, PFVC and height here.
 # The three cohorts share ONE adjustment set (age, sex, race) because SOFA and the
 # SF ratio exist only for the analytic cohort; the analytic cohort's fully adjusted
 # estimates live in 4c/4f. Each exposure is standardized by the ANALYTIC cohort's
-# SD so the ORs / HRs are on one scale across cohorts. Outcomes: in-hospital death
-# (logistic) and 60-day all-cause death (Cox). Cells with < 10 deaths are skipped.
+# SD so estimates are on one scale across cohorts. VT/PBW and VT/PFVC are fit in
+# the two ventilated cohorts (the ventilated control's delivered dose comes from
+# 03k). Every model is fit with linear age AND with ns(age, 4): what remains of the
+# ratio after linear age, sex and race is height plus the convex part of the age
+# curve, so a residual ratio effect where height is null is read against the spline.
+# Outcomes: in-hospital death (logistic) and 60-day all-cause death (Cox). Cells
+# with < 10 deaths are skipped; counts under 10 are suppressed in the exports.
 nc_file <- file.path(output_dir, "analysis_negative_control.parquet")
 nc_data <- read_parquet(nc_file) %>%
   select(hospitalization_id, nc_cohort, age_at_admission, sex_category, race_category,
-         height_cm, pbw, pfvc, pfvc_age25, pbwpfvc, deceased, mortality_event_60, surv_time)
+         height_cm, pbw, pfvc, pfvc_age25, pbwpfvc, vtpbw, vtpfvc, deceased, mortality_event_60, surv_time)
+nc_cohort_levels <- c("Hypoxemic, ventilated (analytic)",
+                      "Ventilated, non-hypoxemic (dosed, uninjured lung)",
+                      "Not ventilated (no tidal volume)")
 nc_frames <- bind_rows(
   cross_sectional %>%
-    transmute(hospitalization_id, nc_cohort = "Hypoxemic, ventilated (analytic)",
+    transmute(hospitalization_id, nc_cohort = nc_cohort_levels[1],
               age_at_admission, sex_category, race_category, height_cm, pbw, pfvc, pfvc_age25,
-              pbwpfvc, deceased, mortality_event_60, surv_time),
+              pbwpfvc, vtpbw, vtpfvc, deceased, mortality_event_60, surv_time),
   nc_data) %>%
   mutate(age10 = age_at_admission / 10,
          sex_category  = factor(sex_category,  levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")))
-nc_sd <- cross_sectional %>% summarise(pbwpfvc = sd(pbwpfvc, na.rm = TRUE), pfvc = sd(pfvc, na.rm = TRUE),
-                                       height_cm = sd(height_cm, na.rm = TRUE))
-nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height")
-nc_cohort_levels <- c("Hypoxemic, ventilated (analytic)", "Ventilated, non-hypoxemic",
-                      "Not ventilated, non-hypoxemic")
+nc_sd <- cross_sectional %>%
+  summarise(across(c(pbwpfvc, pfvc, height_cm, vtpbw, vtpfvc), ~ sd(.x, na.rm = TRUE)))
+nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height",
+                  vtpbw = "VT/PBW", vtpfvc = "VT/PFVC")
+nc_age_forms <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
 
 nc_fit_one <- function(df, expo, cohort_lab) {
   d <- df %>% filter(nc_cohort == cohort_lab) %>%
@@ -1235,57 +1247,83 @@ nc_fit_one <- function(df, expo, cohort_lab) {
     filter(is.finite(z))
   n_death <- sum(d$deceased == 1, na.rm = TRUE); n_death60 <- sum(d$mortality_event_60 == 1, na.rm = TRUE)
   out <- tibble()
-  if (nrow(d) >= 50 && n_death >= 10) {
-    m <- glm(deceased ~ z + age10 + sex_category + race_category, data = d, family = binomial)
-    cf <- summary(m)$coefficients["z", ]
-    out <- bind_rows(out, tibble(outcome = "In-hospital mortality", estimate_type = "OR",
-      estimate = exp(cf["Estimate"]), conf_low = exp(cf["Estimate"] - 1.96 * cf["Std. Error"]),
-      conf_high = exp(cf["Estimate"] + 1.96 * cf["Std. Error"]), std_error = cf["Std. Error"],
-      p_value = cf["Pr(>|z|)"], n = nrow(d), events = n_death))
-  }
-  if (nrow(d) >= 50 && n_death60 >= 10) {
-    d60 <- d %>% filter(!is.na(surv_time), surv_time > 0)
-    m <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z + age10 + sex_category + race_category, data = d60)
-    cf <- summary(m)$coefficients["z", ]
-    out <- bind_rows(out, tibble(outcome = "60-day mortality", estimate_type = "HR",
-      estimate = cf["exp(coef)"], conf_low = exp(cf["coef"] - 1.96 * cf["se(coef)"]),
-      conf_high = exp(cf["coef"] + 1.96 * cf["se(coef)"]), std_error = cf["se(coef)"],
-      p_value = cf["Pr(>|z|)"], n = nrow(d60), events = n_death60))
+  for (af in names(nc_age_forms)) {
+    rhs <- paste("z +", nc_age_forms[[af]], "+ sex_category + race_category")
+    if (nrow(d) >= 50 && n_death >= 10) {
+      m <- glm(as.formula(paste("deceased ~", rhs)), data = d, family = binomial)
+      cf <- summary(m)$coefficients["z", ]
+      out <- bind_rows(out, tibble(age_form = af, outcome = "In-hospital mortality", estimate_type = "OR",
+        estimate = exp(cf["Estimate"]), conf_low = exp(cf["Estimate"] - 1.96 * cf["Std. Error"]),
+        conf_high = exp(cf["Estimate"] + 1.96 * cf["Std. Error"]), std_error = cf["Std. Error"],
+        p_value = cf["Pr(>|z|)"], n = nrow(d), events = n_death))
+    }
+    if (nrow(d) >= 50 && n_death60 >= 10) {
+      d60 <- d %>% filter(!is.na(surv_time), surv_time > 0)
+      m <- survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)), data = d60)
+      cf <- summary(m)$coefficients["z", ]
+      out <- bind_rows(out, tibble(age_form = af, outcome = "60-day mortality", estimate_type = "HR",
+        estimate = cf["exp(coef)"], conf_low = exp(cf["coef"] - 1.96 * cf["se(coef)"]),
+        conf_high = exp(cf["coef"] + 1.96 * cf["se(coef)"]), std_error = cf["se(coef)"],
+        p_value = cf["Pr(>|z|)"], n = nrow(d60), events = n_death60))
+    }
   }
   if (nrow(out)) out %>% mutate(cohort = cohort_lab, exposure = nc_exposures[[expo]],
                                 scale = "per analytic-cohort SD", .before = 1) else out
 }
 nc_results <- map_dfr(nc_cohort_levels, function(cl)
   map_dfr(names(nc_exposures), function(e) nc_fit_one(nc_frames, e, cl))) %>%
-  mutate(adjustment = "age + sex + race", site = site_name)
+  mutate(adjustment = "sex + race + age (linear or ns4)", site = site_name)
+suppress10 <- function(x) if_else(x < 10, NA_integer_, as.integer(x))
 nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
   summarise(n = n(), deaths_inhosp = sum(deceased == 1, na.rm = TRUE),
             deaths_60d = sum(mortality_event_60 == 1, na.rm = TRUE),
             median_age = median(age_at_admission), pct_female = mean(sex_category == "Female"),
-            median_pbwpfvc = median(pbwpfvc, na.rm = TRUE), .groups = "drop") %>%
-  mutate(across(c(n, deaths_inhosp, deaths_60d), ~ if_else(.x < 10, NA_integer_, as.integer(.x))))   # min cell n >= 10
+            median_pbwpfvc = median(pbwpfvc, na.rm = TRUE),
+            # delivered dose (ventilated cohorts only): the dosing-pathway read
+            n_with_vt = sum(!is.na(vtpbw)),
+            median_vtpbw = median(vtpbw, na.rm = TRUE), q25_vtpbw = quantile(vtpbw, .25, na.rm = TRUE),
+            q75_vtpbw = quantile(vtpbw, .75, na.rm = TRUE), pct_vtpbw_over_8 = mean(vtpbw > 8, na.rm = TRUE),
+            median_vtpfvc = median(vtpfvc, na.rm = TRUE), pct_vtpfvc_over_11 = mean(vtpfvc > 11, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(across(c(n, deaths_inhosp, deaths_60d, n_with_vt), suppress10),
+         across(c(median_vtpbw, q25_vtpbw, q75_vtpbw, pct_vtpbw_over_8, median_vtpfvc, pct_vtpfvc_over_11),
+                ~ if_else(is.na(n_with_vt), NA_real_, .x)),
+         cohort = factor(cohort, nc_cohort_levels)) %>% arrange(cohort)
 write_csv(nc_results, file.path(final_dir, paste0("negative_control_", site_name, ".csv")))
 write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", site_name, ".csv")))
 
 if (nrow(nc_results)) {
+  nc_lab <- nc_results %>% filter(age_form == "linear") %>%
+    transmute(cohort, exposure, outcome, lab = sprintf("n=%s, d=%s", format(n, big.mark = ","), events))
   nc_fig <- ggplot(nc_results %>% mutate(cohort = factor(cohort, rev(nc_cohort_levels))),
-                   aes(x = estimate, y = cohort, colour = cohort)) +
+                   aes(x = estimate, y = cohort, colour = cohort, shape = age_form)) +
     geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
-    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.25) +
-    geom_point(size = 2.4) +
+    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2,
+                   position = position_dodge(width = 0.5)) +
+    geom_point(size = 2.4, position = position_dodge(width = 0.5)) +
+    geom_text(data = nc_lab %>% mutate(cohort = factor(cohort, rev(nc_cohort_levels))),
+              aes(x = Inf, y = cohort, label = lab), inherit.aes = FALSE,
+              hjust = 1.05, vjust = -0.9, size = 2.4, colour = "grey30") +
     facet_grid(exposure ~ outcome, scales = "free_x") +
     scale_x_log10() +
     scale_colour_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
+    scale_shape_manual(values = c(linear = 16, spline = 1), name = "Age term",
+                       labels = c(linear = "linear", spline = "ns(age, 4)")) +
     labs(title = paste0("Negative-control cohorts - ", site_name),
-         subtitle = "OR / HR per analytic-cohort SD, adjusted for age, sex, race. A ventilatory pathway predicts attenuation outside the analytic cohort.",
+         subtitle = paste0("OR / HR per analytic-cohort SD, adjusted for sex, race and age. ",
+                           "A dosing pathway predicts PBW/PFVC harm wherever tidal volume is PBW-dosed ",
+                           "(both ventilated cohorts) and attenuation only where no tidal volume is set."),
          x = "OR / HR per SD (log scale)", y = NULL) +
-    theme_minimal(base_size = 10)
-  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 10, height = 6)
+    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 11, height = 9)
 }
 message("Negative-control models: ", nrow(nc_results), " estimates across ",
         n_distinct(nc_results$cohort), " cohort(s)")
-print(as.data.frame(nc_results %>% transmute(cohort, exposure, outcome, n, events,
-        est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
-
+print(as.data.frame(nc_counts %>% transmute(cohort, n, deaths_inhosp, deaths_60d, n_with_vt,
+        vtpbw = ifelse(is.na(median_vtpbw), NA, sprintf("%.1f [%.1f-%.1f]", median_vtpbw, q25_vtpbw, q75_vtpbw)),
+        pct_over_8 = round(100 * pct_vtpbw_over_8), vtpfvc = round(median_vtpfvc, 1))), row.names = FALSE)
+print(as.data.frame(nc_results %>% filter(age_form == "linear") %>%
+        transmute(cohort, exposure, outcome, n, events,
+                  est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
 message("All outputs saved to: ", final_dir)
 message("Script 04 complete.")

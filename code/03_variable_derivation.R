@@ -992,11 +992,20 @@ message("Attrition log written (7 steps): ",
 # decision was made (see script 01). The same Devine / GLI-2012 derivation and the
 # same height window as the analytic cohort; the same 60-day all-cause survival
 # fields. Script 04 (4j) fits PBW/PFVC, PFVC and height against mortality in each.
+# Ventilated control: non-hypoxemic over the whole stay AND classifiably non-hypoxemic
+# over the entire ventilated period (script 01: SF >= 315 at every SpO2, PaO2/FiO2 >= 300,
+# FiO2 never > 0.40, FiO2 documented). Non-ventilated control: non-hypoxemic over the stay.
 nc_cohort <- read_parquet(file.path(output_dir, "nc_cohort.parquet")) %>%
   filter(!hypoxemic, !is.na(height_cm), height_cm >= 150, height_cm <= 210,
-         !is.na(age_at_admission), sex_category %in% c("Male", "Female")) %>%
+         !is.na(age_at_admission), sex_category %in% c("Male", "Female"),
+         !imv_set_vt | (!is.na(hypoxemic_during_vent) & !hypoxemic_during_vent)) %>%
   mutate(
-    nc_cohort = if_else(imv_set_vt, "Ventilated, non-hypoxemic", "Not ventilated, non-hypoxemic"),
+    # Labels say what each cohort controls for: the ventilated non-hypoxemic group
+    # still receives PBW-dosed tidal volumes (a positive control for the dosing
+    # pathway, a negative control for hypoxemia); the non-ventilated group is the
+    # true no-dose control.
+    nc_cohort = if_else(imv_set_vt, "Ventilated, non-hypoxemic (dosed, uninjured lung)",
+                        "Not ventilated (no tidal volume)"),
     sex_numeric  = if_else(sex_category == "Male", 1L, 2L),
     race_numeric = case_when(race_category == "WHITE" ~ 1L, race_category == "BLACK" ~ 2L, TRUE ~ 5L),
     pbw = if_else(sex_numeric == 1L, 50.0 + 2.3 * (height_cm / 2.54 - 60), 45.5 + 2.3 * (height_cm / 2.54 - 60)),
@@ -1012,6 +1021,15 @@ nc_cohort <- read_parquet(file.path(output_dir, "nc_cohort.parquet")) %>%
     surv_time = if_else(mortality_event_60 == 1L, death_day, 60)
   ) %>%
   filter(!is.na(pfvc), pfvc > 0)
+# Delivered dose for the ventilated control: these patients are in the script-01 IMV
+# cohort (the hypoxemia gate is applied here, in 3e), so their volume-targeted
+# timepoints are in the pre-gate frame. Per-hospitalization median VT/PBW and VT/PFVC
+# over all IMV timepoints with a set tidal volume.
+nc_dose <- analysis_with_completeness %>%
+  filter(hospitalization_id %in% nc_cohort$hospitalization_id, !is.na(vtpbw), !is.na(vtpfvc)) %>%
+  group_by(hospitalization_id) %>%
+  summarise(vtpbw = median(vtpbw), vtpfvc = median(vtpfvc), n_vt_timepoints = n(), .groups = "drop")
+nc_cohort <- nc_cohort %>% left_join(nc_dose, by = "hospitalization_id")
 write_parquet(nc_cohort, file.path(output_dir, "analysis_negative_control.parquet"))
 message("Negative-control cohorts: ", paste(capture.output(print(table(nc_cohort$nc_cohort))), collapse = " | "))
 
