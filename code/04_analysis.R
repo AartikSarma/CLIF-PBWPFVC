@@ -1390,10 +1390,15 @@ if (nrow(nc_interaction)) {
           lrt_p = signif(lrt_p, 2))), row.names = FALSE)
 }
 
+# Figure: the three size exposures only. VT/PBW and VT/PFVC stay in the CSV but not the
+# figure: without SOFA / SF in this shared adjustment set their estimates are confounded
+# by severity (clinicians lower VT in sicker patients).
+NC_FIG_EXPOSURES <- c("Height", "PFVC", "PBW/PFVC")
 if (nrow(nc_results)) {
-  nc_lab <- nc_results %>% filter(age_form == "linear") %>%
+  nc_lab <- nc_results %>% filter(age_form == "linear", exposure %in% NC_FIG_EXPOSURES) %>%
     transmute(cohort, exposure, outcome, lab = sprintf("n=%s, d=%s", format(n, big.mark = ","), events))
-  nc_fig <- ggplot(nc_results %>% mutate(cohort = factor(cohort, rev(nc_cohort_levels))),
+  nc_fig <- ggplot(nc_results %>% filter(exposure %in% NC_FIG_EXPOSURES) %>%
+                     mutate(cohort = factor(cohort, rev(nc_cohort_levels)), exposure = factor(exposure, NC_FIG_EXPOSURES)),
                    aes(x = estimate, y = cohort, colour = cohort, shape = age_form)) +
     geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
     geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2,
@@ -1403,17 +1408,37 @@ if (nrow(nc_results)) {
               aes(x = Inf, y = cohort, label = lab), inherit.aes = FALSE,
               hjust = 1.05, vjust = -0.9, size = 2.4, colour = "grey30") +
     facet_grid(exposure ~ outcome, scales = "free_x") +
-    scale_x_log10() +
+    scale_x_log10(labels = scales::label_number(accuracy = 0.1)) +
     scale_colour_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
     scale_shape_manual(values = c(linear = 16, spline = 1), name = "Age term",
                        labels = c(linear = "linear", spline = "ns(age, 4)")) +
     labs(title = paste0("Negative-control cohorts - ", site_name),
          subtitle = paste0("OR / HR per analytic-cohort SD, adjusted for sex, race and age. ",
-                           "A dosing pathway predicts PBW/PFVC harm wherever tidal volume is PBW-dosed ",
-                           "(both ventilated cohorts) and attenuation only where no tidal volume is set."),
+                           "A dosing pathway predicts attenuation only where no tidal volume is set."),
          x = "OR / HR per SD (log scale)", y = NULL) +
     theme_minimal(base_size = 10) + theme(legend.position = "bottom")
-  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 11, height = 9)
+  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 11, height = 7)
+}
+# Figure: identifying variation. Bar = share of each exposure's variance left after the
+# adjusters (linear age; open point = spline age), per cohort. The ratio's bar is the
+# reason its intervals are wide.
+if (nrow(nc_idvar)) {
+  iv_plot <- nc_idvar %>% filter(exposure %in% NC_FIG_EXPOSURES, adjustment == "demographics") %>%
+    mutate(cohort = factor(cohort, rev(nc_cohort_levels)), exposure = factor(exposure, NC_FIG_EXPOSURES))
+  iv_fig <- ggplot(iv_plot %>% filter(age_form == "linear"), aes(x = residual_variance_share, y = cohort, fill = cohort)) +
+    geom_col(width = 0.6) +
+    geom_point(data = iv_plot %>% filter(age_form == "spline"), aes(x = residual_variance_share, y = cohort),
+               shape = 1, size = 2.6, inherit.aes = FALSE) +
+    geom_text(data = iv_plot %>% filter(age_form == "linear"),
+              aes(label = sprintf("%.0f%%", 100 * residual_variance_share)), hjust = -0.15, size = 3) +
+    facet_wrap(~ exposure, nrow = 1) +
+    scale_x_continuous(limits = c(0, 1.12), breaks = seq(0, 1, 0.25), labels = scales::percent) +
+    scale_fill_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
+    labs(title = paste0("Identifying variation after adjustment - ", site_name),
+         subtitle = "Share of each exposure's variance left after age, sex and race. Bar: linear age; open point: ns(age, 4).",
+         x = "Residual variance share", y = NULL) +
+    theme_minimal(base_size = 10)
+  ggsave(file.path(final_dir, paste0("negative_control_identifying_variation_", site_name, ".pdf")), iv_fig, width = 11, height = 4)
 }
 message("Negative-control models: ", nrow(nc_results), " estimates across ",
         n_distinct(nc_results$cohort), " cohort(s)")
