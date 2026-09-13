@@ -89,11 +89,17 @@ clif_meds        <- open_clif("medication_admin_continuous") %>%
   filter(med_category %in% med_categories_needed) %>% collect()
 clif_assessments <- open_clif("patient_assessments") %>%
   filter(assessment_category %in% assessment_categories_needed) %>% collect()
+# Continuous renal replacement therapy (CLIF 2.1 crrt_therapy): the biotrauma
+# joint models censor the creatinine trajectory at the first CRRT record, so the
+# panel needs the start time. Only the identifiers and the mode category are kept.
+clif_crrt        <- open_clif("crrt_therapy") %>%
+  select(hospitalization_id, recorded_dttm, crrt_mode_category) %>% collect()
 
 message("Loaded: patient=", nrow(clif_patient), " hosp=", nrow(clif_hospitalization),
         " adt=", nrow(clif_adt), " resp=", nrow(clif_respiratory_support))
 message("Loaded (category-filtered): vitals=", nrow(clif_vitals), " labs=", nrow(clif_labs),
-        " meds=", nrow(clif_meds), " assessments=", nrow(clif_assessments))
+        " meds=", nrow(clif_meds), " assessments=", nrow(clif_assessments),
+        " crrt=", nrow(clif_crrt))
 
 # Fail LOUDLY if any CORE table loaded empty. arrow::open_dataset() does NOT error on an
 # unreachable/stale parquet path -- it opens a 0-row dataset and collect() succeeds -- so
@@ -321,6 +327,16 @@ cohort_assessments <- clif_assessments %>%
          assessment_category %in% c("gcs_total"))
 
 # =============================================================================
+# Extract CRRT records
+# =============================================================================
+
+cohort_crrt <- clif_crrt %>%
+  filter(hospitalization_id %in% eligible_hospitalizations, !is.na(recorded_dttm))
+
+message("CRRT extracted: ", nrow(cohort_crrt), " rows, ",
+        n_distinct(cohort_crrt$hospitalization_id), " hospitalizations")
+
+# =============================================================================
 # Merge demographics
 # =============================================================================
 
@@ -490,6 +506,7 @@ write_parquet(cohort_vitals, file.path(output_dir, "cohort_vitals.parquet"))
 write_parquet(cohort_labs, file.path(output_dir, "cohort_labs.parquet"))
 write_parquet(cohort_meds, file.path(output_dir, "cohort_meds.parquet"))
 write_parquet(cohort_assessments, file.path(output_dir, "cohort_assessments.parquet"))
+write_parquet(cohort_crrt, file.path(output_dir, "cohort_crrt.parquet"))
 write_parquet(cohort_heights, file.path(output_dir, "cohort_heights.parquet"))
 write_parquet(cohort_weights, file.path(output_dir, "cohort_weights.parquet"))
 

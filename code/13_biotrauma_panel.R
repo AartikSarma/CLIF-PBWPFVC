@@ -1,0 +1,200 @@
+# =============================================================================
+# Script 13 (panel): Biotrauma joint models -- the longitudinal and survival tables
+# PBW vs PFVC Replication Using CLIF Data
+# =============================================================================
+#
+# Builds the two tables the biotrauma joint models (13_biotrauma_fit.R) consume,
+# from the shared daily panel of 10_panel_common.R:
+#
+#   jm_long_{H}d.parquet   one row per patient-day (index day 0 to day H) with the
+#                          organ-injury markers observed that day, the previous
+#                          day's strain and confounders, and the patient's
+#                          baseline covariates
+#   jm_surv_{H}d.parquet   one row per patient: competing-risk coding of death vs
+#                          extubation within H days (same-day tie counts as death),
+#                          the RRT start day, and every baseline covariate
+#   jm_meta_{H}d.rds       horizon, cohort tag, counts
+#
+# and one aggregate table for the deliverable:
+#
+#   final/jm_panel_summary_{site}.csv   patients, patient-days and events per
+#                                       marker; RRT censoring counts; the size of
+#                                       the plateau-measured subset
+#
+# Design (docs/joint_model_plan_2026-09.md, sections 3 and 4):
+#   * every index-IMV patient enters at day 0; no survival-based restriction, and
+#     no structural-positivity exclusion (that is TTE-only)
+#   * the exposure is the PREVIOUS day's median VT/PFVC and the count of prior
+#     days above 11%, taken by joining on vent_day - 1 so a missing day gives a
+#     missing lag rather than a two-day-old one
+#   * markers on the day of observation: creatinine (daily max), platelets (daily
+#     min), bilirubin (daily max), SF ratio (daily worst), driving pressure (daily
+#     max, plateau-measured days only), NE-equivalent dose (daily peak)
+#   * creatinine is censored at the first CRRT record: days on or after RRT start
+#     are set to missing, and a patient already on CRRT at the index has no
+#     creatinine trajectory at all
+#   * rows are truncated at the event day, as a joint model requires
+#
+# Horizon: PBWPFVC_JM_HORIZON days (default 7; 14 is the sensitivity). The shared
+# panel is built with the TTE's 28-day death window so death_day and the
+# extubation day are identical objects in both analyses.
+#
+# Usage: Rscript code/13_biotrauma_panel.R
+# =============================================================================
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(tidyverse)
+  library(arrow)
+  library(here)
+})
+rm(list = ls())
+source("utils/config.R")
+
+site_name  <- config$site_name
+output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
+final_dir  <- here("output", paste0(site_name, "_output"), "final")
+dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
+
+# --- shared-panel contract (identical windows to the TTE, so the event objects match)
+HORIZON      <- 28L
+MAX_VENT_DAY <- 27L
+is_synthetic <- identical(site_name, "synthetic_clif")
+PANEL_NORM   <- "pfvc"          # the joint models always normalize to GLI PFVC
+source(here("code", "10_panel_common.R"))
+
+JM_HORIZON <- as.integer(Sys.getenv("PBWPFVC_JM_HORIZON", "7"))
+stopifnot(is.finite(JM_HORIZON), JM_HORIZON >= 2L, JM_HORIZON <= HORIZON)
+h_suffix <- paste0(JM_HORIZON, "d")
+STRAIN_CEILING <- 11   # VT/PFVC % above which a day counts toward the cumulative-strain exposure
+message("=== 13_biotrauma_panel: horizon ", JM_HORIZON, " days, site ", site_name, " ===")
+
+# =============================================================================
+# 13a. RRT start day (CRRT table from script 01)
+# =============================================================================
+rrt <- read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>%
+  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  group_by(hospitalization_id) %>%
+  summarise(rrt_start_dttm = min(recorded_dttm), .groups = "drop") %>%
+  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  transmute(hospitalization_id,
+            rrt_day = floor(as.numeric(difftime(rrt_start_dttm, t0, units = "days"))))
+message("CRRT: ", nrow(rrt), " patients with any record; ",
+        sum(rrt$rrt_day < 0), " already on CRRT at the index, ",
+        sum(rrt$rrt_day >= 0 & rrt$rrt_day <= JM_HORIZON), " start within the horizon")
+
+# =============================================================================
+# 13b. Survival table: death vs extubation within JM_HORIZON, tie = death
+# =============================================================================
+# death_day (index-anchored, all-cause, NA past 28 days; synthetic site simulated)
+# and imv_extub_day (last IMV day + 1) come from the shared panel. Censoring at
+# the horizon otherwise. JMbayes2 needs strictly positive times, so an event on
+# day 0 is placed at day 1 (the TTE's pmax(., 1) convention).
+bili_0 <- lab_daily %>% filter(vent_day == 0L, !is.na(bilirubin)) %>%
+  select(hospitalization_id, bilirubin_0 = bilirubin)   # the cross-sectional table carries no bilirubin
+surv <- base %>%
+  left_join(rrt, by = "hospitalization_id") %>%
+  left_join(bili_0, by = "hospitalization_id") %>%
+  mutate(
+    death_in  = !is.na(death_day) & death_day <= JM_HORIZON,
+    extub_in  = !is.na(imv_extub_day) & imv_extub_day <= JM_HORIZON,
+    event = case_when(
+      death_in & (!extub_in | death_day <= imv_extub_day) ~ 1L,   # death (tie counts as death)
+      extub_in                                            ~ 2L,   # extubation
+      TRUE                                                ~ 0L),  # censored at the horizon
+    event_day = case_when(event == 1L ~ death_day,
+                          event == 2L ~ as.numeric(imv_extub_day),
+                          TRUE        ~ as.numeric(JM_HORIZON)),
+    event_time = pmax(event_day, 1),
+    event_factor = factor(c("censored", "death", "extubation")[event + 1L],
+                          levels = c("censored", "death", "extubation")),
+    ers_pfvc_0 = ers * pfvc_gli,                 # specific elastance at the index (plateau subset)
+    disc       = pbw / pfvc_gli,                 # PBW/PFVC discordance
+    rrt_before_index = !is.na(rrt_day) & rrt_day < 0
+  ) %>%
+  select(hospitalization_id, t0, event, event_day, event_time, event_factor,
+         death_day, imv_extub_day, rrt_day, rrt_before_index,
+         pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
+         age10, sex_category, race_category, sofa_total, bmi, height_cm,
+         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, ne_equiv_0)
+message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
+        ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
+
+# =============================================================================
+# 13c. Longitudinal table: markers by day with the previous day's exposure
+# =============================================================================
+# One row per patient-day with a set tidal volume (the `daily` grid), day 0 to
+# JM_HORIZON. The previous day's values are attached by joining on vent_day - 1,
+# so a gap in charting yields a missing lag (reported below) instead of a stale one.
+prev <- panel_full %>%
+  transmute(hospitalization_id, vent_day = vent_day + 1L,
+            l_vtpfvc = vtpfvc, l_sf = sf, l_pressor = on_pressor, l_fio2 = fio2, l_peep = peep)
+cum_above <- panel_full %>%
+  group_by(hospitalization_id) %>% arrange(vent_day, .by_group = TRUE) %>%
+  transmute(hospitalization_id, vent_day = vent_day + 1L,
+            cum_days_above = cumsum(vtpfvc > STRAIN_CEILING)) %>%   # days above, through the previous day
+  ungroup()
+long <- panel_full %>%
+  filter(vent_day <= JM_HORIZON) %>%
+  select(hospitalization_id, vent_day, vtpfvc, vt_ml, fio2, peep, rr, map, sf, on_pressor,
+         ne_equiv_peak, creatinine, platelets, bilirubin) %>%
+  left_join(dp_daily, by = c("hospitalization_id", "vent_day")) %>%
+  left_join(prev, by = c("hospitalization_id", "vent_day")) %>%
+  left_join(cum_above, by = c("hospitalization_id", "vent_day")) %>%
+  mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%
+  inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index),
+             by = "hospitalization_id") %>%
+  filter(vent_day <= event_day) %>%
+  mutate(
+    # creatinine censored at RRT start; no trajectory if on CRRT at the index
+    creat_censored_rrt = rrt_before_index | (!is.na(rrt_day) & vent_day >= rrt_day),
+    creatinine = if_else(creat_censored_rrt, NA_real_, creatinine)
+  ) %>%
+  select(-event_day, -rrt_day, -rrt_before_index) %>%
+  arrange(hospitalization_id, vent_day)
+message("Longitudinal table: ", nrow(long), " patient-days, ",
+        n_distinct(long$hospitalization_id), " patients; lag missing on ",
+        sum(is.na(long$l_vtpfvc) & long$vent_day > 0L), " post-index rows; creatinine days removed for RRT: ",
+        sum(long$creat_censored_rrt))
+
+# =============================================================================
+# 13d. Aggregate summary (deliverable) and persistence
+# =============================================================================
+markers <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "ne_equiv_peak")
+per_marker <- map_dfr(markers, function(m) {
+  obs <- long %>% filter(!is.na(.data[[m]]))
+  per_pt <- obs %>% count(hospitalization_id)
+  ids2 <- per_pt$hospitalization_id[per_pt$n >= 2L]
+  ev <- surv %>% filter(hospitalization_id %in% ids2)
+  tibble(marker = m,
+         patient_days = nrow(obs),
+         patients_any = nrow(per_pt),
+         patients_ge2_obs = length(ids2),
+         median_obs_per_patient = if (nrow(per_pt)) median(per_pt$n) else NA_real_,
+         deaths_ge2 = sum(ev$event == 1L), extubations_ge2 = sum(ev$event == 2L),
+         plateau_subset_ge2 = sum(!is.na(ev$ers_pfvc_0)))
+})
+summary_tbl <- bind_rows(
+  per_marker,
+  tibble(marker = "cohort",
+         patient_days = nrow(long), patients_any = nrow(surv),
+         patients_ge2_obs = NA_integer_, median_obs_per_patient = NA_real_,
+         deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
+         plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%
+  mutate(horizon_days = JM_HORIZON,
+         rrt_before_index = sum(surv$rrt_before_index),
+         rrt_within_horizon = sum(!is.na(surv$rrt_day) & surv$rrt_day >= 0 & surv$rrt_day <= JM_HORIZON),
+         creatinine_days_removed_rrt = sum(long$creat_censored_rrt),
+         lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$vent_day > 0L),
+         site = site_name)
+print(as.data.frame(summary_tbl), row.names = FALSE)
+write_csv(summary_tbl, file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
+
+write_parquet(long, file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
+write_parquet(surv, file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
+saveRDS(list(horizon = JM_HORIZON, h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING,
+             panel_cohort_tag = panel_cohort_tag, site_name = site_name,
+             n_patients = nrow(surv), n_days = nrow(long), built_at = as.character(Sys.time())),
+        file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
+message("13_biotrauma_panel complete (", h_suffix, "): tables in ", output_dir,
+        "; summary in ", final_dir)
