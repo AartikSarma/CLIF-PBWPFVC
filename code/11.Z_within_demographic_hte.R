@@ -42,10 +42,22 @@ arm_f <- function() factor(c("permissive", "strain_limiting"), c("permissive", "
 # --- patient-level: discordance, demographics, severity; residualize discordance ---------------
 pin <- base %>% distinct(hospitalization_id, pbw, pfvc, age10, sex_category, race_category, age_grp, sofa_total) %>%
   mutate(ldisc = log(pbw / pfvc))
+pin$lpfvc <- log(pin$pfvc)
 res_fit  <- lm(ldisc ~ ns(age10, 3) + sex_category + race_category, data = pin)
 pin$rdisc <- as.numeric(residuals(res_fit))                       # height-driven, orthogonal to demographics
 demo_r2  <- summary(res_fit)$r.squared
-cat(sprintf("11.Z: demographics (age/sex/race) explain R^2 = %.3f of log-discordance; residual = the height-driven part\n", demo_r2))
+# The SAME orthogonalization applied to log PFVC. This is the better-powered version of the test:
+# demographics explain ~99% of log-discordance but far less of log PFVC, because PFVC depends
+# strongly on height while the ratio barely does. So residualized PFVC keeps several times the
+# variance residualized discordance does, and what survives is the height direction the
+# negative-control cohorts showed to be confined to ventilated patients.
+res_fit_p  <- lm(lpfvc ~ ns(age10, 3) + sex_category + race_category, data = pin)
+pin$rpfvc  <- as.numeric(residuals(res_fit_p))
+demo_r2_p  <- summary(res_fit_p)$r.squared
+cat(sprintf("11.Z: demographics (age/sex/race) explain R^2 = %.3f of log-discordance and %.3f of log-PFVC; residual = the height-driven part\n",
+            demo_r2, demo_r2_p))
+cat(sprintf("      residual SD as a share of raw: discordance %.3f, PFVC %.3f -- the ratio of these is how much better powered the PFVC test is\n",
+            sqrt(1 - demo_r2), sqrt(1 - demo_r2_p)))
 
 long_s     <- long_all %>% left_join(pin %>% select(hospitalization_id, sofa_total), by = "hospitalization_id")
 sofa_cells <- long_s %>% distinct(hospitalization_id, sofa_total) %>% count(sofa_total, name = "wt")
@@ -80,8 +92,15 @@ slope_of <- function(fit, P) {                     # RD(p90) - RD(p10), at the 2
   cc$rd[which.min(abs(cc$m - P$qd[2]))] - cc$rd[which.min(abs(cc$m - P$qd[1]))]
 }
 
-P_raw <- prep_modifier(pin %>% transmute(hospitalization_id, m = ldisc), "zr")
-P_res <- prep_modifier(pin %>% transmute(hospitalization_id, m = rdisc), "zd")
+P_raw  <- prep_modifier(pin %>% transmute(hospitalization_id, m = ldisc), "zr")
+P_res  <- prep_modifier(pin %>% transmute(hospitalization_id, m = rdisc), "zd")
+P_praw <- prep_modifier(pin %>% transmute(hospitalization_id, m = lpfvc), "zp")
+P_pres <- prep_modifier(pin %>% transmute(hospitalization_id, m = rpfvc), "zq")
+# The p90-minus-p10 gradient is RANGE-DEPENDENT, so it cannot be compared between a raw modifier
+# and its residual: residualizing removes most of the variance, so the same per-unit effect yields
+# a much smaller gradient. Every modifier therefore also reports its p10-p90 span and the implied
+# PER-UNIT slope (gradient / span), which is the quantity that IS comparable across axes.
+mod_span <- function(P) unname(diff(P$qd))
 
 # within-stratum estimator: 11.X slope on the RAW modifier (within a stratum demographics ~fixed,
 # so raw within-stratum variation IS the height-driven residual), at the SHARED p10/p90 anchors.
@@ -106,26 +125,31 @@ strat_defs <- bind_rows(
 strat_label <- paste0(strat_defs$var, "=", strat_defs$lvl)
 
 # --- point estimates ---------------------------------------------------------------------------
-fit_raw <- suppressWarnings(glm(P_raw$FORM, P_raw$long, family = binomial, weights = ipcw))
-fit_res <- suppressWarnings(glm(P_res$FORM, P_res$long, family = binomial, weights = ipcw))
-slope_raw <- slope_of(fit_raw, P_raw); slope_res <- slope_of(fit_res, P_res)
-curve_raw <- cate_from_fit(fit_raw, P_raw$grid_full) %>% filter(m %in% P_raw$DGRID) %>% mutate(modifier = "raw")
-curve_res <- cate_from_fit(fit_res, P_res$grid_full) %>% filter(m %in% P_res$DGRID) %>% mutate(modifier = "residualized")
+fit_of <- function(P) suppressWarnings(glm(P$FORM, P$long, family = binomial, weights = ipcw))
+fit_raw <- fit_of(P_raw); fit_res <- fit_of(P_res); fit_praw <- fit_of(P_praw); fit_pres <- fit_of(P_pres)
+slope_raw  <- slope_of(fit_raw,  P_raw);  slope_res  <- slope_of(fit_res,  P_res)
+slope_praw <- slope_of(fit_praw, P_praw); slope_pres <- slope_of(fit_pres, P_pres)
+curve_of <- function(fit, P, lab) cate_from_fit(fit, P$grid_full) %>% filter(m %in% P$DGRID) %>% mutate(modifier = lab)
+curve_raw  <- curve_of(fit_raw,  P_raw,  "raw")
+curve_res  <- curve_of(fit_res,  P_res,  "residualized")
+curve_praw <- curve_of(fit_praw, P_praw, "pfvc_raw")
+curve_pres <- curve_of(fit_pres, P_pres, "pfvc_residualized")
 strat_pt  <- vapply(seq_len(nrow(strat_defs)), function(k)
   strat_slope(P_raw$long %>% filter(as.character(.data[[strat_defs$col[k]]]) == strat_defs$lvl[k])), numeric(1))
 
 # --- paired, cap-stabilized bootstrap: one resample -> raw, residualized, all strata -----------
 boot_one <- function() {
   samp <- tibble(hospitalization_id = sample(ids, replace = TRUE))
+  one <- function(P) {
+    l <- P$long %>% inner_join(samp, by = "hospitalization_id", relationship = "many-to-many")
+    f <- tryCatch(suppressWarnings(glm(P$FORM, l, family = binomial, weights = ipcw)), error = function(e) NULL)
+    if (is.null(f)) NA_real_ else tryCatch(slope_of(f, P), error = function(e) NA_real_)
+  }
   lr <- P_raw$long %>% inner_join(samp, by = "hospitalization_id", relationship = "many-to-many")
-  ld <- P_res$long %>% inner_join(samp, by = "hospitalization_id", relationship = "many-to-many")
-  fr <- tryCatch(suppressWarnings(glm(P_raw$FORM, lr, family = binomial, weights = ipcw)), error = function(e) NULL)
-  fd <- tryCatch(suppressWarnings(glm(P_res$FORM, ld, family = binomial, weights = ipcw)), error = function(e) NULL)
-  sr <- if (is.null(fr)) NA_real_ else tryCatch(slope_of(fr, P_raw), error = function(e) NA_real_)
-  sd <- if (is.null(fd)) NA_real_ else tryCatch(slope_of(fd, P_res), error = function(e) NA_real_)
   ss <- vapply(seq_len(nrow(strat_defs)), function(k)
     strat_slope(lr %>% filter(as.character(.data[[strat_defs$col[k]]]) == strat_defs$lvl[k])), numeric(1))
-  c(raw = sr, resid = sd, setNames(ss, strat_label))
+  c(raw = one(P_raw), resid = one(P_res), pfvc_raw = one(P_praw), pfvc_resid = one(P_pres),
+    setNames(ss, strat_label))
 }
 n_cores_used <- min(N_CORES, N_BOOT)
 message("11.Z residualized bootstrap (", N_BOOT, " reps across ", n_cores_used,
@@ -137,7 +161,7 @@ if (n_cores_used > 1) {
   cl <- makeCluster(n_cores_used, type = "PSOCK")
   clusterEvalQ(cl, { library(tidyverse); library(splines) })
   clusterExport(cl, envir = .GlobalEnv, varlist = c(
-    "ids", "P_raw", "P_res", "cate_from_fit", "slope_of", "strat_slope", "add_basis",
+    "ids", "P_raw", "P_res", "P_praw", "P_pres", "cate_from_fit", "slope_of", "strat_slope", "add_basis",
     "FORM_strat", "KD", "HORIZON", "MIN_N", "arm_f", "strat_defs", "strat_label", "boot_one"))
   clusterSetRNGStream(cl, 20260626)
   tryCatch(for (ch in chunks) {
@@ -160,12 +184,26 @@ boot_ci <- function(col) {
 }
 
 # --- outputs -----------------------------------------------------------------------------------
-gr <- boot_ci("raw"); gd <- boot_ci("resid")
+gr <- boot_ci("raw"); gd <- boot_ci("resid"); gpr <- boot_ci("pfvc_raw"); gpd <- boot_ci("pfvc_resid")
 global_tbl <- tibble(
-  modifier = c("raw discordance (= 11.X reproduction)", "residualized vs age/sex/race (height-driven)"),
-  slope = c(slope_raw, slope_res), lo = c(gr["lo"], gd["lo"]), hi = c(gr["hi"], gd["hi"]),
-  boot_valid = c(gr["n_valid"], gd["n_valid"]), boot_dropped = c(gr["n_drop"], gd["n_drop"]),
-  disc_p10 = exp(P_raw$qd[1]), disc_p90 = exp(P_raw$qd[2]), demographic_r2 = demo_r2)
+  modifier = c("discordance, raw (= 11.X reproduction)", "discordance, residualized vs age/sex/race",
+               "PFVC, raw", "PFVC, residualized vs age/sex/race"),
+  base_variable = c("log PBW/PFVC", "log PBW/PFVC", "log PFVC", "log PFVC"),
+  residualized = c(FALSE, TRUE, FALSE, TRUE),
+  slope = c(slope_raw, slope_res, slope_praw, slope_pres),
+  lo = c(gr["lo"], gd["lo"], gpr["lo"], gpd["lo"]),
+  hi = c(gr["hi"], gd["hi"], gpr["hi"], gpd["hi"]),
+  boot_valid = c(gr["n_valid"], gd["n_valid"], gpr["n_valid"], gpd["n_valid"]),
+  boot_dropped = c(gr["n_drop"], gd["n_drop"], gpr["n_drop"], gpd["n_drop"]),
+  # p10-p90 span of the modifier on its own (log or residual-log) scale, and the gradient divided
+  # by it: the gradient is range-dependent and NOT comparable across these four rows, the per-unit
+  # slope is. A residualized row with a small gradient but a large per-unit slope is UNDERPOWERED,
+  # not null -- read the two together.
+  span_p10_p90 = c(mod_span(P_raw), mod_span(P_res), mod_span(P_praw), mod_span(P_pres)),
+  demographic_r2 = c(demo_r2, demo_r2, demo_r2_p, demo_r2_p),
+  disc_p10 = exp(P_raw$qd[1]), disc_p90 = exp(P_raw$qd[2])) %>%
+  mutate(slope_per_unit = slope / span_p10_p90, lo_per_unit = lo / span_p10_p90,
+         hi_per_unit = hi / span_p10_p90, site = site_name)
 write_csv(global_tbl, file.path(final_dir, paste0("tte_ccw_within_demo_slope_", site_name, ".csv")))
 
 strata_tbl <- strat_defs %>%
@@ -173,47 +211,79 @@ strata_tbl <- strat_defs %>%
             lo = vapply(strat_label, function(s) boot_ci(s)["lo"], numeric(1)),
             hi = vapply(strat_label, function(s) boot_ci(s)["hi"], numeric(1)),
             boot_dropped = vapply(strat_label, function(s) boot_ci(s)["n_drop"], numeric(1)),
+            # a stratum whose point estimate falls OUTSIDE its own bootstrap interval, or whose
+            # bootstrap discarded a large share of resamples, is a degenerate fit, not a finding;
+            # flagged here and dropped from the figure below.
             flag = dplyr::case_when(n_pts < MIN_N ~ "thin: n < min",
                                     n_disc_p90 < 10 ~ "thin: <10 at p90 discordance",
+                                    !is.na(slope) & !is.na(lo) & !is.na(hi) &
+                                      (slope < lo | slope > hi) ~ "degenerate: point outside its own CI",
+                                    boot_dropped > 0.2 * N_BOOT ~ "unstable: >20% of resamples dropped",
                                     TRUE ~ "ok"))
 write_csv(strata_tbl, file.path(final_dir, paste0("tte_ccw_within_demo_strata_", site_name, ".csv")))
-write_csv(bind_rows(curve_raw, curve_res) %>% transmute(modifier, modifier_value = m, rd),
+write_csv(bind_rows(curve_raw, curve_res, curve_praw, curve_pres) %>%
+            transmute(modifier, modifier_value = m, rd, site = site_name),
           file.path(final_dir, paste0("tte_ccw_within_demo_curve_", site_name, ".csv")))
 
-# --- figure: (1) raw vs residualized CATE curves; (2) within-stratum slope forest --------------
-p_raw <- ggplot(curve_raw, aes(exp(m), 100 * rd)) + geom_hline(yintercept = 0, colour = "grey80") +
-  geom_line(colour = OKABE[1], linewidth = 1) +
-  labs(x = "PBW/PFVC discordance (raw)", y = "CATE: strain-limiting RD (pp)", title = "Raw discordance (= 11.X)") +
+# --- figure: CATE curves for both modifiers, the comparable per-unit slopes, and the forest ----
+curve_panel <- function(cv, xlab, ttl, colour, exp_x = FALSE) {
+  ggplot(cv, aes(if (exp_x) exp(m) else m, 100 * rd)) + geom_hline(yintercept = 0, colour = "grey80") +
+    geom_line(colour = colour, linewidth = 1) +
+    geom_rug(data = cv, aes(x = if (exp_x) exp(m) else m), inherit.aes = FALSE, alpha = 0.15,
+             length = unit(0.02, "npc")) +
+    labs(x = xlab, y = "CATE: strain-limiting RD (pp)", title = ttl) + theme_minimal(base_size = 11)
+}
+p_raw  <- curve_panel(curve_raw,  "PBW/PFVC discordance (raw)", "Discordance, raw (= 11.X)", OKABE[1], TRUE)
+p_res  <- curve_panel(curve_res,  "residualized discordance (height-driven)",
+                      sprintf("Discordance, residualized (demographics R2=%.2f)", demo_r2), OKABE[5])
+p_praw <- curve_panel(curve_praw, "PFVC (L, raw)", "PFVC, raw", OKABE[4], TRUE)
+p_pres <- curve_panel(curve_pres, "residualized log PFVC (height-driven)",
+                      sprintf("PFVC, residualized (demographics R2=%.2f)", demo_r2_p), OKABE[6])
+
+# the four global modifiers on the ONLY comparable scale (per log unit of the modifier)
+perunit_df <- global_tbl %>%
+  transmute(modifier, slope = slope_per_unit, lo = lo_per_unit, hi = hi_per_unit) %>%
+  mutate(modifier = factor(modifier, rev(modifier)))
+p_perunit <- ggplot(perunit_df, aes(100 * slope, modifier)) +
+  geom_vline(xintercept = 0, colour = "grey60", linetype = "dashed") +
+  geom_pointrange(aes(xmin = 100 * lo, xmax = 100 * hi), colour = OKABE[6]) +
+  labs(x = "slope per log unit of the modifier (pp)", y = NULL,
+       title = "Per-unit slope (comparable across axes)",
+       subtitle = "The p90-p10 gradient is range-dependent; residualizing shrinks the range, not necessarily the effect") +
   theme_minimal(base_size = 11)
-p_res <- ggplot(curve_res, aes(m, 100 * rd)) + geom_hline(yintercept = 0, colour = "grey80") +
-  geom_line(colour = OKABE[5], linewidth = 1) +
-  labs(x = "residualized discordance (height-driven, orthogonal to age/sex/race)",
-       y = "CATE: strain-limiting RD (pp)",
-       title = sprintf("Residualized discordance (demographics R²=%.2f)", demo_r2)) +
-  theme_minimal(base_size = 11)
+
 forest_df <- bind_rows(
-  tibble(stratum = "ALL | raw discordance",          slope = slope_raw, lo = gr["lo"], hi = gr["hi"], grp = "global"),
-  tibble(stratum = "ALL | residualized (height)",    slope = slope_res, lo = gd["lo"], hi = gd["hi"], grp = "global"),
-  strata_tbl %>% filter(flag == "ok") %>% transmute(stratum, slope, lo, hi, grp = "within-stratum")) %>%
+  tibble(stratum = "ALL | discordance, raw",          slope = slope_raw, lo = gr["lo"],  hi = gr["hi"],  grp = "global"),
+  tibble(stratum = "ALL | discordance, residualized", slope = slope_res, lo = gd["lo"],  hi = gd["hi"],  grp = "global"),
+  strat_tbl_ok <- strata_tbl %>% filter(flag == "ok") %>% transmute(stratum, slope, lo, hi, grp = "within-stratum")) %>%
   mutate(stratum = factor(stratum, rev(stratum)))
+n_flagged <- sum(strata_tbl$flag != "ok")
 p_forest <- ggplot(forest_df, aes(100 * slope, stratum, colour = grp)) +
   geom_vline(xintercept = 0, colour = "grey60", linetype = "dashed") +
   geom_pointrange(aes(xmin = 100 * lo, xmax = 100 * hi)) +
   scale_colour_manual(values = c(global = OKABE[6], `within-stratum` = OKABE[3]), guide = "none") +
-  labs(x = "discordance slope RD(p90)-RD(p10) (pp); negative = misdosed benefit more", y = NULL,
-       title = "Slope, residualized and within demographic strata") +
+  labs(x = "discordance gradient RD(p90)-RD(p10) (pp); negative = misdosed benefit more", y = NULL,
+       title = "Gradient, within demographic strata",
+       subtitle = if (n_flagged > 0) paste0(n_flagged, " stratum/strata suppressed (thin or degenerate; see the CSV)") else NULL) +
   theme_minimal(base_size = 11)
-fig <- (p_raw | p_res) / p_forest + plot_annotation(
-  title = paste0("11.Z: does the discordance-HTE survive demographics? (residualized) - ", site_name,
-                 if (is_synthetic) " (SYNTHETIC)" else ""))
-ggsave(file.path(final_dir, paste0("tte_ccw_within_demo_", site_name, ".pdf")), fig, width = 12, height = 9)
+fig <- (p_raw | p_res) / (p_praw | p_pres) / (p_perunit | p_forest) + plot_annotation(
+  title = paste0("11.Z: does the HTE survive demographics? discordance and PFVC, residualized - ", site_name,
+                 if (is_synthetic) " (SYNTHETIC)" else ""),
+  subtitle = "Within a stratum demographics are ~fixed, so within-stratum variation is the height-driven residual.")
+ggsave(file.path(final_dir, paste0("tte_ccw_within_demo_", site_name, ".pdf")), fig, width = 12, height = 14)
 
 cat("\n=== 11.Z residualized within-demographic discordance-HTE (negative slope = misdosed benefit more) ===\n")
 cat(sprintf("--- PRIMARY: raw vs residualized slope (demographics explain R^2=%.3f of discordance) ---\n", demo_r2))
-print(as.data.frame(global_tbl %>% transmute(modifier, slope_pp = round(100 * slope, 2),
-        ci = sprintf("[%.2f, %.2f]", 100 * lo, 100 * hi), boot_valid, boot_dropped)), row.names = FALSE)
-cat("    (residualized slope still negative & excludes 0 => discordance modifies the benefit BEYOND age/sex/race;\n")
-cat("     collapses to 0 => it was demographics. Low residual variance (high R^2) => power-limited at 2 sites.)\n")
+print(as.data.frame(global_tbl %>% transmute(modifier, demo_r2 = round(demographic_r2, 3),
+        span = round(span_p10_p90, 3), gradient_pp = round(100 * slope, 2),
+        gradient_ci = sprintf("[%.2f, %.2f]", 100 * lo, 100 * hi),
+        per_unit_pp = round(100 * slope_per_unit, 1),
+        per_unit_ci = sprintf("[%.0f, %.0f]", 100 * lo_per_unit, 100 * hi_per_unit),
+        boot_dropped)), row.names = FALSE)
+cat("    READ THE PER-UNIT COLUMN when comparing a raw modifier with its residual: the gradient is\n")
+cat("    RD(p90)-RD(p10) and residualizing shrinks the p10-p90 SPAN, so a small residualized gradient\n")
+cat("    beside a large per-unit slope means UNDERPOWERED, not null. PFVC keeps far more variance than\n")
+cat("    the discordance ratio after the same adjustment, so its residualized test is the better-powered one.\n")
 cat("\n--- SUPPORT: discordance slope within demographic strata (pp; 'ok' = passes n + p90-support) ---\n")
 print(as.data.frame(strata_tbl %>% mutate(slope_pp = round(100 * slope, 2),
         ci = sprintf("[%.2f, %.2f]", 100 * lo, 100 * hi)) %>%
