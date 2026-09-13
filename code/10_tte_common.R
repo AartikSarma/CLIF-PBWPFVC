@@ -174,6 +174,8 @@ panel        <- panel        %>% filter(hospitalization_id %in% .keep_ids)
 ph_daily     <- ph_daily     %>% filter(hospitalization_id %in% .keep_ids)
 ph_daily_art <- ph_daily_art %>% filter(hospitalization_id %in% .keep_ids)
 pao2_daily   <- pao2_daily   %>% filter(hospitalization_id %in% .keep_ids)
+lab_daily    <- lab_daily    %>% filter(hospitalization_id %in% .keep_ids)
+ne_daily     <- ne_daily     %>% filter(hospitalization_id %in% .keep_ids)
 panel_drop_summary <- panel_drop_stats(panel_full)   # [T11], on the restricted panel
 message("Panel after structural restriction: ", nrow(panel), " patient-days, ",
         n_distinct(panel$hospitalization_id), " patients")

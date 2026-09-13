@@ -86,7 +86,15 @@ if (nzchar(vtpbw_band)) {
     ungroup() %>% select(-imv_start_dttm)
   t2 <- qual %>% filter(!hospitalization_id %in% t1$hospitalization_id) %>%
     group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup()
-  cs <- bind_rows(t1, t2)
+  # The per-timepoint table lacks bmi (script 03 attaches weight and BMI to the
+  # cross-sectional table only); derive it here exactly as 03 does so `base` is
+  # the same shape on both cohort paths. Broken on main since 004c45a made bmi a
+  # base column; fixed 2026-09-13.
+  cs <- bind_rows(t1, t2) %>%
+    left_join(read_parquet(file.path(output_dir, "cohort_weights.parquet")),
+              by = "hospitalization_id") %>%
+    mutate(bmi = if_else(!is.na(weight_kg) & height_cm > 0,
+                         weight_kg / (height_cm / 100)^2, NA_real_))
   panel_cohort_tag <- paste0("vtpbw_", bw[1], "_", bw[2])
   message("  broader cohort: ", nrow(cs), " patients; output tag ", panel_cohort_tag)
 } else {
