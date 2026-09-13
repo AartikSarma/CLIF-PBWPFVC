@@ -47,17 +47,20 @@ source("utils/config.R")   # re-read config.json EVERY time, so a site switch is
   if (!(identical(.tte_clow, "11") && identical(.tte_chigh, "16"))) paste0("_c", .tte_clow, "_", .tte_chigh) else "")
 .tte_cache   <- file.path(.tte_out, paste0("tte_engine_cache_", .tte_site, .tte_suffix, ".rds"))
 .tte_common  <- here("code", "10_tte_common.R")
+.tte_panel   <- here("code", "10_panel_common.R")   # sourced by common; keys the cache too
 .tte_nocache <- nzchar(Sys.getenv("PBWPFVC_TTE_NOCACHE"))
 
 # Every input the engine reads; ANY change in their mtimes invalidates the cache.
 .tte_inputs <- file.path(.tte_out, c(
   "analysis_cross_sectional.parquet", "analysis_all_eligible_timepoints.parquet",
   "resp_support_waterfall_clean.parquet", "cohort_vitals_clean.parquet",
-  "cohort_meds.parquet", "cohort_labs_clean.parquet", "cohort_demographics.parquet"))
+  "cohort_meds.parquet", "cohort_labs_clean.parquet", "cohort_demographics.parquet",
+  "ne_equiv_admin.parquet"))
 .tte_key <- list(
   site = .tte_site, vtpfvc = .tte_vtpfvc,
   norm = .tte_norm, clow = .tte_clow, chigh = .tte_chigh,
-  common_mtime = .tte_mt(.tte_common), config_mtime = .tte_mt(here("utils", "config.R")),
+  common_mtime = .tte_mt(.tte_common), panel_mtime = .tte_mt(.tte_panel),
+  config_mtime = .tte_mt(here("utils", "config.R")),
   inputs = setNames(vapply(.tte_inputs, .tte_mt, character(1)), basename(.tte_inputs)),
   r_version = R.version.string)
 

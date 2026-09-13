@@ -564,6 +564,12 @@ ne_equiv <- bind_rows(ne_equiv_cat, ne_equiv_vaso) %>%
   group_by(hospitalization_id, admin_dttm) %>%
   summarise(ne_equiv_total = sum(ne_equiv, na.rm = TRUE), .groups = "drop")
 
+# Persist the per-administration NE-equivalent table: the daily panel
+# (10_panel_common.R) reduces it to a daily peak dose for the biotrauma joint
+# models, and the rolling join below keeps only the value in force at each
+# IMV timepoint.
+write_parquet(ne_equiv, file.path(output_dir, "ne_equiv_admin.parquet"))
+
 ne_dt <- as.data.table(ne_equiv)
 ne_dt[, join_dttm := as.numeric(admin_dttm)]
 setkey(ne_dt, hospitalization_id, join_dttm)
