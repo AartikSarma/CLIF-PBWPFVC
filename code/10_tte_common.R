@@ -93,9 +93,9 @@ N_BOOT       <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_NBOOT", unset = 
 if (is.na(N_BOOT)) N_BOOT <- 50L
 message("TTE: N_BOOT = ", N_BOOT, "  (PBWPFVC_NBOOT env = '", Sys.getenv("PBWPFVC_NBOOT"), "')",
         if (N_BOOT < 200L) "  *** PROTOTYPING setting: raise PBWPFVC_NBOOT to >= 500 for reported intervals ***" else "")
-# bootstrap worker count; override with PBWPFVC_CORES (default leaves 1 core free)
+# bootstrap worker count; override with PBWPFVC_CORES (default leaves 2 cores free)
 N_CORES      <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_CORES", unset = NA)))
-if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
+if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 2L)
 message("Site: ", site_name, " | ceilings ", C_LOW, "/", C_HIGH, " | grace ", GRACE, "d")
 
 # =============================================================================

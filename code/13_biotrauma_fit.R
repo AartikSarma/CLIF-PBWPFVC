@@ -73,7 +73,7 @@ N_ITER     <- as.integer(Sys.getenv("PBWPFVC_JM_ITER",   "3500"))
 N_BURNIN   <- as.integer(Sys.getenv("PBWPFVC_JM_BURNIN", "500"))
 N_CHAINS   <- as.integer(Sys.getenv("PBWPFVC_JM_CHAINS", "3"))
 N_CORES    <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_CORES", unset = NA)))
-if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 1L)
+if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 2L)
 JM_CORES   <- min(N_CHAINS, N_CORES)
 # How the day-0 baseline enters the longitudinal submodel.
 #   free   (primary): log y_t ~ ... + b * log y_0, b estimated. Nests the ratio model
