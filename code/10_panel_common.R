@@ -140,6 +140,10 @@ base <- cs %>%
             # bmi rides along because respiratory-system elastance includes the chest wall.
             ers, bmi, height_cm,
             age10 = age_at_admission / 10, sex_category, race_category, sofa_total,
+            # non-respiratory SOFA: the joint models enter severity beside log SF, and
+            # the respiratory component is computed from that same SF ratio, so the
+            # two are collinear in the hazard (MIMIC: log SF x death R-hat 4.3)
+            np_sofa = sofa_total - sofa_resp,
             age_grp = cut(age_at_admission, c(-Inf, age_breaks, Inf),
                           labels = c("Young", "Middle", "Old")),
             height_grp = cut(height_z, c(-Inf, quantile(height_z, c(1/3, 2/3), na.rm = TRUE), Inf),

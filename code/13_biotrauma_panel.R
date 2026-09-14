@@ -183,7 +183,7 @@ surv <- base %>%
   select(hospitalization_id, t0, event, event_day, event_time, event_factor,
          death_day, imv_extub_day, rrt_day, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
-         age10, sex_category, race_category, sofa_total, bmi, height_cm,
+         age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0)
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
         ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
@@ -197,10 +197,18 @@ message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 
 prev <- panel_full %>%
   transmute(hospitalization_id, vent_day = vent_day + 1L,
             l_vtpfvc = vtpfvc, l_sf = sf, l_pressor = on_pressor, l_fio2 = fio2, l_peep = peep)
+# Cumulative strain through the previous day, two forms. mean_prior_vtpfvc (the
+# fit's default) is the mean of the daily VT/PFVC over days 0..t-1: it carries the
+# dose history without growing with time. cum_days_above (days above 11%) is the
+# sensitivity form: for a patient above the ceiling throughout it equals the
+# ventilator day exactly, so it is an interaction of day with a patient indicator
+# and competes with the day spline and the random slope (R-hat 3 to 4 on it in
+# every fit, synthetic and MIMIC).
 cum_above <- panel_full %>%
   group_by(hospitalization_id) %>% arrange(vent_day, .by_group = TRUE) %>%
   transmute(hospitalization_id, vent_day = vent_day + 1L,
-            cum_days_above = cumsum(vtpfvc > STRAIN_CEILING)) %>%   # days above, through the previous day
+            cum_days_above = cumsum(vtpfvc > STRAIN_CEILING),
+            mean_prior_vtpfvc = cummean(vtpfvc)) %>%
   ungroup()
 long <- panel_full %>%
   filter(vent_day <= JM_HORIZON) %>%
@@ -209,7 +217,7 @@ long <- panel_full %>%
   left_join(dp_daily, by = c("hospitalization_id", "vent_day")) %>%
   left_join(prev, by = c("hospitalization_id", "vent_day")) %>%
   left_join(cum_above, by = c("hospitalization_id", "vent_day")) %>%
-  mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%
+  mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA on day 0
   inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index),
              by = "hospitalization_id") %>%
   filter(vent_day <= event_day) %>%

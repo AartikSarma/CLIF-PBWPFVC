@@ -72,7 +72,7 @@ beta_draws <- function(jm, lme_fit) {
 population_row <- function(ld) {
   pt <- ld %>% distinct(hospitalization_id, .keep_all = TRUE)
   row <- tibble(
-    sofa_total = median(pt$sofa_total), bmi = median(pt$bmi), age10 = median(pt$age10),
+    np_sofa = median(pt$np_sofa), bmi = median(pt$bmi), age10 = median(pt$age10),
     sex_category  = factor(levels(factor(ld$sex_category))[1],  levels = levels(factor(ld$sex_category))),
     race_category = factor(levels(factor(ld$race_category))[1], levels = levels(factor(ld$race_category))),
     l_log_sf = median(ld$l_log_sf), l_pressor = 0)
@@ -98,7 +98,7 @@ for (i in seq_len(nrow(usable))) {
   message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
-  for (term in c("l_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpfvc")) {
+  for (term in c("l_vtpfvc", "mean_prior_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpfvc")) {
     if (!term %in% colnames(draws)) next
     v <- draws[, term]
     strain_rows[[length(strain_rows) + 1L]] <- tibble(
@@ -141,6 +141,7 @@ for (i in seq_len(nrow(usable))) {
   if (u$model == "main") {
     grid <- expand_grid(vent_day = seq(1, JM_HORIZON, by = 0.25), strain = STRAIN_LEVELS) %>%
       mutate(l_vtpfvc = strain,
+             mean_prior_vtpfvc = strain,                                        # constant strain: the running mean equals it
              cum_days_above = if_else(strain > STRAIN_CEILING, floor(vent_day), 0))
     grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots

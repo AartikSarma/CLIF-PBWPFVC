@@ -91,6 +91,12 @@ stopifnot(BASELINE_FORM %in% c("free", "offset"))
 ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value_slope")
 stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
 USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
+# Cumulative-strain term beside the previous-day strain: "mean" (default) is the
+# mean daily VT/PFVC through the previous day; "days" is the count of prior days
+# above 11%, which grows with time and fights the day spline (sensitivity only).
+CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "mean")
+stopifnot(CUM_FORM %in% c("mean", "days"))
+CUM_TERM <- if (CUM_FORM == "mean") "mean_prior_vtpfvc" else "cum_days_above"
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -154,7 +160,7 @@ want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main,hetero"), "
 stopifnot(all(want_models %in% c("main", "hetero")))
 
 DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
-BASE_RHS  <- "sofa_total + bmi"
+BASE_RHS  <- "np_sofa + bmi"   # non-respiratory SOFA: log SF carries the respiratory component
 
 # =============================================================================
 # 13f. One fit
@@ -170,10 +176,10 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   ld <- long_all %>%
     filter(vent_day >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
     mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
-    inner_join(surv_all %>% select(hospitalization_id, sofa_total, bmi, age10, sex_category,
+    inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, all_of(mk$y0)),
                by = "hospitalization_id") %>%
-    filter(!is.na(sofa_total), !is.na(bmi))
+    filter(!is.na(np_sofa), !is.na(bmi))
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = log(.data[[mk$y0]] + mk$offset))
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
@@ -206,15 +212,15 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc", "cum_days_above", "l_log_sf", "l_pressor",
-                          "sofa_total", "bmi", "age10", "ers_pfvc_0"), names(ld))
+  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc", CUM_TERM, "l_log_sf", "l_pressor",
+                          "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
   if (any(n_bad > 0))
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
-  s_bad <- vapply(c("vtpfvc_idx", "sofa_total", "log_sf_0", "bmi", "age10", "event_time"),
+  s_bad <- vapply(c("vtpfvc_idx", "np_sofa", "log_sf_0", "bmi", "age10", "event_time"),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
     stop("non-finite values in the survival design: ",
@@ -222,7 +228,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- longitudinal submodel
   lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
-  rhs <- c("ns(vent_day, 3)", "l_vtpfvc", "cum_days_above",
+  rhs <- c("ns(vent_day, 3)", "l_vtpfvc", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpfvc",
            lag_terms, BASE_RHS, if (adjusted) DEMO_RHS)
@@ -238,7 +244,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
-  cox_rhs <- paste(c("vtpfvc_idx", "sofa_total", if (mk$y != "sf") "log_sf_0", "bmi",
+  cox_rhs <- paste(c("vtpfvc_idx", "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
                      if (adjusted) DEMO_RHS), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
