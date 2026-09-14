@@ -42,7 +42,8 @@
 #   PBWPFVC_JM_MODELS (main,hetero), PBWPFVC_JM_BASELINE (free | offset; offset
 #   fixes the baseline coefficient at 1 = the log percent-change outcome, written
 #   with an offset_ prefix), PBWPFVC_JM_ITER / _BURNIN / _CHAINS (3500 / 500 / 3;
-#   lower them only for plumbing runs), PBWPFVC_CORES.
+#   lower them only for plumbing runs), PBWPFVC_CORES, PBWPFVC_JM_PILOT (0 skips
+#   the timing pilot), PBWPFVC_JM_HEARTBEAT (seconds between progress lines; 0 off).
 #
 # Usage: Rscript code/13_biotrauma_fit.R
 # =============================================================================
@@ -90,6 +91,32 @@ stopifnot(BASELINE_FORM %in% c("free", "offset"))
 ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value_slope")
 stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
 USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
+# Progress reporting (see the MCMC block in fit_one). The pilot costs about
+# PILOT_ITER / N_ITER of one chain's time.
+USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
+PILOT_ITER    <- 300L   # burn-in 100: shorter pilots fail the adaptive-covariance Cholesky
+HEARTBEAT_SEC <- as.integer(Sys.getenv("PBWPFVC_JM_HEARTBEAT", "60"))
+# Heartbeat: a detached shell loop that prints elapsed time (and the pilot's
+# expected finish) to this process's stderr every HEARTBEAT_SEC while the MCMC
+# runs, and exits when the R process ends or stop_heartbeat() kills it.
+start_heartbeat <- function(tag, t0, eta_txt) {
+  if (HEARTBEAT_SEC <= 0L) return(NULL)
+  pidfile <- tempfile("jm_heartbeat_")
+  cmd <- sprintf(
+    "echo $$ > %s; while kill -0 %d 2>/dev/null; do sleep %d; now=$(date +%%s); el=$(( now - %d )); printf '  [%%s] %s: MCMC %%d:%%02d elapsed%s\\n' \"$(date +%%H:%%M:%%S)\" $(( el / 60 )) $(( el %% 60 )) >&2; done",
+    shQuote(pidfile), Sys.getpid(), HEARTBEAT_SEC, as.integer(as.numeric(t0)), tag,
+    if (nzchar(eta_txt)) paste0(" (", eta_txt, ")") else "")
+  system(paste("bash -c", shQuote(cmd)), wait = FALSE)   # R appends the & itself
+  Sys.sleep(0.2)
+  pid <- if (file.exists(pidfile)) suppressWarnings(as.integer(readLines(pidfile, n = 1))) else NA_integer_
+  list(pid = pid, pidfile = pidfile)
+}
+stop_heartbeat <- function(hb) {
+  if (is.null(hb)) return(invisible(NULL))
+  if (is.finite(hb$pid)) suppressWarnings(system2("kill", as.character(hb$pid), stderr = FALSE, stdout = FALSE))
+  unlink(hb$pidfile)
+  invisible(NULL)
+}
 RHAT_GATE  <- 1.1
 MIN_PATIENTS <- 20L; MIN_DEATHS <- 5L
 message("=== 13_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
@@ -220,12 +247,31 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- joint model: value + slope association on each cause-specific hazard
   ff <- if (ASSOC_FORM == "value_slope") list(log_y = ~ value(log_y):strata + slope(log_y):strata)
         else list(log_y = ~ value(log_y):strata)
+  # JMbayes2 runs the chains in C++ with no per-iteration hook, so progress has
+  # to be inferred. A short single-chain pilot times the iterations and gives an
+  # expected finish; a heartbeat (a detached shell loop) then prints the elapsed
+  # time every HEARTBEAT_SEC while the real run is silent. PBWPFVC_JM_PILOT=0
+  # skips the pilot.
+  fit_jm <- function(n_iter, n_burnin, n_chains, cores)
+    jm(cox_cr, lme_fit, time_var = "vent_day", data_Surv = surv_cr, id_var = "id",
+       functional_forms = ff, n_iter = n_iter, n_burnin = n_burnin, n_thin = 1L,
+       n_chains = n_chains, cores = cores, control = list(MALA = USE_MALA))
+  eta_txt <- ""
+  if (USE_PILOT) {
+    t_pilot <- Sys.time()
+    invisible(fit_jm(PILOT_ITER, 100L, 1L, 1L))
+    sec_per_iter <- as.numeric(difftime(Sys.time(), t_pilot, units = "secs")) / PILOT_ITER
+    # chains run in parallel across JM_CORES; parallel chains slow each other a little
+    est_sec <- sec_per_iter * N_ITER * ceiling(N_CHAINS / JM_CORES) * 1.15
+    eta_txt <- sprintf("expected %.1f min, finish about %s", est_sec / 60,
+                       format(Sys.time() + est_sec, "%H:%M"))
+    stamp(sprintf("pilot: %.3f s per iteration on one chain; %s", sec_per_iter, eta_txt))
+  }
   t_jm <- Sys.time()
-  jm_fit <- jm(cox_cr, lme_fit, time_var = "vent_day", data_Surv = surv_cr, id_var = "id",
-               functional_forms = ff,
-               n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = 1L,
-               n_chains = N_CHAINS, cores = JM_CORES,
-               control = list(MALA = USE_MALA))
+  stamp(sprintf("MCMC running: %d iterations x %d chains on %d cores (silent; heartbeat every %ds)",
+                N_ITER, N_CHAINS, JM_CORES, HEARTBEAT_SEC))
+  hb <- start_heartbeat(tag, t_jm, eta_txt)
+  jm_fit <- tryCatch(fit_jm(N_ITER, N_BURNIN, N_CHAINS, JM_CORES), finally = stop_heartbeat(hb))
   acc_b <- mean(jm_fit$acc_rates$b, na.rm = TRUE)
   stamp(sprintf("JM done (%.1f min); random-effects acceptance %.3f, fixed-effects acceptance %.3f",
                 as.numeric(difftime(Sys.time(), t_jm, units = "mins")), acc_b,
