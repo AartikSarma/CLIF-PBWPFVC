@@ -43,9 +43,8 @@ source("utils/config.R")
 site_name  <- config$site_name
 output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
 final_dir  <- here("output", paste0(site_name, "_output"), "final")
-JM_HORIZON    <- as.integer(Sys.getenv("PBWPFVC_JM_HORIZON", "7"))
+source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
-h_suffix <- paste0(JM_HORIZON, "d")
 out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
 okabe <- c("#009E73", "#56B4E9", "#E69F00", "#D55E00", "#0072B2", "#CC79A7")
 DOSE_LEVELS    <- c(6, 8, 10)     # VT/PBW, mL/kg: the LTVV target, its upper bound, conventional
@@ -152,7 +151,8 @@ for (i in seq_len(nrow(usable))) {
     pt <- ld %>% distinct(hospitalization_id, vtpbw_pt_mean, ldisc_c)
     dose_med <- median(pt$vtpbw_pt_mean)
     disc_q   <- quantile(pt$ldisc_c, DISC_PCT / 100)
-    grid <- expand_grid(vent_day = seq(1, JM_HORIZON, by = 0.25), dose = DOSE_LEVELS, disc_pct = DISC_PCT) %>%
+    t_grid <- seq(STEP, JM_HORIZON, by = min(STEP, 0.25))
+    grid <- expand_grid(vent_day = t_grid, dose = DOSE_LEVELS, disc_pct = DISC_PCT) %>%
       mutate(vtpbw_pt_mean = dose_med, l_vtpbw_within = dose - dose_med,
              ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
              log_pbw = median(ld$log_pbw), log_pfvc = median(ld$log_pfvc),
@@ -163,7 +163,7 @@ for (i in seq_len(nrow(usable))) {
     Y <- X %*% t(draws)                                    # rows = grid, cols = draws
     Yc <- Y
     for (dp in DISC_PCT) {
-      ref1 <- which(grid$vent_day == 1 & grid$dose == DOSE_REF & grid$disc_pct == dp)
+      ref1 <- which(grid$vent_day == t_grid[1] & grid$dose == DOSE_REF & grid$disc_pct == dp)
       rows <- which(grid$disc_pct == dp)
       Yc[rows, ] <- sweep(Y[rows, , drop = FALSE], 2, Y[ref1, ])
     }
@@ -182,7 +182,7 @@ for (i in seq_len(nrow(usable))) {
         scale_colour_manual(values = okabe[seq_along(DOSE_LEVELS)], name = "VT/PBW (mL/kg)") +
         scale_fill_manual(values = okabe[seq_along(DOSE_LEVELS)], name = "VT/PBW (mL/kg)") +
         labs(title = b$marker$label, x = "Ventilator day",
-             y = sprintf("Log marker, relative to day 1 at %g mL/kg", DOSE_REF),
+             y = sprintf("Log marker, relative to the first period at %g mL/kg", DOSE_REF),
              subtitle = sprintf("n = %d patients%s", u$n_patients,
                                 if (gate) "" else " (R-hat gate failed)")) +
         theme_minimal(base_size = 11)
@@ -191,9 +191,9 @@ for (i in seq_len(nrow(usable))) {
 }
 
 trajectory_grid <- bind_rows(trajectory_rows)
-strain_effects  <- bind_rows(strain_rows)  %>% mutate(horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
-association_hr  <- bind_rows(assoc_rows)   %>% mutate(horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
-heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+strain_effects  <- bind_rows(strain_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+association_hr  <- bind_rows(assoc_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 write_csv(trajectory_grid, file.path(final_dir, paste0("jm_trajectory_grid_", out_tag, ".csv")))
 write_csv(strain_effects,  file.path(final_dir, paste0("jm_strain_effects_",  out_tag, ".csv")))
 write_csv(association_hr,  file.path(final_dir, paste0("jm_association_hr_",  out_tag, ".csv")))
@@ -202,7 +202,8 @@ if (nrow(heterogeneity)) write_csv(heterogeneity, file.path(final_dir, paste0("j
 # ---- figures
 if (length(traj_plots)) {
   p <- wrap_plots(traj_plots, ncol = 1, guides = "collect") +
-    plot_annotation(title = sprintf("Dose-response trajectories by PBW/PFVC discordance (first %d days, %s)", JM_HORIZON, site_name))
+    plot_annotation(title = sprintf("Dose-response trajectories by PBW/PFVC discordance (first %s, %s)",
+                                    if (JM_GRID == "6h") paste(as.integer(JM_HORIZON * 24), "hours") else paste(JM_HORIZON, "days"), site_name))
   ggsave(file.path(final_dir, paste0("jm_trajectories_", out_tag, ".pdf")), p,
          width = 11, height = 3.5 * length(traj_plots))
 }

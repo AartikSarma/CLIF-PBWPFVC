@@ -41,7 +41,8 @@
 #          intermediate/jm_fit_{marker}_{model}_{adj}_{H}d.rds   fit bundles
 #          (patient-level rows inside, so never in final/)
 #
-# Environment knobs: PBWPFVC_JM_HORIZON (7), PBWPFVC_JM_MARKERS (comma list),
+# Environment knobs: PBWPFVC_JM_GRID (6h | daily) with PBWPFVC_JM_HORIZON_H (48) or
+#   PBWPFVC_JM_HORIZON (7 days), PBWPFVC_JM_MARKERS (comma list),
 #   PBWPFVC_JM_MODELS (main,hetero), PBWPFVC_JM_BASELINE (free | offset; offset
 #   fixes the baseline coefficient at 1 = the log percent-change outcome, written
 #   with an offset_ prefix), PBWPFVC_JM_ITER / _BURNIN / _CHAINS (3500 / 500 / 3;
@@ -71,8 +72,7 @@ output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
 final_dir  <- here("output", paste0(site_name, "_output"), "final")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
-JM_HORIZON <- as.integer(Sys.getenv("PBWPFVC_JM_HORIZON", "7"))
-h_suffix   <- paste0(JM_HORIZON, "d")
+source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 N_ITER     <- as.integer(Sys.getenv("PBWPFVC_JM_ITER",   "3500"))
 N_BURNIN   <- as.integer(Sys.getenv("PBWPFVC_JM_BURNIN", "500"))
 N_CHAINS   <- as.integer(Sys.getenv("PBWPFVC_JM_CHAINS", "3"))
@@ -91,7 +91,7 @@ stopifnot(BASELINE_FORM %in% c("free", "offset"))
 # cause-specific hazard) or "value_slope" (adds the current slope). MALA = 1 uses
 # JMbayes2's gradient-based (MALA) update for the fixed effects, which mixes
 # better on the beta-random-effect ridge that random intercepts create.
-ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value_slope")
+ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", if (JM_GRID == "6h") "value" else "value_slope")
 stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
 USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
 # With the within-between decomposition the patient mean already carries the
@@ -164,12 +164,15 @@ message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients
 # =============================================================================
 # y      : the daily column;  y0 : its index-day baseline (surv table)
 # own_lag: the lagged confounder that IS this marker's own lag, dropped from its model
-# random : pdDiag for the sparse plateau-measured mechanics marker, unstructured otherwise
+# random : pdDiag for the sparse plateau-measured mechanics marker, unstructured otherwise.
+#          On the 6h grid the labs (creatinine, platelets, bilirubin) carry one or
+#          two values in 48 hours, so they get a random intercept only ("intercept")
+#          and a shared linear slope; the dense markers keep intercept + slope.
 # offset : added before the log for markers with true zeros (NE-equivalent dose)
 markers <- list(
-  creatinine    = list(y = "creatinine",    y0 = "creatinine_0", own_lag = NULL,       random = "unstructured", offset = 0,    label = "Creatinine"),
-  platelets     = list(y = "platelets",     y0 = "platelet_0",   own_lag = NULL,       random = "unstructured", offset = 0,    label = "Platelets"),
-  bilirubin     = list(y = "bilirubin",     y0 = "bilirubin_0",  own_lag = NULL,       random = "unstructured", offset = 0,    label = "Bilirubin"),
+  creatinine    = list(y = "creatinine",    y0 = "creatinine_0", own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Creatinine"),
+  platelets     = list(y = "platelets",     y0 = "platelet_0",   own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Platelets"),
+  bilirubin     = list(y = "bilirubin",     y0 = "bilirubin_0",  own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Bilirubin"),
   sf            = list(y = "sf",            y0 = "sf_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "SF ratio"),
   dp            = list(y = "dp",            y0 = "dp_0",         own_lag = NULL,       random = "pddiag",       offset = 0,    label = "Driving pressure"),
   ne_equiv_peak = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0.01, label = "NE-equivalent dose")
@@ -201,7 +204,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
-    filter(vent_day >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
+    filter(period >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
     mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
@@ -280,12 +283,21 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     disc      = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
     saturated = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
     none      = "l_vtpbw_within")
-  rhs <- c("ns(vent_day, 3)", mod_terms, "vtpbw_pt_mean", CUM_TERM,
+  # time: linear over the 48-hour grid (the plausible shape there); a 3-df
+  # natural spline over the 7-day daily grid
+  time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
+  rhs <- c(time_term, mod_terms, "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
            lag_terms, BASE_RHS, if (adjusted) DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
-  random_spec <- if (mk$random == "pddiag") list(id = nlme::pdDiag(~ vent_day)) else ~ vent_day | id
+  random_spec <- switch(mk$random,
+    pddiag       = list(id = nlme::pdDiag(~ vent_day)),
+    intercept    = ~ 1 | id,
+    unstructured = ~ vent_day | id)
+  if (mk$random == "intercept" && ASSOC_FORM == "value_slope")
+    stop("marker ", mk$y, " has a random intercept only on this grid; the slope association needs a random slope. ",
+         "Use PBWPFVC_JM_ASSOC=value.")
   lme_fit <- lme(lme_formula, random = random_spec, data = ld,
                  control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200))
   stamp("LME converged")
@@ -452,7 +464,7 @@ manifest <- map_dfr(results, function(r)
                       key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
                       worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
-  mutate(baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
+  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, site = site_name)
 estimates  <- map_dfr(results, "estimates")

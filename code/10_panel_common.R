@@ -115,10 +115,13 @@ if (is_synthetic) {
   message("*** SYNTHETIC SITE: simulated survival (plumbing only; synthetic CLIF mortality is unreliable). ***")
   set.seed(20260615); n <- nrow(cs); died_h <- rbinom(n, 1L, 0.35)
   tte <- rep(NA_real_, n); tte[died_h == 1L] <- rtrunc_lnorm(sum(died_h), log(9), 0.95, 0.04, HORIZON)
-  cs <- cs %>% mutate(death_day = if_else(died_h == 1L, floor(tte), NA_real_))
+  cs <- cs %>% mutate(death_day = if_else(died_h == 1L, floor(tte), NA_real_),
+                      death_time_days = if_else(died_h == 1L, tte, NA_real_))
 } else {
   cs <- cs %>% mutate(idx = as.numeric(difftime(death_dttm, recorded_dttm, units = "days")),
-                      death_day = if_else(!is.na(idx) & idx >= 0 & idx <= HORIZON, floor(idx), NA_real_))
+                      death_day = if_else(!is.na(idx) & idx >= 0 & idx <= HORIZON, floor(idx), NA_real_),
+                      # unfloored death time, for the joint models' sub-daily grid
+                      death_time_days = if_else(!is.na(idx) & idx >= 0 & idx <= HORIZON, idx, NA_real_))
 }
 age_breaks <- quantile(cs$age_at_admission, c(1/3, 2/3), na.rm = TRUE)
 base <- cs %>%
@@ -130,7 +133,7 @@ base <- cs %>%
             pfvc_gli = pfvc,            # ALWAYS the GLI-2012 PFVC (the joint models' normalizer)
             pfvc = .data[[PANEL_NORM]], # the CEILING normalizer (switch); downstream stays normalizer-agnostic
             pfvc_age25,                 # ALWAYS carry the structural normalizer (12 secondary CATE + positivity)
-            pbw, death_day,
+            pbw, death_day, death_time_days,
             # measured mechanics at the index timepoint (plateau subset only, so often NA).
             # ers (cmH2O/L) x the size normalizer is SPECIFIC elastance: near-constant across
             # lungs if the normalizer is right about this patient's aerated volume (Chiumello),

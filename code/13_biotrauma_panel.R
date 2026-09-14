@@ -66,11 +66,95 @@ is_synthetic <- identical(site_name, "synthetic_clif")
 PANEL_NORM   <- "pfvc"          # the joint models always normalize to GLI PFVC
 source(here("code", "10_panel_common.R"))
 
-JM_HORIZON <- as.integer(Sys.getenv("PBWPFVC_JM_HORIZON", "7"))
-stopifnot(is.finite(JM_HORIZON), JM_HORIZON >= 2L, JM_HORIZON <= HORIZON)
-h_suffix <- paste0(JM_HORIZON, "d")
-STRAIN_CEILING <- 11   # VT/PFVC % above which a day counts toward the cumulative-strain exposure
-message("=== 13_biotrauma_panel: horizon ", JM_HORIZON, " days, site ", site_name, " ===")
+# --- time grid. PRIMARY = "6h": six-hour periods over the first 48 hours, where
+# the ventilator acts on the injured lung most, a linear trend is plausible, and
+# death and extubation have not yet removed a third of the cohort. The dense
+# markers (SF, driving pressure, NE-equivalent dose) have a value in most
+# periods; labs are drawn about daily and carry one or two values. SENSITIVITY =
+# "daily": one row per ventilator day over PBWPFVC_JM_HORIZON days (7), with the
+# day spline in the fit. Both grids share the 13_biotrauma_fit.R / _report.R code
+# through the `period` index and the numeric time `vent_day` (days).
+source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP_H, STEP, JM_HORIZON, N_PERIODS, h_suffix
+STRAIN_CEILING <- 11   # VT/PFVC % above which a period counts toward the cumulative-strain exposure
+message("=== 13_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " days (",
+        N_PERIODS, " periods), site ", site_name, " ===")
+
+# =============================================================================
+# The period panel: one row per patient-period, either the shared daily panel
+# (grid = daily) or a six-hour reduction of the same sources (grid = 6h)
+# =============================================================================
+if (JM_GRID == "daily") {
+  pf  <- panel_full %>% mutate(period = as.integer(vent_day))
+  dpp <- dp_daily   %>% mutate(period = as.integer(vent_day))
+  extub_time <- base %>% transmute(hospitalization_id, extub_time = as.numeric(imv_extub_day))
+} else {
+  per <- function(dttm, t0) as.integer(floor(as.numeric(difftime(dttm, t0, units = "hours")) / STEP_H))
+  b0  <- base %>% select(hospitalization_id, t0)
+  MAXP <- as.integer(ceiling(MAX_VENT_DAY * 24 / STEP_H))
+  # ventilator settings per period from the same waterfall rows the daily panel uses (wf)
+  set_p <- wf %>% mutate(period = per(recorded_dttm, t0)) %>%
+    filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>%
+    summarise(vtpfvc = median(vtpfvc, na.rm = TRUE), vtpfvc_max = max(vtpfvc, na.rm = TRUE),
+              vt_ml = median(tidal_volume_set, na.rm = TRUE),
+              fio2 = median(fio2_set, na.rm = TRUE), peep = median(peep_set, na.rm = TRUE),
+              rr = median(resp_rate_set, na.rm = TRUE), .groups = "drop")
+  dpp <- wf %>% mutate(period = per(recorded_dttm, t0)) %>%
+    filter(period >= 0L, period <= MAXP, !is.na(plateau_pressure_obs), !is.na(peep_set),
+           plateau_pressure_obs - peep_set > 0) %>%
+    mutate(dp = plateau_pressure_obs - peep_set) %>%
+    group_by(hospitalization_id, period) %>% summarise(dp = max(dp), .groups = "drop")
+  map_p <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet")) %>%
+    filter(vital_category == "map") %>% inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(recorded_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>% summarise(map = median(vital_value, na.rm = TRUE), .groups = "drop")
+  # SF per SpO2 measurement (FiO2 rolled back within 4 h, SpO2 clamped to 80-97, as in the daily panel), worst per period
+  t0_num <- b0 %>% transmute(hospitalization_id, t0n = as.numeric(t0))
+  sf_p <- fio2_dt[spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
+    filter(!is.na(fio2_set)) %>%
+    mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set), sf_pt = spo2_clamped / fio2_frac) %>%
+    filter(is.finite(sf_pt)) %>% inner_join(t0_num, by = "hospitalization_id") %>%
+    mutate(period = as.integer(floor((t - t0n) / 3600 / STEP_H))) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>% summarise(sf = min(sf_pt), .groups = "drop")
+  med_p <- read_parquet(file.path(output_dir, "cohort_meds.parquet")) %>%
+    filter(med_group == "vasoactives") %>% inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(admin_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    distinct(hospitalization_id, period) %>% mutate(on_pressor = 1L)
+  ne_p <- read_parquet(file.path(output_dir, "ne_equiv_admin.parquet")) %>%
+    inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(admin_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>% summarise(ne_equiv_peak = max(ne_equiv_total), .groups = "drop")
+  lab_p <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+    filter(lab_category %in% c("creatinine", "platelet_count", "bilirubin_total"), !is.na(lab_value_numeric)) %>%
+    inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(lab_result_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>%
+    summarise(creatinine = { v <- lab_value_numeric[lab_category == "creatinine"];      if (length(v)) max(v) else NA_real_ },
+              platelets  = { v <- lab_value_numeric[lab_category == "platelet_count"];  if (length(v)) min(v) else NA_real_ },
+              bilirubin  = { v <- lab_value_numeric[lab_category == "bilirubin_total"]; if (length(v)) max(v) else NA_real_ },
+              .groups = "drop")
+  # extubation at period resolution: last IMV period + 1
+  extub_time <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+    select(hospitalization_id, recorded_dttm, device_category) %>%
+    filter(tolower(device_category) == "imv") %>% inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(recorded_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id) %>% summarise(extub_time = (max(period) + 1L) * STEP, .groups = "drop")
+  pf <- set_p %>%
+    left_join(map_p, by = c("hospitalization_id", "period")) %>%
+    left_join(sf_p,  by = c("hospitalization_id", "period")) %>%
+    left_join(med_p, by = c("hospitalization_id", "period")) %>%
+    left_join(ne_p,  by = c("hospitalization_id", "period")) %>%
+    left_join(lab_p, by = c("hospitalization_id", "period")) %>%
+    left_join(base,  by = "hospitalization_id") %>%
+    mutate(on_pressor = coalesce(on_pressor, 0L), ne_equiv_peak = coalesce(ne_equiv_peak, 0),
+           vent_day = period * STEP)
+  dpp <- dpp %>% mutate(vent_day = period * STEP)
+  message("Six-hour panel: ", nrow(pf), " patient-periods, ", n_distinct(pf$hospitalization_id),
+          " patients; SF on ", sum(!is.na(pf$sf)), ", creatinine on ", sum(!is.na(pf$creatinine)), " periods")
+}
+death_time <- base %>%
+  transmute(hospitalization_id,
+            death_time = if (JM_GRID == "daily") death_day else death_time_days)
 
 # =============================================================================
 # SYNTHETIC SITE ONLY: give the markers a patient-level structure
@@ -100,8 +184,8 @@ if (is_synthetic) {
                                          v = all_of(paste0("v_", m))), by = "hospitalization_id") %>%
       mutate(!!m := .data[[m]] * exp(u + v * vent_day)) %>% select(-u, -v)
   }
-  for (m in setdiff(names(marker_sd), "dp")) panel_full <- perturb(panel_full, m)
-  dp_daily <- perturb(dp_daily, "dp")
+  for (m in setdiff(names(marker_sd), "dp")) pf <- perturb(pf, m)
+  dpp <- perturb(dpp, "dp")
 }
 
 # =============================================================================
@@ -116,14 +200,14 @@ if (is_synthetic) {
 LOG_MARKERS <- c("creatinine", "platelets", "bilirubin", "sf", "dp")
 nonpositive_counts <- setNames(integer(length(LOG_MARKERS)), LOG_MARKERS)
 for (m in LOG_MARKERS) {
-  df <- if (m == "dp") dp_daily else panel_full
+  df <- if (m == "dp") dpp else pf
   bad <- !is.na(df[[m]]) & df[[m]] <= 0
   nonpositive_counts[[m]] <- sum(bad)
   df[[m]][bad] <- NA_real_
-  if (m == "dp") dp_daily <- df else panel_full <- df
+  if (m == "dp") dpp <- df else pf <- df
 }
 if (any(nonpositive_counts > 0))
-  message("Non-positive marker values set to missing (patient-days): ",
+  message("Non-positive marker values set to missing (patient-periods): ",
           paste(sprintf("%s %d", names(nonpositive_counts), nonpositive_counts), collapse = ", "))
 
 # =============================================================================
@@ -138,7 +222,8 @@ rrt <- read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>%
   summarise(rrt_start_dttm = min(recorded_dttm), .groups = "drop") %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
   transmute(hospitalization_id,
-            rrt_day = floor(as.numeric(difftime(rrt_start_dttm, t0, units = "days"))))
+            rrt_period = as.integer(floor(as.numeric(difftime(rrt_start_dttm, t0, units = "hours")) / STEP_H)),
+            rrt_day = rrt_period * STEP)
 message("CRRT: ", nrow(rrt), " patients with any record; ",
         sum(rrt$rrt_day < 0), " already on CRRT at the index, ",
         sum(rrt$rrt_day >= 0 & rrt$rrt_day <= JM_HORIZON), " start within the horizon")
@@ -165,15 +250,15 @@ marker_cols <- c(creatinine = "creatinine", platelets = "platelets", bilirubin =
                  sf = "sf", dp = "dp", ne_equiv_peak = "ne_equiv_peak")
 baseline_names <- c(creatinine = "creatinine_0", platelets = "platelet_0", bilirubin = "bilirubin_0",
                     sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")
-with_dp <- panel_full %>% filter(vent_day <= JM_HORIZON) %>%
-  left_join(dp_daily, by = c("hospitalization_id", "vent_day"))
+with_dp <- pf %>% filter(period <= N_PERIODS) %>%
+  left_join(dpp %>% select(hospitalization_id, period, dp), by = c("hospitalization_id", "period"))
 first_obs <- map(names(marker_cols), function(m) {
   with_dp %>% filter(!is.na(.data[[m]])) %>%
-    group_by(hospitalization_id) %>% slice_min(vent_day, n = 1, with_ties = FALSE) %>% ungroup() %>%
-    transmute(hospitalization_id, !!baseline_names[[m]] := .data[[m]], !!paste0(baseline_names[[m]], "_day") := vent_day)
+    group_by(hospitalization_id) %>% slice_min(period, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    transmute(hospitalization_id, !!baseline_names[[m]] := .data[[m]], !!paste0(baseline_names[[m]], "_day") := period)
 }) %>% reduce(full_join, by = "hospitalization_id")
-day0 <- panel_full %>%
-  filter(vent_day == 0L) %>%
+day0 <- pf %>%
+  filter(period == 0L) %>%
   select(hospitalization_id, vt_ml_0 = vt_ml, vtpfvc_0 = vtpfvc) %>%
   left_join(first_obs, by = "hospitalization_id")
 # Patient-level strain: the mean of the daily VT/PFVC over the observed course
@@ -181,8 +266,8 @@ day0 <- panel_full %>%
 # decomposition in the longitudinal submodel (dose level plus PBW/PFVC
 # discordance, which within a patient is a constant); the WITHIN term is each
 # day's deviation from it, the clinician's dose change rescaled by that constant.
-pt_strain <- panel_full %>%
-  filter(vent_day <= JM_HORIZON, !is.na(vtpfvc)) %>%
+pt_strain <- pf %>%
+  filter(period <= N_PERIODS, !is.na(vtpfvc)) %>%
   group_by(hospitalization_id) %>%
   summarise(vtpfvc_pt_mean = mean(vtpfvc), vtpbw_pt_mean = mean(vt_ml / pbw),
             vtpfvc_pt_n = n(), .groups = "drop")
@@ -190,6 +275,8 @@ surv <- base %>%
   left_join(rrt, by = "hospitalization_id") %>%
   left_join(day0, by = "hospitalization_id") %>%
   left_join(pt_strain, by = "hospitalization_id") %>%
+  left_join(death_time, by = "hospitalization_id") %>%
+  left_join(extub_time, by = "hospitalization_id") %>%
   mutate(
     # hazard-model exposures on the paper's primary scale: the clinician's dose
     # (VT/PBW at the index) and the size term (log PFVC); VT/PFVC at the index is
@@ -200,16 +287,16 @@ surv <- base %>%
     # log PBW/PFVC discordance, centred at the cohort median: the effect modifier
     # of the dose slope in the primary longitudinal model
     ldisc_c    = log(pbw / pfvc_gli) - median(log(pbw / pfvc_gli), na.rm = TRUE),
-    death_in  = !is.na(death_day) & death_day <= JM_HORIZON,
-    extub_in  = !is.na(imv_extub_day) & imv_extub_day <= JM_HORIZON,
+    death_in  = !is.na(death_time) & death_time <= JM_HORIZON,
+    extub_in  = !is.na(extub_time) & extub_time <= JM_HORIZON,
     event = case_when(
-      death_in & (!extub_in | death_day <= imv_extub_day) ~ 1L,   # death (tie counts as death)
-      extub_in                                            ~ 2L,   # extubation
-      TRUE                                                ~ 0L),  # censored at the horizon
-    event_day = case_when(event == 1L ~ death_day,
-                          event == 2L ~ as.numeric(imv_extub_day),
+      death_in & (!extub_in | death_time <= extub_time) ~ 1L,   # death (tie counts as death)
+      extub_in                                          ~ 2L,   # extubation
+      TRUE                                              ~ 0L),  # censored at the horizon
+    event_day = case_when(event == 1L ~ death_time,
+                          event == 2L ~ extub_time,
                           TRUE        ~ as.numeric(JM_HORIZON)),
-    event_time = pmax(event_day, 1),
+    event_time = pmax(event_day, STEP),   # JMbayes2 needs strictly positive times
     event_factor = factor(c("censored", "death", "extubation")[event + 1L],
                           levels = c("censored", "death", "extubation")),
     ers_pfvc_0 = ers * pfvc_gli,                 # specific elastance at the index (plateau subset)
@@ -218,7 +305,7 @@ surv <- base %>%
     creatinine_0 = if_else(rrt_before_index, NA_real_, creatinine_0)   # no creatinine trajectory on CRRT at the index
   ) %>%
   select(hospitalization_id, t0, event, event_day, event_time, event_factor,
-         death_day, imv_extub_day, rrt_day, rrt_before_index,
+         death_day, imv_extub_day, death_time, extub_time, rrt_day, rrt_period, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
@@ -233,8 +320,8 @@ message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 
 # One row per patient-day with a set tidal volume (the `daily` grid), day 0 to
 # JM_HORIZON. The previous day's values are attached by joining on vent_day - 1,
 # so a gap in charting yields a missing lag (reported below) instead of a stale one.
-prev <- panel_full %>%
-  transmute(hospitalization_id, vent_day = vent_day + 1L,
+prev <- pf %>%
+  transmute(hospitalization_id, period = period + 1L,
             l_vtpfvc = vtpfvc, l_vtpbw = vt_ml / pbw,
             l_sf = sf, l_pressor = on_pressor, l_fio2 = fio2, l_peep = peep)
 # Cumulative strain through the previous day, two forms. mean_prior_vtpfvc (the
@@ -244,44 +331,44 @@ prev <- panel_full %>%
 # ventilator day exactly, so it is an interaction of day with a patient indicator
 # and competes with the day spline and the random slope (R-hat 3 to 4 on it in
 # every fit, synthetic and MIMIC).
-cum_above <- panel_full %>%
-  group_by(hospitalization_id) %>% arrange(vent_day, .by_group = TRUE) %>%
-  transmute(hospitalization_id, vent_day = vent_day + 1L,
-            cum_days_above = cumsum(vtpfvc > STRAIN_CEILING),
+cum_above <- pf %>%
+  group_by(hospitalization_id) %>% arrange(period, .by_group = TRUE) %>%
+  transmute(hospitalization_id, period = period + 1L,
+            cum_days_above = cumsum(vtpfvc > STRAIN_CEILING) * STEP,   # days above, through the previous period
             mean_prior_vtpfvc = cummean(vtpfvc)) %>%
   ungroup()
-long <- panel_full %>%
-  filter(vent_day <= JM_HORIZON) %>%
-  select(hospitalization_id, vent_day, vtpfvc, vt_ml, fio2, peep, rr, map, sf, on_pressor,
+long <- pf %>%
+  filter(period <= N_PERIODS) %>%
+  select(hospitalization_id, period, vent_day, vtpfvc, vt_ml, fio2, peep, rr, map, sf, on_pressor,
          ne_equiv_peak, creatinine, platelets, bilirubin) %>%
-  left_join(dp_daily, by = c("hospitalization_id", "vent_day")) %>%
-  left_join(prev, by = c("hospitalization_id", "vent_day")) %>%
-  left_join(cum_above, by = c("hospitalization_id", "vent_day")) %>%
-  mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA on day 0
-  inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index,
+  left_join(dpp %>% select(hospitalization_id, period, dp), by = c("hospitalization_id", "period")) %>%
+  left_join(prev, by = c("hospitalization_id", "period")) %>%
+  left_join(cum_above, by = c("hospitalization_id", "period")) %>%
+  mutate(cum_days_above = if_else(period == 0L, 0, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA at period 0
+  inner_join(surv %>% select(hospitalization_id, event_day, rrt_period, rrt_before_index,
                              vtpfvc_pt_mean, vtpbw_pt_mean, ends_with("_0_day")),
              by = "hospitalization_id") %>%
   filter(vent_day <= event_day) %>%
   mutate(
-    # each marker's trajectory starts the day after its baseline observation
-    creatinine    = if_else(!is.na(creatinine_0_day) & vent_day <= creatinine_0_day, NA_real_, creatinine),
-    platelets     = if_else(!is.na(platelet_0_day)   & vent_day <= platelet_0_day,   NA_real_, platelets),
-    bilirubin     = if_else(!is.na(bilirubin_0_day)  & vent_day <= bilirubin_0_day,  NA_real_, bilirubin),
-    sf            = if_else(!is.na(sf_0_day)         & vent_day <= sf_0_day,         NA_real_, sf),
-    dp            = if_else(!is.na(dp_0_day)         & vent_day <= dp_0_day,         NA_real_, dp),
-    ne_equiv_peak = if_else(!is.na(ne_equiv_0_day)   & vent_day <= ne_equiv_0_day,   NA_real_, ne_equiv_peak),
+    # each marker's trajectory starts the period after its baseline observation
+    creatinine    = if_else(!is.na(creatinine_0_day) & period <= creatinine_0_day, NA_real_, creatinine),
+    platelets     = if_else(!is.na(platelet_0_day)   & period <= platelet_0_day,   NA_real_, platelets),
+    bilirubin     = if_else(!is.na(bilirubin_0_day)  & period <= bilirubin_0_day,  NA_real_, bilirubin),
+    sf            = if_else(!is.na(sf_0_day)         & period <= sf_0_day,         NA_real_, sf),
+    dp            = if_else(!is.na(dp_0_day)         & period <= dp_0_day,         NA_real_, dp),
+    ne_equiv_peak = if_else(!is.na(ne_equiv_0_day)   & period <= ne_equiv_0_day,   NA_real_, ne_equiv_peak),
     # within-patient strain: yesterday's VT/PFVC relative to the patient's own mean
     l_vtpfvc_within = l_vtpfvc - vtpfvc_pt_mean,
     l_vtpbw_within  = l_vtpbw  - vtpbw_pt_mean,    # the clinician's dose change (mL/kg PBW)
     # creatinine censored at RRT start; no trajectory if on CRRT at the index
-    creat_censored_rrt = rrt_before_index | (!is.na(rrt_day) & vent_day >= rrt_day),
+    creat_censored_rrt = rrt_before_index | (!is.na(rrt_period) & period >= rrt_period),
     creatinine = if_else(creat_censored_rrt, NA_real_, creatinine)
   ) %>%
-  select(-event_day, -rrt_day, -rrt_before_index, -vtpfvc_pt_mean, -vtpbw_pt_mean, -ends_with("_0_day")) %>%
-  arrange(hospitalization_id, vent_day)
-message("Longitudinal table: ", nrow(long), " patient-days, ",
+  select(-event_day, -rrt_period, -rrt_before_index, -vtpfvc_pt_mean, -vtpbw_pt_mean, -ends_with("_0_day")) %>%
+  arrange(hospitalization_id, period)
+message("Longitudinal table: ", nrow(long), " patient-periods, ",
         n_distinct(long$hospitalization_id), " patients; lag missing on ",
-        sum(is.na(long$l_vtpfvc) & long$vent_day > 0L), " post-index rows; creatinine days removed for RRT: ",
+        sum(is.na(long$l_vtpfvc) & long$period > 0L), " post-index rows; creatinine periods removed for RRT: ",
         sum(long$creat_censored_rrt))
 
 # =============================================================================
@@ -314,19 +401,20 @@ summary_tbl <- bind_rows(
          patients_ge2_obs = NA_integer_, median_obs_per_patient = NA_real_,
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
          plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%
-  mutate(horizon_days = JM_HORIZON,
+  mutate(grid = JM_GRID, step_hours = STEP_H, horizon_days = JM_HORIZON,
          crrt_available = crrt_available,
          rrt_before_index = sum(surv$rrt_before_index),
          rrt_within_horizon = sum(!is.na(surv$rrt_day) & surv$rrt_day >= 0 & surv$rrt_day <= JM_HORIZON),
          creatinine_days_removed_rrt = sum(long$creat_censored_rrt),
-         lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$vent_day > 0L),
+         lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$period > 0L),
          site = site_name)
 print(as.data.frame(summary_tbl), row.names = FALSE)
 write_csv(summary_tbl, file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
 
 write_parquet(long, file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
 write_parquet(surv, file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
-saveRDS(list(horizon = JM_HORIZON, h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING,
+saveRDS(list(grid = JM_GRID, step_hours = STEP_H, step = STEP, horizon = JM_HORIZON, n_periods = N_PERIODS,
+             h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING,
              panel_cohort_tag = panel_cohort_tag, site_name = site_name,
              n_patients = nrow(surv), n_days = nrow(long), built_at = as.character(Sys.time())),
         file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
