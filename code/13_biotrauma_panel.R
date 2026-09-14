@@ -150,19 +150,32 @@ message("CRRT: ", nrow(rrt), " patients with any record; ",
 # and imv_extub_day (last IMV day + 1) come from the shared panel. Censoring at
 # the horizon otherwise. JMbayes2 needs strictly positive times, so an event on
 # day 0 is placed at day 1 (the TTE's pmax(., 1) convention).
-# Marker baselines are the DAY-0 daily values (the same reduction as the trajectory:
-# creatinine and bilirubin max, platelets min, SF worst, DP max, NE-equivalent peak).
-# The cross-sectional table's index-timepoint labs are matched inside a narrow
-# window and are missing for most patients (synthetic: 218 of 676 for creatinine
-# against 428 with a day-0 value), and it carries no bilirubin at all. A patient
-# without a day-0 value has no baseline for that marker and leaves that marker's
-# model; the count is in the summary table.
+# Marker baselines are the FIRST OBSERVED daily value of each marker within the
+# horizon (the same reduction as the trajectory: creatinine and bilirubin max,
+# platelets min, SF worst, DP max, NE-equivalent peak), with the day it was
+# observed recorded as {marker}_0_day; the trajectory for that marker starts the
+# day after. Day 0 is the baseline for everyone with a day-0 value (SF, DP and
+# the NE-equivalent dose always; creatinine for most). Labs are not drawn every
+# day, so requiring a day-0 value cost a third of the creatinine cohort at MIMIC
+# (3,427 of 5,382 patients with two or more observations); the summary table
+# reports how many baselines fall on day 0 and how many later. The
+# cross-sectional table's index-timepoint labs are not used: they are matched
+# inside a narrow window, missing for most patients, and carry no bilirubin.
+marker_cols <- c(creatinine = "creatinine", platelets = "platelets", bilirubin = "bilirubin",
+                 sf = "sf", dp = "dp", ne_equiv_peak = "ne_equiv_peak")
+baseline_names <- c(creatinine = "creatinine_0", platelets = "platelet_0", bilirubin = "bilirubin_0",
+                    sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")
+with_dp <- panel_full %>% filter(vent_day <= JM_HORIZON) %>%
+  left_join(dp_daily, by = c("hospitalization_id", "vent_day"))
+first_obs <- map(names(marker_cols), function(m) {
+  with_dp %>% filter(!is.na(.data[[m]])) %>%
+    group_by(hospitalization_id) %>% slice_min(vent_day, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    transmute(hospitalization_id, !!baseline_names[[m]] := .data[[m]], !!paste0(baseline_names[[m]], "_day") := vent_day)
+}) %>% reduce(full_join, by = "hospitalization_id")
 day0 <- panel_full %>%
   filter(vent_day == 0L) %>%
-  left_join(dp_daily, by = c("hospitalization_id", "vent_day")) %>%
-  select(hospitalization_id, creatinine_0 = creatinine, platelet_0 = platelets,
-         bilirubin_0 = bilirubin, sf_0 = sf, dp_0 = dp, ne_equiv_0 = ne_equiv_peak,
-         vt_ml_0 = vt_ml, vtpfvc_0 = vtpfvc)
+  select(hospitalization_id, vt_ml_0 = vt_ml, vtpfvc_0 = vtpfvc) %>%
+  left_join(first_obs, by = "hospitalization_id")
 # Patient-level strain: the mean of the daily VT/PFVC over the observed course
 # within the horizon. It is the BETWEEN-patient term of the within-between
 # decomposition in the longitudinal submodel (dose level plus PBW/PFVC
@@ -209,7 +222,8 @@ surv <- base %>%
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
-         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0)
+         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0,
+         ends_with("_0_day"))
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
         ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
 
@@ -245,10 +259,17 @@ long <- panel_full %>%
   left_join(cum_above, by = c("hospitalization_id", "vent_day")) %>%
   mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA on day 0
   inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index,
-                             vtpfvc_pt_mean, vtpbw_pt_mean),
+                             vtpfvc_pt_mean, vtpbw_pt_mean, ends_with("_0_day")),
              by = "hospitalization_id") %>%
   filter(vent_day <= event_day) %>%
   mutate(
+    # each marker's trajectory starts the day after its baseline observation
+    creatinine    = if_else(!is.na(creatinine_0_day) & vent_day <= creatinine_0_day, NA_real_, creatinine),
+    platelets     = if_else(!is.na(platelet_0_day)   & vent_day <= platelet_0_day,   NA_real_, platelets),
+    bilirubin     = if_else(!is.na(bilirubin_0_day)  & vent_day <= bilirubin_0_day,  NA_real_, bilirubin),
+    sf            = if_else(!is.na(sf_0_day)         & vent_day <= sf_0_day,         NA_real_, sf),
+    dp            = if_else(!is.na(dp_0_day)         & vent_day <= dp_0_day,         NA_real_, dp),
+    ne_equiv_peak = if_else(!is.na(ne_equiv_0_day)   & vent_day <= ne_equiv_0_day,   NA_real_, ne_equiv_peak),
     # within-patient strain: yesterday's VT/PFVC relative to the patient's own mean
     l_vtpfvc_within = l_vtpfvc - vtpfvc_pt_mean,
     l_vtpbw_within  = l_vtpbw  - vtpbw_pt_mean,    # the clinician's dose change (mL/kg PBW)
@@ -256,7 +277,7 @@ long <- panel_full %>%
     creat_censored_rrt = rrt_before_index | (!is.na(rrt_day) & vent_day >= rrt_day),
     creatinine = if_else(creat_censored_rrt, NA_real_, creatinine)
   ) %>%
-  select(-event_day, -rrt_day, -rrt_before_index, -vtpfvc_pt_mean, -vtpbw_pt_mean) %>%
+  select(-event_day, -rrt_day, -rrt_before_index, -vtpfvc_pt_mean, -vtpbw_pt_mean, -ends_with("_0_day")) %>%
   arrange(hospitalization_id, vent_day)
 message("Longitudinal table: ", nrow(long), " patient-days, ",
         n_distinct(long$hospitalization_id), " patients; lag missing on ",
@@ -278,7 +299,8 @@ per_marker <- map_dfr(markers, function(m) {
          patient_days = nrow(obs),
          nonpositive_set_missing = if (m %in% LOG_MARKERS) nonpositive_counts[[m]] else 0L,
          patients_any = nrow(per_pt),
-         patients_day0_baseline = sum(!is.na(surv[[y0]])),
+         patients_with_baseline = sum(!is.na(surv[[y0]])),
+         patients_day0_baseline = sum(surv[[paste0(y0, "_day")]] == 0L, na.rm = TRUE),
          patients_ge2_obs = length(ids2),
          median_obs_per_patient = if (nrow(per_pt)) median(per_pt$n) else NA_real_,
          deaths_ge2 = sum(ev$event == 1L), extubations_ge2 = sum(ev$event == 2L),
@@ -288,7 +310,7 @@ summary_tbl <- bind_rows(
   per_marker,
   tibble(marker = "cohort",
          patient_days = nrow(long), nonpositive_set_missing = NA_integer_, patients_any = nrow(surv),
-         patients_day0_baseline = NA_integer_,
+         patients_with_baseline = NA_integer_, patients_day0_baseline = NA_integer_,
          patients_ge2_obs = NA_integer_, median_obs_per_patient = NA_real_,
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
          plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%

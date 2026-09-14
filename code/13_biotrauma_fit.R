@@ -234,8 +234,13 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   sd_ <- sd_ %>% arrange(id)
   n_pts <- length(lv); n_deaths <- sum(sd_$event == 1L); n_extub <- sum(sd_$event == 2L)
   stamp(nrow(ld), " rows, ", n_pts, " patients, ", n_deaths, " deaths, ", n_extub, " extubations")
+  # within-patient spread of the dose: a null dose slope on an exposure that
+  # barely moves is a power statement, not a finding
+  within_sd <- sd(ld$l_vtpbw_within)
+  frac_moved <- mean(abs(ld$l_vtpbw_within) > 0.5)
   counts <- tibble(marker = mk$y, model = model, adjustment = adj_lab,
-                   n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub)
+                   n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub,
+                   dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved)
   if (n_pts < MIN_PATIENTS || n_deaths < MIN_DEATHS) {
     stamp("skipped: too few patients or deaths")
     return(list(status = "skipped", reason = "too few patients or deaths", counts = counts))
@@ -360,6 +365,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            interaction_lo = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.025), interaction_hi = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.975),
            gamma_median = median(g), gamma_lo = quantile(g, 0.025), gamma_hi = quantile(g, 0.975),
            p_gamma_gt0 = mean(g > 0), p_gamma_gt_half = mean(g > 0.5), p_gamma_lt1 = mean(g < 1),
+           dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved,
            n_patients = n_pts, horizon_days = JM_HORIZON, site = site_name)
   } else NULL
   max_rhat <- max(est$rhat, na.rm = TRUE)
@@ -412,7 +418,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 # =============================================================================
 jobs <- expand_grid(marker = names(markers), model = want_models, adjusted = c(TRUE, FALSE)) %>%
   filter(!(model == "hetero" & !adjusted))   # heterogeneity: adjusted only
-results <- pmap(jobs, function(marker, model, adjusted) {
+run_job <- function(marker, model, adjusted) {
   tryCatch(fit_one(markers[[marker]], model, adjusted),
            error = function(e) {
              message(sprintf("  %s/%s/%s FAILED: %s", marker, model,
@@ -421,7 +427,24 @@ results <- pmap(jobs, function(marker, model, adjusted) {
                   counts = tibble(marker = markers[[marker]]$y, model = model,
                                   adjustment = if (adjusted) "adjusted" else "unadjusted"))
            })
-})
+}
+# Fits run in parallel across PSOCK workers, each fit using one core per chain,
+# as many fits at once as the core budget allows (N_CORES / N_CHAINS). Worker
+# output is forwarded to this console (outfile = ""), so stamps and heartbeats
+# from concurrent fits interleave, each prefixed by its fit tag.
+N_FITS_PAR <- max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS))
+if (N_FITS_PAR > 1L) {
+  message("Running ", nrow(jobs), " fits, ", N_FITS_PAR, " at a time (", N_CHAINS, " chains each)")
+  cl <- makeCluster(N_FITS_PAR, type = "PSOCK", outfile = "")
+  clusterEvalQ(cl, suppressPackageStartupMessages({
+    library(tidyverse); library(splines); library(nlme); library(survival); library(JMbayes2)
+  }))
+  clusterExport(cl, setdiff(ls(envir = .GlobalEnv), "cl"), envir = .GlobalEnv)
+  results <- clusterMap(cl, run_job, jobs$marker, jobs$model, jobs$adjusted, SIMPLIFY = FALSE, USE.NAMES = FALSE)
+  stopCluster(cl)
+} else {
+  results <- pmap(jobs, run_job)
+}
 
 manifest <- map_dfr(results, function(r)
   r$counts %>% mutate(status = r$status, reason = r$reason,
