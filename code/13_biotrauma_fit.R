@@ -5,11 +5,14 @@
 #
 # For each organ-injury marker, fits a joint model (JMbayes2) that links
 #   longitudinal submodel   log marker on day t  ~  spline(day) + previous-day
-#                           VT/PFVC + prior days above 11% + baseline marker +
-#                           previous-day confounders + baseline severity and
-#                           demographics; random intercept and slope per patient
+#                           VT/PFVC as a WITHIN-patient deviation from the
+#                           patient's mean + that mean (between) + baseline
+#                           marker + previous-day confounders + non-respiratory
+#                           SOFA, BMI and demographics; random intercept and
+#                           slope per patient
 #   survival submodel       cause-specific stratified Cox, death vs extubation,
-#                           with the index-day VT/PFVC and baseline covariates
+#                           with index VT/PBW (dose), log PFVC (size) and
+#                           baseline covariates: the paper's primary exposure set
 #   association             current value and current slope of the marker on
 #                           each cause-specific hazard
 #
@@ -18,7 +21,7 @@
 #       conditional, within-patient dose-response (not a policy effect; the 11.*
 #       g-methods are the causal version)
 #   Q2  the value and slope association parameters, per cause
-#   Q3  the index-day strain coefficient on the death hazard in the plain
+#   Q3  the log PFVC (and VT/PBW) coefficient on the death hazard in the plain
 #       cause-specific Cox (no linkage) versus inside the JM (with linkage):
 #       "association absorbed by the trajectory", not proportion mediated
 #
@@ -96,7 +99,12 @@ USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
 # above 11%, which grows with time and fights the day spline (sensitivity only).
 CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "mean")
 stopifnot(CUM_FORM %in% c("mean", "days"))
-CUM_TERM <- if (CUM_FORM == "mean") "mean_prior_vtpfvc" else "cum_days_above"
+# With the within-between decomposition the patient mean already carries the
+# dose level, so the default adds no further cumulative term; "mean" adds the
+# running mean through the previous day, "days" the count of prior days above 11%.
+CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "none")
+stopifnot(CUM_FORM %in% c("none", "mean", "days"))
+CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cum_days_above")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -177,9 +185,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     filter(vent_day >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
     mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
-                                   race_category, ers_pfvc_0, all_of(mk$y0)),
+                                   race_category, ers_pfvc_0, vtpfvc_pt_mean, all_of(mk$y0)),
                by = "hospitalization_id") %>%
-    filter(!is.na(np_sofa), !is.na(bmi))
+    filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpfvc_pt_mean))
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = log(.data[[mk$y0]] + mk$offset))
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
@@ -189,12 +197,11 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   n_per <- ld %>% count(hospitalization_id) %>% filter(n >= 2L)
   ld <- ld %>% filter(hospitalization_id %in% n_per$hospitalization_id)
 
-  # --- survival rows for those patients; index-day strain from day 0
-  idx_strain <- long_all %>% filter(vent_day == 0L) %>% select(hospitalization_id, vtpfvc_idx = vtpfvc)
+  # --- survival rows for those patients; hazard exposures = index VT/PBW (dose)
+  #     and log PFVC (size), the paper's primary parameterization
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    inner_join(idx_strain, by = "hospitalization_id") %>%
-    filter(!is.na(vtpfvc_idx), !is.na(sf_0)) %>%
+    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0)) %>%
     mutate(log_sf_0 = log(sf_0))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
   lv <- sort(unique(ld$hospitalization_id))
@@ -212,15 +219,15 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc", CUM_TERM, "l_log_sf", "l_pressor",
-                          "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
+  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc_within", "vtpfvc_pt_mean", CUM_TERM,
+                          "l_log_sf", "l_pressor", "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
   if (any(n_bad > 0))
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
-  s_bad <- vapply(c("vtpfvc_idx", "np_sofa", "log_sf_0", "bmi", "age10", "event_time"),
+  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time"),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
     stop("non-finite values in the survival design: ",
@@ -228,9 +235,14 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- longitudinal submodel
   lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
-  rhs <- c("ns(vent_day, 3)", "l_vtpfvc", CUM_TERM,
+  # Within-between decomposition of strain. l_vtpfvc_within = yesterday's VT/PFVC
+  # minus the patient's mean over the course: within a patient PBW/PFVC is a
+  # constant, so this is the clinician's VT/PBW change rescaled, and its
+  # coefficient is Q1. vtpfvc_pt_mean = that mean: dose level plus discordance,
+  # reported as targeting (11.Z), never as a strain-error effect.
+  rhs <- c("ns(vent_day, 3)", "l_vtpfvc_within", "vtpfvc_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
-           if (model == "hetero") "ers_pfvc_0 * l_vtpfvc",
+           if (model == "hetero") "ers_pfvc_0 * l_vtpfvc_within",
            lag_terms, BASE_RHS, if (adjusted) DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
   random_spec <- if (mk$random == "pddiag") list(id = nlme::pdDiag(~ vent_day)) else ~ vent_day | id
@@ -244,7 +256,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
-  cox_rhs <- paste(c("vtpfvc_idx", "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
+  cox_rhs <- paste(c("vtpbw_idx", "log_pfvc", "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
                      if (adjusted) DEMO_RHS), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
@@ -305,16 +317,19 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   stamp(sprintf("max R-hat %.3f (%s); worst: %s", max_rhat, if (gate) "passes" else "FAILS gate",
                 paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
-  # --- Q3: index-day strain on the DEATH hazard, plain Cox vs inside the JM
+  # --- Q3: the hazard exposures on the DEATH hazard, plain Cox vs inside the JM.
+  #     log PFVC is the paper's primary size term (the absorption read); VT/PBW
+  #     is the dose and is reported beside it.
   cox_tbl <- summary(cox_cr)$coefficients
-  cox_row <- grep("^vtpfvc_idx:strata\\(strata\\)death$|^vtpfvc_idx:strata\\(strata\\)death", rownames(cox_tbl))
-  jm_row  <- est %>% filter(block == "survival", grepl("^vtpfvc_idx", term), grepl("death", term))
-  absorption <- tibble(
-    marker = mk$y, model = model, adjustment = adj_lab,
-    cox_log_hr = if (length(cox_row) == 1L) cox_tbl[cox_row, "coef"] else NA_real_,
-    cox_se     = if (length(cox_row) == 1L) cox_tbl[cox_row, "se(coef)"] else NA_real_,
-    jm_log_hr  = if (nrow(jm_row) == 1L) jm_row$estimate else NA_real_,
-    jm_sd      = if (nrow(jm_row) == 1L) jm_row$sd else NA_real_) %>%
+  absorption <- map_dfr(c("log_pfvc", "vtpbw_idx"), function(tm) {
+    cox_row <- grep(paste0("^", tm, ":strata\\(strata\\)death$"), rownames(cox_tbl))
+    jm_row  <- est %>% filter(block == "survival", grepl(paste0("^", tm, ":"), term), grepl("death", term))
+    tibble(marker = mk$y, model = model, adjustment = adj_lab, term = tm,
+           cox_log_hr = if (length(cox_row) == 1L) cox_tbl[cox_row, "coef"] else NA_real_,
+           cox_se     = if (length(cox_row) == 1L) cox_tbl[cox_row, "se(coef)"] else NA_real_,
+           jm_log_hr  = if (nrow(jm_row) == 1L) jm_row$estimate else NA_real_,
+           jm_sd      = if (nrow(jm_row) == 1L) jm_row$sd else NA_real_)
+  }) %>%
     mutate(absorbed = cox_log_hr - jm_log_hr,
            absorbed_frac = if_else(is.finite(cox_log_hr) & cox_log_hr != 0, absorbed / cox_log_hr, NA_real_),
            n_patients = n_pts, n_deaths = n_deaths, baseline_form = BASELINE_FORM,

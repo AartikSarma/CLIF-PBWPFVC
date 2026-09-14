@@ -98,7 +98,8 @@ for (i in seq_len(nrow(usable))) {
   message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
-  for (term in c("l_vtpfvc", "mean_prior_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpfvc")) {
+  for (term in c("l_vtpfvc_within", "vtpfvc_pt_mean", "mean_prior_vtpfvc", "cum_days_above",
+                 "ers_pfvc_0:l_vtpfvc_within")) {
     if (!term %in% colnames(draws)) next
     v <- draws[, term]
     strain_rows[[length(strain_rows) + 1L]] <- tibble(
@@ -125,11 +126,11 @@ for (i in seq_len(nrow(usable))) {
   }
 
   # ---- heterogeneity: strain slope at Ers x PFVC percentiles
-  if (u$model == "hetero" && "ers_pfvc_0:l_vtpfvc" %in% colnames(draws)) {
+  if (u$model == "hetero" && "ers_pfvc_0:l_vtpfvc_within" %in% colnames(draws)) {
     pt <- ld %>% distinct(hospitalization_id, ers_pfvc_0)
     q <- quantile(pt$ers_pfvc_0, c(0.1, 0.5, 0.9))
     for (k in seq_along(q)) {
-      v <- draws[, "l_vtpfvc"] + draws[, "ers_pfvc_0:l_vtpfvc"] * q[[k]]
+      v <- draws[, "l_vtpfvc_within"] + draws[, "ers_pfvc_0:l_vtpfvc_within"] * q[[k]]
       hetero_rows[[length(hetero_rows) + 1L]] <- tibble(
         marker = u$marker, ers_pfvc_pct = c(10, 50, 90)[k], ers_pfvc_value = q[[k]],
         strain_slope = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
@@ -139,11 +140,15 @@ for (i in seq_len(nrow(usable))) {
 
   # ---- Q1 as a trajectory: days 1..H at each constant strain level, re-centred at day 1
   if (u$model == "main") {
+    # WITHIN-patient read: a patient at the cohort-median strain level whose
+    # previous-day strain is held at each level, so the curves separate through
+    # the within term (Q1), not through the between-patient level.
+    pt_med <- median(ld %>% distinct(hospitalization_id, vtpfvc_pt_mean) %>% pull(vtpfvc_pt_mean))
     grid <- expand_grid(vent_day = seq(1, JM_HORIZON, by = 0.25), strain = STRAIN_LEVELS) %>%
-      mutate(l_vtpfvc = strain,
+      mutate(vtpfvc_pt_mean = pt_med, l_vtpfvc_within = strain - pt_med,
              mean_prior_vtpfvc = strain,                                        # constant strain: the running mean equals it
              cum_days_above = if_else(strain > STRAIN_CEILING, floor(vent_day), 0))
-    grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
+    grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ] %>% select(-any_of("vtpfvc_pt_mean")))
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots
     X <- model.matrix(tt, model.frame(tt, grid))[, colnames(draws), drop = FALSE]
     Y <- X %*% t(draws)                                    # rows = grid, cols = draws
@@ -199,14 +204,14 @@ if (nrow(association_hr)) {
     scale_colour_manual(values = okabe[c(5, 3)]) +
     labs(title = "Q2: cause-specific hazard per SD of the current log marker (value) or per unit slope",
          x = "Hazard ratio", y = NULL) + theme_minimal(base_size = 11)
-  fs <- strain_effects %>% filter(model == "main", term == "l_vtpfvc") %>%
+  fs <- strain_effects %>% filter(model == "main", term == "l_vtpfvc_within") %>%
     mutate(adjustment = factor(adjustment, c("adjusted", "unadjusted")))
   p2 <- ggplot(fs, aes(per_sd_estimate, marker, colour = adjustment)) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     geom_pointrange(aes(xmin = per_sd_lo, xmax = per_sd_hi), position = position_dodge(width = 0.5)) +
     scale_colour_manual(values = okabe[c(5, 3)]) +
-    labs(title = "Q1: change in the log marker (SD units) per 1% higher previous-day VT/PFVC",
-         x = "SD of log marker per 1% VT/PFVC", y = NULL) + theme_minimal(base_size = 11)
+    labs(title = "Q1: change in the log marker (SD units) per 1% higher previous-day VT/PFVC, within patient",
+         x = "SD of log marker per 1% VT/PFVC above the patient's own mean", y = NULL) + theme_minimal(base_size = 11)
   ggsave(file.path(final_dir, paste0("jm_forest_", out_tag, ".pdf")), p2 / p1, width = 10, height = 9)
 }
 message("13_biotrauma_report complete: ", nrow(trajectory_grid), " grid rows, ",
