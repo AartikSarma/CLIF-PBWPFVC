@@ -70,6 +70,38 @@ STRAIN_CEILING <- 11   # VT/PFVC % above which a day counts toward the cumulativ
 message("=== 13_biotrauma_panel: horizon ", JM_HORIZON, " days, site ", site_name, " ===")
 
 # =============================================================================
+# SYNTHETIC SITE ONLY: give the markers a patient-level structure
+# =============================================================================
+# The synthetic CLIF labs are independent draws per timestamp: within a patient
+# the day-to-day autocorrelation of log creatinine and log SF is 0.02 to 0.03,
+# and the fitted random-intercept variances are zero. A joint model is identified
+# through those random effects, so on the raw synthetic data the sampler has
+# nothing to move (random-effects acceptance 0.004 for SF) and every fit fails
+# the R-hat gate for a reason that has nothing to do with the model. This guard,
+# the marker analogue of the simulated survival in 10_panel_common.R, multiplies
+# each marker by a patient-specific log-normal intercept and slope so the
+# machinery can be exercised end to end. It changes nothing about which patients
+# or days are present and never runs at a real site. Requested 2026-09-13.
+if (is_synthetic) {
+  message("*** SYNTHETIC SITE: adding a patient-level random intercept and slope to every marker (plumbing only). ***")
+  marker_sd <- c(creatinine = 0.6, platelets = 0.4, bilirubin = 0.6, sf = 0.2, dp = 0.15, ne_equiv_peak = 0.8)
+  set.seed(20260913)
+  synth_re <- base %>% select(hospitalization_id) %>%
+    bind_cols(map_dfc(names(marker_sd), function(m) {
+      n <- nrow(base)
+      tibble(!!paste0("u_", m) := rnorm(n, 0, marker_sd[[m]]),      # intercept, log scale
+             !!paste0("v_", m) := rnorm(n, 0, marker_sd[[m]] / 8))  # slope per day, log scale
+    }))
+  perturb <- function(df, m) {
+    df %>% left_join(synth_re %>% select(hospitalization_id, u = all_of(paste0("u_", m)),
+                                         v = all_of(paste0("v_", m))), by = "hospitalization_id") %>%
+      mutate(!!m := .data[[m]] * exp(u + v * vent_day)) %>% select(-u, -v)
+  }
+  for (m in setdiff(names(marker_sd), "dp")) panel_full <- perturb(panel_full, m)
+  dp_daily <- perturb(dp_daily, "dp")
+}
+
+# =============================================================================
 # 13a. RRT start day (CRRT table from script 01)
 # =============================================================================
 rrt <- read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>%

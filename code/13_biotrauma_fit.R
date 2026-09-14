@@ -83,6 +83,13 @@ JM_CORES   <- min(N_CHAINS, N_CORES)
 #          log percent change from baseline exactly (the archive's outcome).
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 stopifnot(BASELINE_FORM %in% c("free", "offset"))
+# Association structure and sampler. ASSOC = "value" (current value on each
+# cause-specific hazard) or "value_slope" (adds the current slope). MALA = 1 uses
+# JMbayes2's gradient-based (MALA) update for the fixed effects, which mixes
+# better on the beta-random-effect ridge that random intercepts create.
+ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value_slope")
+stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
+USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
 RHAT_GATE  <- 1.1
 MIN_PATIENTS <- 20L; MIN_DEATHS <- 5L
 message("=== 13_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
@@ -185,19 +192,28 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- survival submodel: cause-specific stratified Cox (death vs extubation)
   surv_cr <- crisk_setup(as.data.frame(sd_), statusVar = "event_factor", censLevel = "censored")
   surv_cr$id <- factor(surv_cr$id, levels = lv)
-  cox_rhs <- paste(c("vtpfvc_idx", "sofa_total", "log_sf_0", "bmi", if (adjusted) DEMO_RHS), collapse = " + ")
+  # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
+  # marker's own baseline, collinear with value(log_y) on day 1 (the same
+  # own-lag rule as the longitudinal submodel).
+  cox_rhs <- paste(c("vtpfvc_idx", "sofa_total", if (mk$y != "sf") "log_sf_0", "bmi",
+                     if (adjusted) DEMO_RHS), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
 
   # --- joint model: value + slope association on each cause-specific hazard
-  ff <- list(log_y = ~ value(log_y):strata + slope(log_y):strata)
+  ff <- if (ASSOC_FORM == "value_slope") list(log_y = ~ value(log_y):strata + slope(log_y):strata)
+        else list(log_y = ~ value(log_y):strata)
   t_jm <- Sys.time()
   jm_fit <- jm(cox_cr, lme_fit, time_var = "vent_day", data_Surv = surv_cr, id_var = "id",
                functional_forms = ff,
                n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = 1L,
-               n_chains = N_CHAINS, cores = JM_CORES)
-  stamp(sprintf("JM done (%.1f min)", as.numeric(difftime(Sys.time(), t_jm, units = "mins"))))
+               n_chains = N_CHAINS, cores = JM_CORES,
+               control = list(MALA = USE_MALA))
+  acc_b <- mean(jm_fit$acc_rates$b, na.rm = TRUE)
+  stamp(sprintf("JM done (%.1f min); random-effects acceptance %.3f, fixed-effects acceptance %.3f",
+                as.numeric(difftime(Sys.time(), t_jm, units = "mins")), acc_b,
+                mean(unlist(jm_fit$acc_rates$betas), na.rm = TRUE)))
 
   # --- estimates: every block of summary(jm) that carries a coefficient table
   s <- summary(jm_fit)
@@ -217,7 +233,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON, site = site_name)
   max_rhat <- max(est$rhat, na.rm = TRUE)
   gate <- is.finite(max_rhat) && max_rhat <= RHAT_GATE
-  stamp(sprintf("max R-hat %.3f (%s)", max_rhat, if (gate) "passes" else "FAILS gate"))
+  worst <- est %>% slice_max(rhat, n = 3, with_ties = FALSE)
+  stamp(sprintf("max R-hat %.3f (%s); worst: %s", max_rhat, if (gate) "passes" else "FAILS gate",
+                paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
   # --- Q3: index-day strain on the DEATH hazard, plain Cox vs inside the JM
   cox_tbl <- summary(cox_cr)$coefficients
@@ -234,12 +252,17 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            n_patients = n_pts, n_deaths = n_deaths, baseline_form = BASELINE_FORM,
            horizon_days = JM_HORIZON, site = site_name)
 
+  # terms with predvars: carries the ns() knots so the report can rebuild the
+  # fixed-effects design on a prediction grid without re-deriving the basis
+  mf_terms <- terms(model.frame(lme_formula, data = ld))
   saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model,
                adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
-               lme_formula = lme_formula, baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
+               lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
+               baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
           file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM, "_", h_suffix, ".rds")))
   list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
-       counts = counts, estimates = est, absorption = absorption, max_rhat = max_rhat)
+       counts = counts, estimates = est, absorption = absorption, max_rhat = max_rhat,
+       acc_b = acc_b)
 }
 
 # =============================================================================
@@ -260,8 +283,9 @@ results <- pmap(jobs, function(marker, model, adjusted) {
 
 manifest <- map_dfr(results, function(r)
   r$counts %>% mutate(status = r$status, reason = r$reason,
-                      max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat)) %>%
-  mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON,
+                      max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
+                      acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
+  mutate(baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
@@ -273,6 +297,6 @@ write_csv(absorption, file.path(final_dir, paste0("jm_absorption_", out_tag, ".c
 
 message("\n========== 13_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",
-                                                 "n_patients", "n_deaths", "max_rhat")))),
+                                                 "n_patients", "n_deaths", "max_rhat", "acc_random_effects")))),
       row.names = FALSE)
 message("Estimates: ", nrow(estimates), " rows -> ", final_dir)
