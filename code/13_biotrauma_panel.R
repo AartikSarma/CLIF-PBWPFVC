@@ -102,6 +102,28 @@ if (is_synthetic) {
 }
 
 # =============================================================================
+# Non-positive marker values
+# =============================================================================
+# The markers are modelled on the log scale. The lab outlier thresholds (script
+# 02) admit zero for creatinine, platelets and bilirubin, and a zero is charted
+# at real sites (MIMIC has creatinine rows of 0), which is not a measurement and
+# is -Inf on the log scale: nlme then fails with "NA/NaN/Inf in foreign function
+# call". Such values are set to missing here and counted per marker in the
+# summary table. NE-equivalent dose keeps its true zeros (the fit adds an offset).
+LOG_MARKERS <- c("creatinine", "platelets", "bilirubin", "sf", "dp")
+nonpositive_counts <- setNames(integer(length(LOG_MARKERS)), LOG_MARKERS)
+for (m in LOG_MARKERS) {
+  df <- if (m == "dp") dp_daily else panel_full
+  bad <- !is.na(df[[m]]) & df[[m]] <= 0
+  nonpositive_counts[[m]] <- sum(bad)
+  df[[m]][bad] <- NA_real_
+  if (m == "dp") dp_daily <- df else panel_full <- df
+}
+if (any(nonpositive_counts > 0))
+  message("Non-positive marker values set to missing (patient-days): ",
+          paste(sprintf("%s %d", names(nonpositive_counts), nonpositive_counts), collapse = ", "))
+
+# =============================================================================
 # 13a. RRT start day (CRRT table from script 01)
 # =============================================================================
 crrt_available <- readRDS(file.path(output_dir, "crrt_available.rds"))
@@ -216,6 +238,7 @@ per_marker <- map_dfr(markers, function(m) {
           sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")[[m]]
   tibble(marker = m,
          patient_days = nrow(obs),
+         nonpositive_set_missing = if (m %in% LOG_MARKERS) nonpositive_counts[[m]] else 0L,
          patients_any = nrow(per_pt),
          patients_day0_baseline = sum(!is.na(surv[[y0]])),
          patients_ge2_obs = length(ids2),
@@ -226,7 +249,7 @@ per_marker <- map_dfr(markers, function(m) {
 summary_tbl <- bind_rows(
   per_marker,
   tibble(marker = "cohort",
-         patient_days = nrow(long), patients_any = nrow(surv),
+         patient_days = nrow(long), nonpositive_set_missing = NA_integer_, patients_any = nrow(surv),
          patients_day0_baseline = NA_integer_,
          patients_ge2_obs = NA_integer_, median_obs_per_patient = NA_real_,
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),

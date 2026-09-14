@@ -177,6 +177,22 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     return(list(status = "skipped", reason = "too few patients or deaths", counts = counts))
   }
 
+  # --- every modelled column must be finite; name the offender instead of letting
+  #     nlme fail with "NA/NaN/Inf in foreign function call"
+  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc", "cum_days_above", "l_log_sf", "l_pressor",
+                          "sofa_total", "bmi", "age10", "ers_pfvc_0"), names(ld))
+  if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
+  n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
+  if (any(n_bad > 0))
+    stop("non-finite values in the longitudinal design: ",
+         paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
+         ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
+  s_bad <- vapply(c("vtpfvc_idx", "sofa_total", "log_sf_0", "bmi", "age10", "event_time"),
+                  function(v) sum(!is.finite(sd_[[v]])), integer(1))
+  if (any(s_bad > 0))
+    stop("non-finite values in the survival design: ",
+         paste(sprintf("%s (%d rows)", names(s_bad)[s_bad > 0], s_bad[s_bad > 0]), collapse = ", "))
+
   # --- longitudinal submodel
   lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
   rhs <- c("ns(vent_day, 3)", "l_vtpfvc", "cum_days_above",
