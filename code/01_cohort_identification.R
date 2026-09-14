@@ -92,8 +92,22 @@ clif_assessments <- open_clif("patient_assessments") %>%
 # Continuous renal replacement therapy (CLIF 2.1 crrt_therapy): the biotrauma
 # joint models censor the creatinine trajectory at the first CRRT record, so the
 # panel needs the start time. Only the identifiers and the mode category are kept.
-clif_crrt        <- open_clif("crrt_therapy") %>%
-  select(hospitalization_id, recorded_dttm, crrt_mode_category) %>% collect()
+# The table is optional in CLIF and absent at some sites (MIMIC among them): then
+# an empty table is written, the creatinine trajectory runs uncensored, and the
+# joint-model panel summary records crrt_available = FALSE. This is a site
+# characteristic reported in the outputs, not a silent fallback.
+crrt_path <- file.path(tables_path, paste0("clif_crrt_therapy.", file_type))
+crrt_available <- file.exists(crrt_path)
+clif_crrt <- if (crrt_available) {
+  open_clif("crrt_therapy") %>%
+    select(hospitalization_id, recorded_dttm, crrt_mode_category) %>% collect()
+} else {
+  message("*** No crrt_therapy table at ", tables_path,
+          ": RRT censoring of the creatinine trajectory is unavailable at this site. ***")
+  # zero rows, with hospitalization_id of the site's own type so later joins agree
+  clif_hospitalization %>% slice(0) %>% select(hospitalization_id) %>%
+    mutate(recorded_dttm = as.POSIXct(character()), crrt_mode_category = character())
+}
 
 message("Loaded: patient=", nrow(clif_patient), " hosp=", nrow(clif_hospitalization),
         " adt=", nrow(clif_adt), " resp=", nrow(clif_respiratory_support))
@@ -332,9 +346,11 @@ cohort_assessments <- clif_assessments %>%
 
 cohort_crrt <- clif_crrt %>%
   filter(hospitalization_id %in% eligible_hospitalizations, !is.na(recorded_dttm))
+attr(cohort_crrt, "crrt_available") <- crrt_available
 
 message("CRRT extracted: ", nrow(cohort_crrt), " rows, ",
-        n_distinct(cohort_crrt$hospitalization_id), " hospitalizations")
+        n_distinct(cohort_crrt$hospitalization_id), " hospitalizations",
+        if (!crrt_available) " (table absent at this site)")
 
 # =============================================================================
 # Merge demographics
@@ -507,6 +523,7 @@ write_parquet(cohort_labs, file.path(output_dir, "cohort_labs.parquet"))
 write_parquet(cohort_meds, file.path(output_dir, "cohort_meds.parquet"))
 write_parquet(cohort_assessments, file.path(output_dir, "cohort_assessments.parquet"))
 write_parquet(cohort_crrt, file.path(output_dir, "cohort_crrt.parquet"))
+saveRDS(crrt_available, file.path(output_dir, "crrt_available.rds"))
 write_parquet(cohort_heights, file.path(output_dir, "cohort_heights.parquet"))
 write_parquet(cohort_weights, file.path(output_dir, "cohort_weights.parquet"))
 

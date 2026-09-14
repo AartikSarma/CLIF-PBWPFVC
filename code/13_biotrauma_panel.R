@@ -104,6 +104,9 @@ if (is_synthetic) {
 # =============================================================================
 # 13a. RRT start day (CRRT table from script 01)
 # =============================================================================
+crrt_available <- readRDS(file.path(output_dir, "crrt_available.rds"))
+if (!crrt_available)
+  message("*** This site has no crrt_therapy table: the creatinine trajectory is NOT censored at RRT start. ***")
 rrt <- read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
   group_by(hospitalization_id) %>%
@@ -229,6 +232,7 @@ summary_tbl <- bind_rows(
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
          plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%
   mutate(horizon_days = JM_HORIZON,
+         crrt_available = crrt_available,
          rrt_before_index = sum(surv$rrt_before_index),
          rrt_within_horizon = sum(!is.na(surv$rrt_day) & surv$rrt_day >= 0 & surv$rrt_day <= JM_HORIZON),
          creatinine_days_removed_rrt = sum(long$creat_censored_rrt),
