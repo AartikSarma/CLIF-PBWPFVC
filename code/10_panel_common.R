@@ -31,7 +31,7 @@
 #   base           one row per patient: t0, pfvc (switched), pfvc_gli (always the
 #                  GLI value), pfvc_age25, pbw, death_day, ers, bmi, height_cm,
 #                  age10, sex, race, sofa_total, age_grp, height_grp, disc_grp,
-#                  imv_extub_day, and the index-day marker baselines
+#                  imv_extub_day
 #   daily          per patient-day ventilator settings: vtpfvc, vtpfvc_max, vt_ml,
 #                  fio2, peep, rr
 #   dp_daily       daily worst driving pressure on plateau-measured days
@@ -140,10 +140,6 @@ base <- cs %>%
             # bmi rides along because respiratory-system elastance includes the chest wall.
             ers, bmi, height_cm,
             age10 = age_at_admission / 10, sex_category, race_category, sofa_total,
-            # index-day marker levels: the joint models enter each marker's baseline as a
-            # covariate (analysis-of-covariance form) instead of modelling percent change.
-            creatinine_0 = creatinine, platelet_0 = platelet_count,
-            sf_0 = sf_ratio, ne_equiv_0 = ne_equiv_total,
             age_grp = cut(age_at_admission, c(-Inf, age_breaks, Inf),
                           labels = c("Young", "Middle", "Old")),
             height_grp = cut(height_z, c(-Inf, quantile(height_z, c(1/3, 2/3), na.rm = TRUE), Inf),

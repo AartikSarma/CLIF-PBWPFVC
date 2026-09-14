@@ -90,11 +90,21 @@ message("CRRT: ", nrow(rrt), " patients with any record; ",
 # and imv_extub_day (last IMV day + 1) come from the shared panel. Censoring at
 # the horizon otherwise. JMbayes2 needs strictly positive times, so an event on
 # day 0 is placed at day 1 (the TTE's pmax(., 1) convention).
-bili_0 <- lab_daily %>% filter(vent_day == 0L, !is.na(bilirubin)) %>%
-  select(hospitalization_id, bilirubin_0 = bilirubin)   # the cross-sectional table carries no bilirubin
+# Marker baselines are the DAY-0 daily values (the same reduction as the trajectory:
+# creatinine and bilirubin max, platelets min, SF worst, DP max, NE-equivalent peak).
+# The cross-sectional table's index-timepoint labs are matched inside a narrow
+# window and are missing for most patients (synthetic: 218 of 676 for creatinine
+# against 428 with a day-0 value), and it carries no bilirubin at all. A patient
+# without a day-0 value has no baseline for that marker and leaves that marker's
+# model; the count is in the summary table.
+day0 <- panel_full %>%
+  filter(vent_day == 0L) %>%
+  left_join(dp_daily, by = c("hospitalization_id", "vent_day")) %>%
+  select(hospitalization_id, creatinine_0 = creatinine, platelet_0 = platelets,
+         bilirubin_0 = bilirubin, sf_0 = sf, dp_0 = dp, ne_equiv_0 = ne_equiv_peak)
 surv <- base %>%
   left_join(rrt, by = "hospitalization_id") %>%
-  left_join(bili_0, by = "hospitalization_id") %>%
+  left_join(day0, by = "hospitalization_id") %>%
   mutate(
     death_in  = !is.na(death_day) & death_day <= JM_HORIZON,
     extub_in  = !is.na(imv_extub_day) & imv_extub_day <= JM_HORIZON,
@@ -110,13 +120,14 @@ surv <- base %>%
                           levels = c("censored", "death", "extubation")),
     ers_pfvc_0 = ers * pfvc_gli,                 # specific elastance at the index (plateau subset)
     disc       = pbw / pfvc_gli,                 # PBW/PFVC discordance
-    rrt_before_index = !is.na(rrt_day) & rrt_day < 0
+    rrt_before_index = !is.na(rrt_day) & rrt_day < 0,
+    creatinine_0 = if_else(rrt_before_index, NA_real_, creatinine_0)   # no creatinine trajectory on CRRT at the index
   ) %>%
   select(hospitalization_id, t0, event, event_day, event_time, event_factor,
          death_day, imv_extub_day, rrt_day, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, bmi, height_cm,
-         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, ne_equiv_0)
+         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0)
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
         ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
 
@@ -166,9 +177,12 @@ per_marker <- map_dfr(markers, function(m) {
   per_pt <- obs %>% count(hospitalization_id)
   ids2 <- per_pt$hospitalization_id[per_pt$n >= 2L]
   ev <- surv %>% filter(hospitalization_id %in% ids2)
+  y0 <- c(creatinine = "creatinine_0", platelets = "platelet_0", bilirubin = "bilirubin_0",
+          sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")[[m]]
   tibble(marker = m,
          patient_days = nrow(obs),
          patients_any = nrow(per_pt),
+         patients_day0_baseline = sum(!is.na(surv[[y0]])),
          patients_ge2_obs = length(ids2),
          median_obs_per_patient = if (nrow(per_pt)) median(per_pt$n) else NA_real_,
          deaths_ge2 = sum(ev$event == 1L), extubations_ge2 = sum(ev$event == 2L),
@@ -178,6 +192,7 @@ summary_tbl <- bind_rows(
   per_marker,
   tibble(marker = "cohort",
          patient_days = nrow(long), patients_any = nrow(surv),
+         patients_day0_baseline = NA_integer_,
          patients_ge2_obs = NA_integer_, median_obs_per_patient = NA_real_,
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
          plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%
