@@ -74,6 +74,7 @@ population_row <- function(ld) {
   pt <- ld %>% distinct(hospitalization_id, .keep_all = TRUE)
   row <- tibble(
     np_sofa = median(pt$np_sofa), bmi = median(pt$bmi), age10 = median(pt$age10),
+    age10_c = 0,   # the dose x age interaction is centred at the median age
     sex_category  = factor(levels(factor(ld$sex_category))[1],  levels = levels(factor(ld$sex_category))),
     race_category = factor(levels(factor(ld$race_category))[1], levels = levels(factor(ld$race_category))),
     l_log_sf = median(ld$l_log_sf), l_pressor = 0)
@@ -99,7 +100,7 @@ for (i in seq_len(nrow(usable))) {
   message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
-  for (term in c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "vtpbw_pt_mean",
+  for (term in c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c", "vtpbw_pt_mean",
                  "l_vtpbw_within:log_pbw", "l_vtpbw_within:log_pfvc",
                  "mean_prior_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpbw_within")) {
     if (!term %in% colnames(draws)) next

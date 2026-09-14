@@ -111,6 +111,17 @@ MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
 stopifnot(MOD_FORM %in% c("disc", "saturated", "none"))
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
+# Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
+# in the hazard, log PFVC is nearly a linear combination of a spline in age, so
+# the two sit on a posterior ridge the sampler crawls along (MIMIC: log PFVC x
+# death R-hat 3.2 with 472 deaths). The longitudinal submodel keeps the spline.
+HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
+stopifnot(HAZARD_AGE %in% c("linear", "spline"))
+# Terms whose convergence the paper depends on; the manifest reports their R-hat
+# beside the all-parameter maximum so a nuisance term cannot hide a converged read.
+KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
+               "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
+               "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -174,6 +185,8 @@ want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main,hetero"), "
 stopifnot(all(want_models %in% c("main", "hetero")))
 
 DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
+DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10",
+                                    "+ sex_category + race_category")
 BASE_RHS  <- "np_sofa + bmi"   # non-respiratory SOFA: log SF carries the respiratory component
 
 # =============================================================================
@@ -195,6 +208,10 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                                    ldisc_c, log_pbw, log_pfvc, all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within))
+  # centred age for the dose x age interaction: uncentred, the interaction and the
+  # dose main effect are collinear (age10 has a large mean relative to its spread)
+  age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
+  ld <- ld %>% mutate(age10_c = age10 - age_med)
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = log(.data[[mk$y0]] + mk$offset))
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
@@ -255,8 +272,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     # the age modification of the dose slope is LINEAR in age: a 4-df spline
     # interaction is four weakly identified parameters that fail the R-hat gate
     # even on synthetic data; the age main effect keeps its spline
-    disc      = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10"),
-    saturated = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10"),
+    disc      = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
+    saturated = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
     none      = "l_vtpbw_within")
   rhs <- c("ns(vent_day, 3)", mod_terms, "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
@@ -276,7 +293,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # own-lag rule as the longitudinal submodel).
   cox_rhs <- paste(c(if (HAZARD_INT) "vtpbw_idx * log_pfvc" else c("vtpbw_idx", "log_pfvc"),
                      "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
-                     if (adjusted) DEMO_RHS), collapse = " + ")
+                     if (adjusted) DEMO_RHS_HAZARD()), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
@@ -348,7 +365,12 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   max_rhat <- max(est$rhat, na.rm = TRUE)
   gate <- is.finite(max_rhat) && max_rhat <= RHAT_GATE
   worst <- est %>% slice_max(rhat, n = 3, with_ties = FALSE)
-  stamp(sprintf("max R-hat %.3f (%s); worst: %s", max_rhat, if (gate) "passes" else "FAILS gate",
+  key <- est %>% filter(grepl(paste(KEY_TERMS, collapse = "|"), term))
+  key_rhat <- if (nrow(key)) max(key$rhat, na.rm = TRUE) else NA_real_
+  key_gate <- is.finite(key_rhat) && key_rhat <= RHAT_GATE
+  stamp(sprintf("max R-hat %.3f (%s); key terms %.3f (%s); worst: %s",
+                max_rhat, if (gate) "passes" else "FAILS gate",
+                key_rhat, if (key_gate) "pass" else "fail",
                 paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
   # --- Q3: the hazard exposures on the DEATH hazard, plain Cox vs inside the JM.
@@ -380,7 +402,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
           file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM, "_", h_suffix, ".rds")))
   list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
        counts = counts, estimates = est, absorption = absorption, scaling = scaling,
-       max_rhat = max_rhat, acc_b = acc_b)
+       max_rhat = max_rhat, key_rhat = key_rhat,
+       worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
+       acc_b = acc_b)
 }
 
 # =============================================================================
@@ -402,8 +426,11 @@ results <- pmap(jobs, function(marker, model, adjusted) {
 manifest <- map_dfr(results, function(r)
   r$counts %>% mutate(status = r$status, reason = r$reason,
                       max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
+                      key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
+                      worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
-  mutate(baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, mala = USE_MALA, horizon_days = JM_HORIZON,
+  mutate(baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
+         hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
@@ -417,6 +444,7 @@ if (nrow(scaling)) write_csv(scaling, file.path(final_dir, paste0("jm_scaling_",
 
 message("\n========== 13_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",
-                                                 "n_patients", "n_deaths", "max_rhat", "acc_random_effects")))),
+                                                 "n_patients", "n_deaths", "max_rhat", "key_terms_rhat",
+                                                 "worst_terms")))),
       row.names = FALSE)
 message("Estimates: ", nrow(estimates), " rows -> ", final_dir)
