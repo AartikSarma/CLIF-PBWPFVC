@@ -24,9 +24,12 @@
 # Design (docs/joint_model_plan_2026-09.md, sections 3 and 4):
 #   * every index-IMV patient enters at day 0; no survival-based restriction, and
 #     no structural-positivity exclusion (that is TTE-only)
-#   * the exposure is the PREVIOUS day's median VT/PFVC and the count of prior
-#     days above 11%, taken by joining on vent_day - 1 so a missing day gives a
-#     missing lag rather than a two-day-old one
+#   * the exposure is the PREVIOUS day's median VT/PBW (the clinician's dose) as a
+#     deviation from the patient's mean over the course, taken by joining on
+#     vent_day - 1 so a missing day gives a missing lag rather than a two-day-old
+#     one; PBW/PFVC discordance (log, centred) is the effect modifier; VT/PFVC,
+#     its running mean and the count of days above 11% are carried for the
+#     sensitivity forms
 #   * markers on the day of observation: creatinine (daily max), platelets (daily
 #     min), bilirubin (daily max), SF ratio (daily worst), driving pressure (daily
 #     max, plateau-measured days only), NE-equivalent dose (daily peak)
@@ -168,7 +171,8 @@ day0 <- panel_full %>%
 pt_strain <- panel_full %>%
   filter(vent_day <= JM_HORIZON, !is.na(vtpfvc)) %>%
   group_by(hospitalization_id) %>%
-  summarise(vtpfvc_pt_mean = mean(vtpfvc), vtpfvc_pt_n = n(), .groups = "drop")
+  summarise(vtpfvc_pt_mean = mean(vtpfvc), vtpbw_pt_mean = mean(vt_ml / pbw),
+            vtpfvc_pt_n = n(), .groups = "drop")
 surv <- base %>%
   left_join(rrt, by = "hospitalization_id") %>%
   left_join(day0, by = "hospitalization_id") %>%
@@ -179,6 +183,10 @@ surv <- base %>%
     # kept for reference
     vtpbw_idx  = vt_ml_0 / pbw,
     log_pfvc   = log(pfvc_gli),
+    log_pbw    = log(pbw),
+    # log PBW/PFVC discordance, centred at the cohort median: the effect modifier
+    # of the dose slope in the primary longitudinal model
+    ldisc_c    = log(pbw / pfvc_gli) - median(log(pbw / pfvc_gli), na.rm = TRUE),
     death_in  = !is.na(death_day) & death_day <= JM_HORIZON,
     extub_in  = !is.na(imv_extub_day) & imv_extub_day <= JM_HORIZON,
     event = case_when(
@@ -200,7 +208,7 @@ surv <- base %>%
          death_day, imv_extub_day, rrt_day, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
-         vtpbw_idx, log_pfvc, vtpfvc_0, vtpfvc_pt_mean, vtpfvc_pt_n,
+         vtpbw_idx, log_pfvc, log_pbw, ldisc_c, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0)
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
         ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
@@ -213,7 +221,8 @@ message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 
 # so a gap in charting yields a missing lag (reported below) instead of a stale one.
 prev <- panel_full %>%
   transmute(hospitalization_id, vent_day = vent_day + 1L,
-            l_vtpfvc = vtpfvc, l_sf = sf, l_pressor = on_pressor, l_fio2 = fio2, l_peep = peep)
+            l_vtpfvc = vtpfvc, l_vtpbw = vt_ml / pbw,
+            l_sf = sf, l_pressor = on_pressor, l_fio2 = fio2, l_peep = peep)
 # Cumulative strain through the previous day, two forms. mean_prior_vtpfvc (the
 # fit's default) is the mean of the daily VT/PFVC over days 0..t-1: it carries the
 # dose history without growing with time. cum_days_above (days above 11%) is the
@@ -235,17 +244,19 @@ long <- panel_full %>%
   left_join(prev, by = c("hospitalization_id", "vent_day")) %>%
   left_join(cum_above, by = c("hospitalization_id", "vent_day")) %>%
   mutate(cum_days_above = if_else(vent_day == 0L, 0L, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA on day 0
-  inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index, vtpfvc_pt_mean),
+  inner_join(surv %>% select(hospitalization_id, event_day, rrt_day, rrt_before_index,
+                             vtpfvc_pt_mean, vtpbw_pt_mean),
              by = "hospitalization_id") %>%
   filter(vent_day <= event_day) %>%
   mutate(
     # within-patient strain: yesterday's VT/PFVC relative to the patient's own mean
     l_vtpfvc_within = l_vtpfvc - vtpfvc_pt_mean,
+    l_vtpbw_within  = l_vtpbw  - vtpbw_pt_mean,    # the clinician's dose change (mL/kg PBW)
     # creatinine censored at RRT start; no trajectory if on CRRT at the index
     creat_censored_rrt = rrt_before_index | (!is.na(rrt_day) & vent_day >= rrt_day),
     creatinine = if_else(creat_censored_rrt, NA_real_, creatinine)
   ) %>%
-  select(-event_day, -rrt_day, -rrt_before_index, -vtpfvc_pt_mean) %>%
+  select(-event_day, -rrt_day, -rrt_before_index, -vtpfvc_pt_mean, -vtpbw_pt_mean) %>%
   arrange(hospitalization_id, vent_day)
 message("Longitudinal table: ", nrow(long), " patient-days, ",
         n_distinct(long$hospitalization_id), " patients; lag missing on ",

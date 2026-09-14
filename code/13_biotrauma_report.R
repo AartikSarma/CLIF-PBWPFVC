@@ -48,8 +48,9 @@ BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 h_suffix <- paste0(JM_HORIZON, "d")
 out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
 okabe <- c("#009E73", "#56B4E9", "#E69F00", "#D55E00", "#0072B2", "#CC79A7")
-STRAIN_LEVELS  <- c(9, 11, 14, 17)
-STRAIN_CEILING <- 11
+DOSE_LEVELS    <- c(6, 8, 10)     # VT/PBW, mL/kg: the LTVV target, its upper bound, conventional
+DOSE_REF       <- 6
+DISC_PCT       <- c(10, 50, 90)   # PBW/PFVC discordance percentiles for the facets
 N_DRAWS <- 1000L
 set.seed(20260913)
 
@@ -98,8 +99,9 @@ for (i in seq_len(nrow(usable))) {
   message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
-  for (term in c("l_vtpfvc_within", "vtpfvc_pt_mean", "mean_prior_vtpfvc", "cum_days_above",
-                 "ers_pfvc_0:l_vtpfvc_within")) {
+  for (term in c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "vtpbw_pt_mean",
+                 "l_vtpbw_within:log_pbw", "l_vtpbw_within:log_pfvc",
+                 "mean_prior_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpbw_within")) {
     if (!term %in% colnames(draws)) next
     v <- draws[, term]
     strain_rows[[length(strain_rows) + 1L]] <- tibble(
@@ -126,11 +128,11 @@ for (i in seq_len(nrow(usable))) {
   }
 
   # ---- heterogeneity: strain slope at Ers x PFVC percentiles
-  if (u$model == "hetero" && "ers_pfvc_0:l_vtpfvc_within" %in% colnames(draws)) {
+  if (u$model == "hetero" && "ers_pfvc_0:l_vtpbw_within" %in% colnames(draws)) {
     pt <- ld %>% distinct(hospitalization_id, ers_pfvc_0)
     q <- quantile(pt$ers_pfvc_0, c(0.1, 0.5, 0.9))
     for (k in seq_along(q)) {
-      v <- draws[, "l_vtpfvc_within"] + draws[, "ers_pfvc_0:l_vtpfvc_within"] * q[[k]]
+      v <- draws[, "l_vtpbw_within"] + draws[, "ers_pfvc_0:l_vtpbw_within"] * q[[k]]
       hetero_rows[[length(hetero_rows) + 1L]] <- tibble(
         marker = u$marker, ers_pfvc_pct = c(10, 50, 90)[k], ers_pfvc_value = q[[k]],
         strain_slope = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
@@ -138,39 +140,48 @@ for (i in seq_len(nrow(usable))) {
     }
   }
 
-  # ---- Q1 as a trajectory: days 1..H at each constant strain level, re-centred at day 1
-  if (u$model == "main") {
-    # WITHIN-patient read: a patient at the cohort-median strain level whose
-    # previous-day strain is held at each level, so the curves separate through
-    # the within term (Q1), not through the between-patient level.
-    pt_med <- median(ld %>% distinct(hospitalization_id, vtpfvc_pt_mean) %>% pull(vtpfvc_pt_mean))
-    grid <- expand_grid(vent_day = seq(1, JM_HORIZON, by = 0.25), strain = STRAIN_LEVELS) %>%
-      mutate(vtpfvc_pt_mean = pt_med, l_vtpfvc_within = strain - pt_med,
-             mean_prior_vtpfvc = strain,                                        # constant strain: the running mean equals it
-             cum_days_above = if_else(strain > STRAIN_CEILING, floor(vent_day), 0))
-    grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ] %>% select(-any_of("vtpfvc_pt_mean")))
+  # ---- Q1 as a picture: dose-response trajectories by discordance. A patient at
+  #      the cohort-median dose level and median age whose previous-day VT/PBW is
+  #      held at 6, 8 or 10 mL/kg (the within term), at the 10th, 50th and 90th
+  #      percentile of PBW/PFVC discordance (the modifier); every draw is
+  #      re-centred at day 1 of the 6 mL/kg curve within its discordance facet, so
+  #      the spread between curves in a facet is the dose slope there and the
+  #      change in that spread across facets is the interaction.
+  if (u$model == "main" && all(c("l_vtpbw_within", "ldisc_c") %in% names(ld))) {
+    pt <- ld %>% distinct(hospitalization_id, vtpbw_pt_mean, ldisc_c)
+    dose_med <- median(pt$vtpbw_pt_mean)
+    disc_q   <- quantile(pt$ldisc_c, DISC_PCT / 100)
+    grid <- expand_grid(vent_day = seq(1, JM_HORIZON, by = 0.25), dose = DOSE_LEVELS, disc_pct = DISC_PCT) %>%
+      mutate(vtpbw_pt_mean = dose_med, l_vtpbw_within = dose - dose_med,
+             ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
+             log_pbw = median(ld$log_pbw), log_pfvc = median(ld$log_pfvc),
+             mean_prior_vtpfvc = median(ld$l_vtpfvc, na.rm = TRUE), cum_days_above = 0)
+    grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots
     X <- model.matrix(tt, model.frame(tt, grid))[, colnames(draws), drop = FALSE]
     Y <- X %*% t(draws)                                    # rows = grid, cols = draws
-    # Re-centre every draw at the day-1 value of the REFERENCE strain (11%), not
-    # within each strain level: a constant strain shifts the level of the marker,
-    # and centring within level would subtract that shift away and leave only the
-    # cumulative-days term.
-    ref1 <- which(grid$vent_day == 1 & grid$strain == STRAIN_CEILING)
-    Yc <- sweep(Y, 2, Y[ref1, ])
-    tg <- grid %>% select(vent_day, strain) %>%
-      mutate(mean = rowMeans(Yc), lo = apply(Yc, 1, quantile, 0.025), hi = apply(Yc, 1, quantile, 0.975),
+    Yc <- Y
+    for (dp in DISC_PCT) {
+      ref1 <- which(grid$vent_day == 1 & grid$dose == DOSE_REF & grid$disc_pct == dp)
+      rows <- which(grid$disc_pct == dp)
+      Yc[rows, ] <- sweep(Y[rows, , drop = FALSE], 2, Y[ref1, ])
+    }
+    tg <- grid %>% select(vent_day, dose, disc_pct) %>%
+      mutate(ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
+             mean = rowMeans(Yc), lo = apply(Yc, 1, quantile, 0.025), hi = apply(Yc, 1, quantile, 0.975),
              marker = u$marker, adjustment = u$adjustment, baseline_form = BASELINE_FORM,
              n_patients = u$n_patients, rhat_gate = gate, site = site_name)
     trajectory_rows[[length(trajectory_rows) + 1L]] <- tg
     if (u$adjustment == "adjusted") {
-      traj_plots[[u$marker]] <- ggplot(tg, aes(vent_day, mean, colour = factor(strain), fill = factor(strain))) +
+      traj_plots[[u$marker]] <- ggplot(tg %>% mutate(facet = factor(paste0("PBW/PFVC p", disc_pct), paste0("PBW/PFVC p", DISC_PCT))),
+                                       aes(vent_day, mean, colour = factor(dose), fill = factor(dose))) +
         geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
         geom_line(linewidth = 1) +
-        scale_colour_manual(values = okabe[seq_along(STRAIN_LEVELS)], name = "VT/PFVC (%)") +
-        scale_fill_manual(values = okabe[seq_along(STRAIN_LEVELS)], name = "VT/PFVC (%)") +
+        facet_wrap(~ facet, nrow = 1) +
+        scale_colour_manual(values = okabe[seq_along(DOSE_LEVELS)], name = "VT/PBW (mL/kg)") +
+        scale_fill_manual(values = okabe[seq_along(DOSE_LEVELS)], name = "VT/PBW (mL/kg)") +
         labs(title = b$marker$label, x = "Ventilator day",
-             y = sprintf("Log marker, relative to day 1 at VT/PFVC %g%%", STRAIN_CEILING),
+             y = sprintf("Log marker, relative to day 1 at %g mL/kg", DOSE_REF),
              subtitle = sprintf("n = %d patients%s", u$n_patients,
                                 if (gate) "" else " (R-hat gate failed)")) +
         theme_minimal(base_size = 11)
@@ -189,10 +200,10 @@ if (nrow(heterogeneity)) write_csv(heterogeneity, file.path(final_dir, paste0("j
 
 # ---- figures
 if (length(traj_plots)) {
-  p <- wrap_plots(traj_plots, ncol = 2, guides = "collect") +
-    plot_annotation(title = sprintf("Marker trajectories at constant strain (first %d days, %s)", JM_HORIZON, site_name))
+  p <- wrap_plots(traj_plots, ncol = 1, guides = "collect") +
+    plot_annotation(title = sprintf("Dose-response trajectories by PBW/PFVC discordance (first %d days, %s)", JM_HORIZON, site_name))
   ggsave(file.path(final_dir, paste0("jm_trajectories_", out_tag, ".pdf")), p,
-         width = 11, height = 4 * ceiling(length(traj_plots) / 2))
+         width = 11, height = 3.5 * length(traj_plots))
 }
 if (nrow(association_hr)) {
   fa <- association_hr %>% filter(model == "main") %>%
@@ -204,14 +215,16 @@ if (nrow(association_hr)) {
     scale_colour_manual(values = okabe[c(5, 3)]) +
     labs(title = "Q2: cause-specific hazard per SD of the current log marker (value) or per unit slope",
          x = "Hazard ratio", y = NULL) + theme_minimal(base_size = 11)
-  fs <- strain_effects %>% filter(model == "main", term == "l_vtpfvc_within") %>%
+  fs <- strain_effects %>% filter(model == "main", term %in% c("l_vtpbw_within", "l_vtpbw_within:ldisc_c")) %>%
+    mutate(marker = paste(marker, if_else(term == "l_vtpbw_within", "dose slope", "x log discordance"))) %>%
     mutate(adjustment = factor(adjustment, c("adjusted", "unadjusted")))
   p2 <- ggplot(fs, aes(per_sd_estimate, marker, colour = adjustment)) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     geom_pointrange(aes(xmin = per_sd_lo, xmax = per_sd_hi), position = position_dodge(width = 0.5)) +
     scale_colour_manual(values = okabe[c(5, 3)]) +
-    labs(title = "Q1: change in the log marker (SD units) per 1% higher previous-day VT/PFVC, within patient",
-         x = "SD of log marker per 1% VT/PFVC above the patient's own mean", y = NULL) + theme_minimal(base_size = 11)
+    labs(title = "Q1: log marker (SD units) per 1 mL/kg PBW above the patient's own mean, and its modification by log PBW/PFVC",
+         x = "SD of log marker per mL/kg PBW (slope) or per mL/kg per log-unit discordance (interaction)", y = NULL) +
+    theme_minimal(base_size = 11)
   ggsave(file.path(final_dir, paste0("jm_forest_", out_tag, ".pdf")), p2 / p1, width = 10, height = 9)
 }
 message("13_biotrauma_report complete: ", nrow(trajectory_grid), " grid rows, ",

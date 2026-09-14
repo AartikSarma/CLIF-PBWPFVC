@@ -94,17 +94,23 @@ stopifnot(BASELINE_FORM %in% c("free", "offset"))
 ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value_slope")
 stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
 USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
-# Cumulative-strain term beside the previous-day strain: "mean" (default) is the
-# mean daily VT/PFVC through the previous day; "days" is the count of prior days
-# above 11%, which grows with time and fights the day spline (sensitivity only).
-CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "mean")
-stopifnot(CUM_FORM %in% c("mean", "days"))
 # With the within-between decomposition the patient mean already carries the
 # dose level, so the default adds no further cumulative term; "mean" adds the
-# running mean through the previous day, "days" the count of prior days above 11%.
+# running mean VT/PFVC through the previous day, "days" the count of prior days
+# above 11% (which grows with time and fights the day spline).
 CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "none")
 stopifnot(CUM_FORM %in% c("none", "mean", "days"))
 CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cum_days_above")
+# Effect modifier of the dose slope (PRIMARY = "disc"): the within-patient VT/PBW
+# change interacts with centred log PBW/PFVC discordance and, in the adjusted
+# model, with the age spline (the 11.Z adjudicator: discordance is 99%
+# demographics, so a discordance interaction only means something if it survives
+# an age interaction). "saturated" interacts the dose change with log PBW and log
+# PFVC separately (mirrors 4k). "none" fits the dose change alone.
+MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none"))
+# Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
+HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -185,9 +191,10 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     filter(vent_day >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
     mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
-                                   race_category, ers_pfvc_0, vtpfvc_pt_mean, all_of(mk$y0)),
+                                   race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
+                                   ldisc_c, log_pbw, log_pfvc, all_of(mk$y0)),
                by = "hospitalization_id") %>%
-    filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpfvc_pt_mean))
+    filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within))
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = log(.data[[mk$y0]] + mk$offset))
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
@@ -219,7 +226,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", "l_vtpfvc_within", "vtpfvc_pt_mean", CUM_TERM,
+  num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
+                          "log_pbw", "log_pfvc", CUM_TERM,
                           "l_log_sf", "l_pressor", "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
@@ -235,14 +243,24 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- longitudinal submodel
   lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
-  # Within-between decomposition of strain. l_vtpfvc_within = yesterday's VT/PFVC
-  # minus the patient's mean over the course: within a patient PBW/PFVC is a
-  # constant, so this is the clinician's VT/PBW change rescaled, and its
-  # coefficient is Q1. vtpfvc_pt_mean = that mean: dose level plus discordance,
-  # reported as targeting (11.Z), never as a strain-error effect.
-  rhs <- c("ns(vent_day, 3)", "l_vtpfvc_within", "vtpfvc_pt_mean", CUM_TERM,
+  # PRIMARY: PFVC as an effect modifier of the clinician's dose. l_vtpbw_within =
+  # yesterday's VT/PBW minus the patient's mean over the course (the dose change,
+  # identified within patient); its slope is modified by centred log PBW/PFVC
+  # discordance (and, adjusted, by the age spline). The ratio of the interaction
+  # to the main effect is the scaling exponent gamma: 0 = injury per mL/kg PBW
+  # does not depend on true lung size (PBW normalizer), 1 = it scales in
+  # proportion to PBW/PFVC (PFVC normalizer, the VT/PFVC model as a special case).
+  # vtpbw_pt_mean = the between-patient dose level.
+  mod_terms <- switch(MOD_FORM,
+    # the age modification of the dose slope is LINEAR in age: a 4-df spline
+    # interaction is four weakly identified parameters that fail the R-hat gate
+    # even on synthetic data; the age main effect keeps its spline
+    disc      = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10"),
+    saturated = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10"),
+    none      = "l_vtpbw_within")
+  rhs <- c("ns(vent_day, 3)", mod_terms, "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
-           if (model == "hetero") "ers_pfvc_0 * l_vtpfvc_within",
+           if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
            lag_terms, BASE_RHS, if (adjusted) DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
   random_spec <- if (mk$random == "pddiag") list(id = nlme::pdDiag(~ vent_day)) else ~ vent_day | id
@@ -256,7 +274,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
-  cox_rhs <- paste(c("vtpbw_idx", "log_pfvc", "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
+  cox_rhs <- paste(c(if (HAZARD_INT) "vtpbw_idx * log_pfvc" else c("vtpbw_idx", "log_pfvc"),
+                     "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
                      if (adjusted) DEMO_RHS), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
@@ -311,6 +330,21 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     mutate(block = if_else(block == "survival" & grepl("value\\(|slope\\(", term), "association", block)) %>%
     bind_cols(counts[rep(1L, nrow(.)), ]) %>%
     mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON, site = site_name)
+  # --- scaling exponent gamma = (dose x discordance) / dose, from the joint posterior
+  bd <- do.call(rbind, jm_fit$mcmc$betas1)
+  if (is.null(colnames(bd))) colnames(bd) <- names(fixef(lme_fit))
+  scaling <- if (MOD_FORM == "disc" && all(c("l_vtpbw_within", "l_vtpbw_within:ldisc_c") %in% colnames(bd))) {
+    g <- bd[, "l_vtpbw_within:ldisc_c"] / bd[, "l_vtpbw_within"]
+    tibble(marker = mk$y, model = model, adjustment = adj_lab,
+           dose_slope = mean(bd[, "l_vtpbw_within"]),
+           dose_slope_lo = quantile(bd[, "l_vtpbw_within"], 0.025), dose_slope_hi = quantile(bd[, "l_vtpbw_within"], 0.975),
+           p_dose_slope_gt0 = mean(bd[, "l_vtpbw_within"] > 0),
+           interaction = mean(bd[, "l_vtpbw_within:ldisc_c"]),
+           interaction_lo = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.025), interaction_hi = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.975),
+           gamma_median = median(g), gamma_lo = quantile(g, 0.025), gamma_hi = quantile(g, 0.975),
+           p_gamma_gt0 = mean(g > 0), p_gamma_gt_half = mean(g > 0.5), p_gamma_lt1 = mean(g < 1),
+           n_patients = n_pts, horizon_days = JM_HORIZON, site = site_name)
+  } else NULL
   max_rhat <- max(est$rhat, na.rm = TRUE)
   gate <- is.finite(max_rhat) && max_rhat <= RHAT_GATE
   worst <- est %>% slice_max(rhat, n = 3, with_ties = FALSE)
@@ -341,11 +375,12 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model,
                adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
                lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
+               mod_form = MOD_FORM,
                baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
           file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM, "_", h_suffix, ".rds")))
   list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
-       counts = counts, estimates = est, absorption = absorption, max_rhat = max_rhat,
-       acc_b = acc_b)
+       counts = counts, estimates = est, absorption = absorption, scaling = scaling,
+       max_rhat = max_rhat, acc_b = acc_b)
 }
 
 # =============================================================================
@@ -372,11 +407,13 @@ manifest <- map_dfr(results, function(r)
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
+scaling    <- map_dfr(results, "scaling")
 
 out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
 write_csv(manifest,   file.path(final_dir, paste0("jm_manifest_",   out_tag, ".csv")))
 write_csv(estimates,  file.path(final_dir, paste0("jm_estimates_",  out_tag, ".csv")))
 write_csv(absorption, file.path(final_dir, paste0("jm_absorption_", out_tag, ".csv")))
+if (nrow(scaling)) write_csv(scaling, file.path(final_dir, paste0("jm_scaling_", out_tag, ".csv")))
 
 message("\n========== 13_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",
