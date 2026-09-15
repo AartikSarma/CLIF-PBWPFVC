@@ -29,7 +29,12 @@
 # Horizons: 48 h PRIMARY; 24 and 72 h sensitivities. One marker at a time
 # (PBWPFVC_INJ_MARKER = creatinine | ne_equiv | platelets | bilirubin | sf | dp;
 # creatinine by default). NE-equivalents are a two-part outcome (any pressor at
-# H, and the log dose given a pressor) because most patients are at zero.
+# H, and the log dose given a pressor) because most patients are at zero. The
+# dose per kg carries -log(weight) = -log(BMI) - 2 log(height), and height is
+# what identifies log PFVC once age, sex and race are in, so the per-kg dose has
+# a mechanical negative association with PFVC; the absolute dose (mcg/min)
+# carries the opposite sign. Both are reported and neither is height-neutral;
+# the binary part is the read for this marker.
 #
 # Inputs: the shared daily panel's sources (10_panel_common.R: base, wf, labs,
 # NE-equivalent administrations, CRRT). No dependence on the joint-model tables.
@@ -186,11 +191,19 @@ fit_horizon <- function(H) {
   }
   rows <- list()
   if (MARKER == "ne_equiv") {
-    cc <- cc %>% mutate(any_H = as.integer(yH > 0), log_y0 = log(y0 + 0.01))
-    on <- cc %>% filter(yH > 0) %>% mutate(log_yH = log(yH))
+    # actual weight from BMI and height (kg), for the absolute dose in mcg/min
+    cc <- cc %>% mutate(any_H = as.integer(yH > 0), log_y0 = log(y0 + 0.01),
+                        weight_kg = bmi * (height_cm / 100)^2)
+    on <- cc %>% filter(yH > 0) %>% mutate(log_yH = log(yH), log_yH_abs = log(yH * weight_kg),
+                                           log_y0_abs = log(y0 * weight_kg + 0.01))
     for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE)) {
       rows[[length(rows) + 1]] <- one(cc, "any_H", expo, adj, "any pressor at H", "binomial")
-      if (nrow(on) >= 50) rows[[length(rows) + 1]] <- one(on, "log_yH", expo, adj, "log dose given any")
+      if (nrow(on) >= 50) {
+        rows[[length(rows) + 1]] <- one(on, "log_yH", expo, adj, "log dose per kg given any") %>%
+          mutate(note = "mcg/kg/min; carries -2 log(height): mechanically NEGATIVE in PFVC")
+        rows[[length(rows) + 1]] <- one(on, "log_yH_abs", expo, adj, "log absolute dose given any", extra = "log_y0_abs") %>%
+          mutate(note = "mcg/min; heavier patients need more drug: mechanically POSITIVE in PFVC")
+      }
     }
   } else {
     cc <- cc %>% mutate(log_yH = log(yH), log_y0 = log(y0))
