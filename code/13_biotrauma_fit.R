@@ -166,13 +166,15 @@ message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients
 # own_lag: the lagged confounder that IS this marker's own lag, dropped from its model
 # random : pdDiag for the sparse plateau-measured mechanics marker, unstructured otherwise.
 #          On the 6h grid the labs (creatinine, platelets, bilirubin) carry one or
-#          two values in 48 hours, so they get a random intercept only ("intercept")
-#          and a shared linear slope; the dense markers keep intercept + slope.
+#          two values in 48 hours; JMbayes2 refuses a random intercept alone for a
+#          single outcome, so they get the pdDiag structure (independent intercept
+#          and slope variances, the slope variance shrinking toward zero where the
+#          data cannot support it), as the sparse plateau marker already does.
 # offset : added before the log for markers with true zeros (NE-equivalent dose)
 markers <- list(
-  creatinine    = list(y = "creatinine",    y0 = "creatinine_0", own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Creatinine"),
-  platelets     = list(y = "platelets",     y0 = "platelet_0",   own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Platelets"),
-  bilirubin     = list(y = "bilirubin",     y0 = "bilirubin_0",  own_lag = NULL,       random = if (JM_GRID == "6h") "intercept" else "unstructured", offset = 0,    label = "Bilirubin"),
+  creatinine    = list(y = "creatinine",    y0 = "creatinine_0", own_lag = NULL,       random = if (JM_GRID == "6h") "pddiag" else "unstructured", offset = 0,    label = "Creatinine"),
+  platelets     = list(y = "platelets",     y0 = "platelet_0",   own_lag = NULL,       random = if (JM_GRID == "6h") "pddiag" else "unstructured", offset = 0,    label = "Platelets"),
+  bilirubin     = list(y = "bilirubin",     y0 = "bilirubin_0",  own_lag = NULL,       random = if (JM_GRID == "6h") "pddiag" else "unstructured", offset = 0,    label = "Bilirubin"),
   sf            = list(y = "sf",            y0 = "sf_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "SF ratio"),
   dp            = list(y = "dp",            y0 = "dp_0",         own_lag = NULL,       random = "pddiag",       offset = 0,    label = "Driving pressure"),
   ne_equiv_peak = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0.01, label = "NE-equivalent dose")
@@ -472,10 +474,25 @@ absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")
 
 out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
-write_csv(manifest,   file.path(final_dir, paste0("jm_manifest_",   out_tag, ".csv")))
-write_csv(estimates,  file.path(final_dir, paste0("jm_estimates_",  out_tag, ".csv")))
-write_csv(absorption, file.path(final_dir, paste0("jm_absorption_", out_tag, ".csv")))
-if (nrow(scaling)) write_csv(scaling, file.path(final_dir, paste0("jm_scaling_", out_tag, ".csv")))
+# Merge on write: a run restricted to some markers (PBWPFVC_JM_MARKERS) replaces
+# only its own marker/model/adjustment rows in each table and keeps the rest, so
+# the full set can be assembled from several runs (a lab-only rerun, a longer-
+# chain rerun of one marker). PBWPFVC_JM_FRESH=1 discards the existing tables.
+merge_write <- function(new, name) {
+  path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
+  if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1") && nrow(new)) {
+    old <- read_csv(path, show_col_types = FALSE)
+    keys <- new %>% distinct(marker, model, adjustment)
+    old  <- old %>% anti_join(keys, by = c("marker", "model", "adjustment"))
+    new  <- bind_rows(old, new %>% mutate(across(any_of(names(old)), ~ .)))
+    message("  ", name, ": kept ", nrow(old), " rows from other markers")
+  }
+  if (nrow(new)) write_csv(new, path)
+}
+merge_write(manifest,   "manifest")
+merge_write(estimates,  "estimates")
+merge_write(absorption, "absorption")
+merge_write(scaling,    "scaling")
 
 message("\n========== 13_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",
