@@ -35,6 +35,7 @@ suppressPackageStartupMessages({
   library(nlme)
   library(survival)
   library(JMbayes2)
+  library(GLMMadaptive)   # fixef() for the logistic mixed model of the any-pressor fit
   library(patchwork)
 })
 rm(list = ls())
@@ -101,7 +102,8 @@ for (i in seq_len(nrow(usable))) {
   draws <- beta_draws(jm, b$lme)
   keep <- sample.int(nrow(draws), min(N_DRAWS, nrow(draws)))
   draws <- draws[keep, , drop = FALSE]
-  sd_log_y <- sd(ld$log_y)
+  binary <- isTRUE(b$binary)
+  sd_log_y <- if (binary) 1 else sd(ld$log_y)   # binary outcome: report on the log-odds scale
   gate <- u$status == "converged"
   message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
 
@@ -132,7 +134,8 @@ for (i in seq_len(nrow(usable))) {
       level_rows[[length(level_rows) + 1L]] <- tibble(
         marker = u$marker, model = u$model, adjustment = u$adjustment, exposure = ex, horizon_h = hh,
         estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
-        p_gt0 = mean(v > 0), per_sd_marker = mean(v) / sd_log_y,
+        p_gt0 = mean(v > 0), per_sd_marker = if (binary) NA_real_ else mean(v) / sd_log_y,
+        scale = if (binary) "log-odds of any pressor" else "log marker",
         n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
     }
   }
@@ -148,7 +151,7 @@ for (i in seq_len(nrow(usable))) {
       marker = u$marker, model = u$model, adjustment = u$adjustment, kind = kind, cause = cause,
       log_hr = mean(v), log_hr_lo = quantile(v, 0.025), log_hr_hi = quantile(v, 0.975),
       hr = exp(mean(v)), hr_lo = exp(quantile(v, 0.025)), hr_hi = exp(quantile(v, 0.975)),
-      per = if (kind == "value") "1 SD of log marker" else "1 log-unit per day",
+      per = if (binary) "1 logit unit of P(any pressor)" else if (kind == "value") "1 SD of log marker" else "1 log-unit per day",
       n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
   }
 

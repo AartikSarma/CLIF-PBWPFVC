@@ -21,6 +21,9 @@
 #       conditional, within-patient dose-response (not a policy effect; the 11.*
 #       g-methods are the causal version)
 #   Q2  the value and slope association parameters, per cause
+#   Markers: creatinine, platelets, bilirubin, sf, dp, ne_equiv_peak (log dose per kg,
+#   flagged: it carries -2 log(height)), any_pressor (the hurdle's binary part:
+#   a logistic mixed model of any vasoactive running, the vasopressor read).
 #   Q3  the log PFVC (and VT/PBW) coefficient on the death hazard in the plain
 #       cause-specific Cox (no linkage) versus inside the JM (with linkage):
 #       "association absorbed by the trajectory", not proportion mediated
@@ -185,8 +188,15 @@ markers <- list(
   bilirubin     = list(y = "bilirubin",     y0 = "bilirubin_0",  own_lag = NULL,       random = if (JM_GRID == "6h") "pddiag" else "unstructured", offset = 0,    label = "Bilirubin"),
   sf            = list(y = "sf",            y0 = "sf_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "SF ratio"),
   dp            = list(y = "dp",            y0 = "dp_0",         own_lag = NULL,       random = "pddiag",       offset = 0,    label = "Driving pressure"),
-  ne_equiv_peak = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0.01, label = "NE-equivalent dose")
+  ne_equiv_peak = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0.01, label = "NE-equivalent dose"),
+  # The hurdle's binary part: any vasoactive running in the period (NE-equivalent
+  # dose > 0), a logistic mixed model (GLMMadaptive) linked to the hazards through
+  # its logit. Unit-invariant, so free of the per-kg height artefact that makes
+  # the dose part (ne_equiv_peak) uninterpretable against PFVC. The two together
+  # are the hurdle model, fitted as two joint models on the same cohort.
+  any_pressor   = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "pddiag",       offset = 0,    label = "Any vasopressor", binary = TRUE)
 )
+for (nm in names(markers)) markers[[nm]]$name <- nm   # the output name; any_pressor shares the dose column
 want_markers <- Sys.getenv("PBWPFVC_JM_MARKERS", "")
 if (nzchar(want_markers)) {
   want <- trimws(strsplit(want_markers, ",")[[1]])
@@ -216,14 +226,15 @@ base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi"
 fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   model <- match.arg(model)
   adj_lab <- if (adjusted) "adjusted" else "unadjusted"
-  tag <- paste(mk$y, model, adj_lab, sep = "_")
+  tag <- paste(mk$name, model, adj_lab, sep = "_")
   stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
   stamp("start")
 
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
     filter(period >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
-    mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
+    mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
+           l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(mk$y0)),
@@ -235,7 +246,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
   ld <- ld %>% mutate(age10_c = age10 - age_med)
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
-    mutate(log_y0 = log(.data[[mk$y0]] + mk$offset))
+    mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else log(.data[[mk$y0]] + mk$offset))
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
   # applied by hand -- the response becomes log(y_t / y_0), the log percent change.
   if (!is.null(mk$y0) && BASELINE_FORM == "offset") ld <- ld %>% mutate(log_y = log_y - log_y0)
@@ -260,7 +271,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # barely moves is a power statement, not a finding
   within_sd <- sd(ld$l_vtpbw_within)
   frac_moved <- mean(abs(ld$l_vtpbw_within) > 0.5)
-  counts <- tibble(marker = mk$y, model = model, adjustment = adj_lab,
+  counts <- tibble(marker = mk$name, model = model, adjustment = adj_lab,
                    n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub,
                    dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved)
   if (n_pts < MIN_PATIENTS || n_deaths < MIN_DEATHS) {
@@ -320,9 +331,26 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (mk$random == "intercept" && ASSOC_FORM == "value_slope")
     stop("marker ", mk$y, " has a random intercept only on this grid; the slope association needs a random slope. ",
          "Use PBWPFVC_JM_ASSOC=value.")
-  lme_fit <- lme(lme_formula, random = random_spec, data = ld,
-                 control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200))
-  stamp("LME converged")
+  if (isTRUE(mk$binary)) {
+    # logistic mixed model, independent intercept and slope variances (the || form)
+    # Student-t penalty on the fixed effects, and a wide coefficient ceiling:
+    # pressor status is persistent within patient, so the baseline-status term is
+    # large; on the synthetic site it is near-deterministic (0.2% of patients off a
+    # pressor at the index are on one later) and the coefficient reaches 30, which
+    # is a property of the synthetic data, not of the model. A coefficient near the
+    # ceiling on real data means separation and is reported as such.
+    lme_fit <- GLMMadaptive::mixed_model(fixed = lme_formula, random = ~ vent_day || id, data = ld,
+                                         family = binomial(), penalized = TRUE,
+                                         control = list(max_coef_value = 100))
+    big <- GLMMadaptive::fixef(lme_fit)[abs(GLMMadaptive::fixef(lme_fit)) > 15]
+    if (length(big)) stamp("WARNING: logistic coefficients beyond 15 (near separation): ",
+                           paste(sprintf("%s %.1f", names(big), big), collapse = ", "))
+    stamp("logistic mixed model converged")
+  } else {
+    lme_fit <- lme(lme_formula, random = random_spec, data = ld,
+                   control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200))
+    stamp("LME converged")
+  }
 
   # --- survival submodel: cause-specific stratified Cox (death vs extubation)
   surv_cr <- crisk_setup(as.data.frame(sd_), statusVar = "event_factor", censLevel = "censored")
@@ -391,7 +419,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (is.null(colnames(bd))) colnames(bd) <- names(fixef(lme_fit))
   scaling <- if (MOD_FORM == "disc" && all(c("l_vtpbw_within", "l_vtpbw_within:ldisc_c") %in% colnames(bd))) {
     g <- bd[, "l_vtpbw_within:ldisc_c"] / bd[, "l_vtpbw_within"]
-    tibble(marker = mk$y, model = model, adjustment = adj_lab,
+    tibble(marker = mk$name, model = model, adjustment = adj_lab,
            dose_slope = mean(bd[, "l_vtpbw_within"]),
            dose_slope_lo = quantile(bd[, "l_vtpbw_within"], 0.025), dose_slope_hi = quantile(bd[, "l_vtpbw_within"], 0.975),
            p_dose_slope_gt0 = mean(bd[, "l_vtpbw_within"] > 0),
@@ -420,7 +448,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   absorption <- map_dfr(c("log_pfvc", "vtpbw_idx"), function(tm) {
     cox_row <- grep(paste0("^", tm, ":strata\\(strata\\)death$"), rownames(cox_tbl))
     jm_row  <- est %>% filter(block == "survival", grepl(paste0("^", tm, ":"), term), grepl("death", term))
-    tibble(marker = mk$y, model = model, adjustment = adj_lab, term = tm,
+    tibble(marker = mk$name, model = model, adjustment = adj_lab, term = tm,
            cox_log_hr = if (length(cox_row) == 1L) cox_tbl[cox_row, "coef"] else NA_real_,
            cox_se     = if (length(cox_row) == 1L) cox_tbl[cox_row, "se(coef)"] else NA_real_,
            jm_log_hr  = if (nrow(jm_row) == 1L) jm_row$estimate else NA_real_,
@@ -434,7 +462,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # terms with predvars: carries the ns() knots so the report can rebuild the
   # fixed-effects design on a prediction grid without re-deriving the basis
   mf_terms <- terms(model.frame(lme_formula, data = ld))
-  saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model,
+  saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model, binary = isTRUE(mk$binary),
                adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
                lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
                mod_form = MOD_FORM,
@@ -459,7 +487,7 @@ run_job <- function(marker, model, adjusted) {
              message(sprintf("  %s/%s/%s FAILED: %s", marker, model,
                              if (adjusted) "adjusted" else "unadjusted", conditionMessage(e)))
              list(status = "failed", reason = conditionMessage(e),
-                  counts = tibble(marker = markers[[marker]]$y, model = model,
+                  counts = tibble(marker = markers[[marker]]$name, model = model,
                                   adjustment = if (adjusted) "adjusted" else "unadjusted"))
            })
 }
