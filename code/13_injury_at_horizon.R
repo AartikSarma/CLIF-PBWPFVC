@@ -125,8 +125,13 @@ fit_horizon <- function(H) {
   win <- if (H >= 48) 24 else 12
   # outcome: the last value in (H - win, H]; NE: the peak dose in that window, zero if none
   yH <- if (MARKER == "ne_equiv") {
-    series %>% filter(h > H - win, h <= H) %>% group_by(hospitalization_id) %>%
-      summarise(yH = max(value), .groups = "drop")
+    # every patient has a dose in the window: zero when no pressor was given
+    # (without this the "any pressor" model saw only patients on a pressor and
+    # separated completely)
+    b0 %>% select(hospitalization_id) %>%
+      left_join(series %>% filter(h > H - win, h <= H) %>% group_by(hospitalization_id) %>%
+                  summarise(yH = max(value), .groups = "drop"), by = "hospitalization_id") %>%
+      mutate(yH = coalesce(yH, 0))
   } else {
     series %>% filter(h > H - win, h <= H) %>% group_by(hospitalization_id) %>%
       slice_max(h, n = 1, with_ties = FALSE) %>% ungroup() %>% select(hospitalization_id, yH = value)
