@@ -54,12 +54,13 @@ d_all <- long %>%
   filter(period >= 1L, !is.na(.data[[y_col]]), !is.na(l_vtpbw_within), !is.na(l_sf), !is.na(l_pressor)) %>%
   inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category,
                              vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
-  filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), !is.na(bmi)) %>%
+  filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), if (MARKER == "dp") !is.na(bmi) else TRUE) %>%
   mutate(log_y = log(.data[[y_col]] + offset), log_y0 = log(.data[[y0_col]] + offset), l_log_sf = log(l_sf))
 
 lags <- setdiff(c("l_log_sf", "l_pressor"), own_lag)
+# BMI only for the pressure-derived marker (it carries height; see 13_biotrauma_fit.R)
 rhs  <- function(adjusted) paste(c("vent_day", EXPO, paste0(EXPO, ":vent_day"), "l_vtpbw_within", "vtpbw_pt_mean",
-                                   "log_y0", lags, "np_sofa", "bmi",
+                                   "log_y0", lags, "np_sofa", if (MARKER == "dp") "bmi",
                                    if (adjusted) c("ns(age10, 4)", "sex_category", "race_category")), collapse = " + ")
 
 # one model per window: rows up to H, baseline observed before H, two or more rows per patient

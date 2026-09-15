@@ -10,7 +10,10 @@
 #
 #   log marker at H  ~  log marker at baseline + log PFVC (per SD)
 #                        + mean VT/PBW over [0, H) + non-respiratory SOFA
-#                        + log baseline SF + BMI  [+ ns(age, 4) + sex + race]
+#                        + log baseline SF [+ BMI, driving pressure only]
+#                        [+ ns(age, 4) + sex + race]
+# BMI carries height (weight over height squared) and enters only for the
+# pressure-derived marker.
 #
 # fitted adjusted (with the demographics, which are PFVC's parents) and
 # unadjusted, exactly as every exposure model in script 04 is. The companion
@@ -163,7 +166,8 @@ fit_horizon <- function(H) {
   if (MARKER == "ne_equiv") d <- b0 %>% select(hospitalization_id) %>% left_join(d, by = "hospitalization_id")
   n_all <- nrow(d)
   cc <- d %>% filter(!dead_before_H, !rrt_before_H | MARKER != "creatinine",
-                     !is.na(yH), !is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0), !is.na(bmi),
+                     !is.na(yH), !is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0),
+                     if (MARKER == "dp") !is.na(bmi) else TRUE,
                      !is.na(age10), !is.na(sex_category), !is.na(race_category))
   counts <- tibble(horizon_h = H, n_cohort = n_all, n_dead_before_H = sum(d$dead_before_H),
                    n_rrt_before_H = sum(d$rrt_before_H),
@@ -175,7 +179,7 @@ fit_horizon <- function(H) {
                   counts$n_no_outcome_value, nrow(cc)))
   if (nrow(cc) < 50) return(list(counts = counts, rows = NULL))
 
-  base_rhs <- "vtpbw_H + np_sofa + log_sf_0 + bmi"
+  base_rhs <- paste("vtpbw_H + np_sofa + log_sf_0", if (MARKER == "dp") "+ bmi" else "")
   demo_rhs <- "ns(age10, 4) + sex_category + race_category"
   # expo: the coefficient reported; extra: further right-hand-side terms (the baseline)
   one <- function(dat, lhs, expo, adjusted, outcome_type, family = "gaussian", extra = "log_y0") {
@@ -212,7 +216,8 @@ fit_horizon <- function(H) {
   }
   # composite-rank sensitivity: death before H worst, RRT before H next, then the marker
   # (worse direction first), on everyone with a baseline; rank scaled to (0, 1)
-  comp <- d %>% filter(!is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0), !is.na(bmi),
+  comp <- d %>% filter(!is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0),
+                       if (MARKER == "dp") !is.na(bmi) else TRUE,
                        !is.na(age10), !is.na(sex_category), !is.na(race_category)) %>%
     mutate(score = case_when(dead_before_H ~ Inf,
                              rrt_before_H & MARKER == "creatinine" ~ 1e9,

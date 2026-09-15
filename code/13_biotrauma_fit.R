@@ -200,7 +200,15 @@ stopifnot(all(want_models %in% c("main", "hetero")))
 DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
 DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10",
                                     "+ sex_category + race_category")
-BASE_RHS  <- "np_sofa + bmi"   # non-respiratory SOFA: log SF carries the respiratory component
+# Severity covariates of the longitudinal submodel. Non-respiratory SOFA (log SF
+# carries the respiratory component). BMI ONLY for the pressure-derived marker:
+# BMI is weight over height squared, so it carries height, which is what
+# identifies log PFVC once age, sex and race are in; its chest-wall rationale
+# applies to driving pressure and elastance, not to labs, oxygenation or
+# vasopressors (user, 2026-09-15). The hazard keeps the paper's mortality set.
+BASE_RHS  <- "np_sofa"
+PRESSURE_MARKERS <- c("dp")
+base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi") else BASE_RHS
 
 # =============================================================================
 # 13f. One fit
@@ -220,7 +228,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(mk$y0)),
                by = "hospitalization_id") %>%
-    filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within))
+    filter(!is.na(np_sofa), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within),
+           if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
   # centred age for the dose x age interaction: uncentred, the interaction and the
   # dose main effect are collinear (age10 has a large mean relative to its spread)
   age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
@@ -238,7 +247,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     and log PFVC (size), the paper's primary parameterization
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0)) %>%
+    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi)) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
   lv <- sort(unique(ld$hospitalization_id))
@@ -263,7 +272,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CUM_TERM,
-                          "l_log_sf", "l_pressor", "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
+                          "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
+                          "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
   if (any(n_bad > 0))
@@ -301,7 +311,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   rhs <- c(time_term, mod_terms, "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
-           lag_terms, BASE_RHS, if (adjusted) DEMO_RHS)
+           lag_terms, base_rhs_for(mk$y), if (adjusted) DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
   random_spec <- switch(mk$random,
     pddiag       = list(id = nlme::pdDiag(~ vent_day)),
