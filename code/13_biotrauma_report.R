@@ -45,7 +45,11 @@ output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
 final_dir  <- here("output", paste0(site_name, "_output"), "final")
 source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
-out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
+MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level"))
+out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
+                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
+                   h_suffix, "_", site_name)
 okabe <- c("#009E73", "#56B4E9", "#E69F00", "#D55E00", "#0072B2", "#CC79A7")
 DOSE_LEVELS    <- c(6, 8, 10)     # VT/PBW, mL/kg: the LTVV target, its upper bound, conventional
 DOSE_REF       <- 6
@@ -83,12 +87,15 @@ population_row <- function(ld) {
 }
 
 trajectory_rows <- list(); strain_rows <- list(); assoc_rows <- list(); hetero_rows <- list()
+level_rows <- list()
+LEVEL_HOURS <- c(24, 48, 72)
 traj_plots <- list()
 
 for (i in seq_len(nrow(usable))) {
   u <- usable[i, ]
   tag <- paste(u$marker, u$model, u$adjustment, sep = "_")
-  f <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM, "_", h_suffix, ".rds"))
+  f <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
+                                    if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
   if (!file.exists(f)) stop("fit bundle missing: ", f)
   b <- readRDS(f); jm <- b$jm; ld <- b$long_data
   draws <- beta_draws(jm, b$lme)
@@ -110,6 +117,24 @@ for (i in seq_len(nrow(usable))) {
       per_sd_estimate = mean(v) / sd_log_y, per_sd_lo = quantile(v, 0.025) / sd_log_y,
       per_sd_hi = quantile(v, 0.975) / sd_log_y, sd_log_marker = sd_log_y,
       n_patients = u$n_patients, rhat_gate = gate)
+  }
+
+  # ---- PFVC-level question: marker difference per SD of log PFVC (or of log
+  #      PBW/PFVC) at each horizon hour within the grid, level + divergence x time,
+  #      from the joint posterior (death before H handled by the shared random effects)
+  for (ex in c("log_pfvc_sd", "ldisc_sd")) {
+    if (!ex %in% colnames(draws)) next
+    b_lev <- draws[, ex]
+    tcol <- intersect(c(paste0(ex, ":vent_day"), paste0("vent_day:", ex)), colnames(draws))   # R orders the pair by appearance
+    b_tim <- if (length(tcol)) draws[, tcol[1]] else 0
+    for (hh in LEVEL_HOURS[LEVEL_HOURS <= JM_HORIZON * 24]) {
+      v <- b_lev + b_tim * hh / 24
+      level_rows[[length(level_rows) + 1L]] <- tibble(
+        marker = u$marker, model = u$model, adjustment = u$adjustment, exposure = ex, horizon_h = hh,
+        estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
+        p_gt0 = mean(v > 0), per_sd_marker = mean(v) / sd_log_y,
+        n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
+    }
   }
 
   # ---- Q2 association: HR per SD of the current log marker (value) and per unit slope
@@ -156,6 +181,7 @@ for (i in seq_len(nrow(usable))) {
       mutate(vtpbw_pt_mean = dose_med, l_vtpbw_within = dose - dose_med,
              ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
              log_pbw = median(ld$log_pbw), log_pfvc = median(ld$log_pfvc),
+             log_pfvc_sd = 0, ldisc_sd = 0,
              mean_prior_vtpfvc = median(ld$l_vtpfvc, na.rm = TRUE), cum_days_above = 0)
     grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots
@@ -194,6 +220,13 @@ trajectory_grid <- bind_rows(trajectory_rows)
 strain_effects  <- bind_rows(strain_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 association_hr  <- bind_rows(assoc_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+level_contrast  <- bind_rows(level_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+if (nrow(level_contrast)) {
+  write_csv(level_contrast, file.path(final_dir, paste0("jm_level_contrast_", out_tag, ".csv")))
+  message("--- marker difference per SD of the size exposure at each horizon (log units)")
+  print(as.data.frame(level_contrast %>% select(marker, adjustment, exposure, horizon_h, estimate, lo, hi, p_gt0, n_patients, n_deaths) %>%
+                        mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+}
 write_csv(trajectory_grid, file.path(final_dir, paste0("jm_trajectory_grid_", out_tag, ".csv")))
 write_csv(strain_effects,  file.path(final_dir, paste0("jm_strain_effects_",  out_tag, ".csv")))
 write_csv(association_hr,  file.path(final_dir, paste0("jm_association_hr_",  out_tag, ".csv")))

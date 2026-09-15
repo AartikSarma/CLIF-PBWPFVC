@@ -107,8 +107,15 @@ CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cu
 # demographics, so a discordance interaction only means something if it survives
 # an age interaction). "saturated" interacts the dose change with log PBW and log
 # PFVC separately (mirrors 4k). "none" fits the dose change alone.
+# "pfvc" (the PFVC-level question, 2026-09-14): is a lower PFVC, at a given
+# VT/PBW, associated with a worse marker at the horizon? log PFVC (per SD) enters
+# as a between-patient level term and as a divergence over time, beside the
+# clinician's dose (patient mean and within-patient change); the read is the
+# marker difference per SD of log PFVC at H from the joint posterior, which the
+# shared random effects correct for death before H. "disc_level" is its
+# companion with log PBW/PFVC. Log PBW and log PFVC are never entered together.
 MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level"))
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
 # Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
@@ -120,6 +127,7 @@ stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
+               "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd",
                "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
                "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
@@ -210,7 +218,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     mutate(log_y = log(.data[[mk$y]] + mk$offset), l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
-                                   ldisc_c, log_pbw, log_pfvc, all_of(mk$y0)),
+                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa), !is.na(bmi), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within))
   # centred age for the dose x age interaction: uncentred, the interaction and the
@@ -254,7 +262,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
-                          "log_pbw", "log_pfvc", CUM_TERM,
+                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CUM_TERM,
                           "l_log_sf", "l_pressor", "np_sofa", "bmi", "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
@@ -282,9 +290,11 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     # the age modification of the dose slope is LINEAR in age: a 4-df spline
     # interaction is four weakly identified parameters that fail the R-hat gate
     # even on synthetic data; the age main effect keeps its spline
-    disc      = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
-    saturated = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
-    none      = "l_vtpbw_within")
+    disc       = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
+    saturated  = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
+    none       = "l_vtpbw_within",
+    pfvc       = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
+    disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"))
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
@@ -419,7 +429,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
                mod_form = MOD_FORM,
                baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
-          file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM, "_", h_suffix, ".rds")))
+          file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
+                                       if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds")))
   list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
        counts = counts, estimates = est, absorption = absorption, scaling = scaling,
        max_rhat = max_rhat, key_rhat = key_rhat,
@@ -473,7 +484,11 @@ estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")
 
-out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "", h_suffix, "_", site_name)
+# Output tag: non-default forms (baseline offset, saturated or no modifier) get
+# their own files so a sensitivity run never overwrites the primary's rows.
+out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
+                  if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
+                  h_suffix, "_", site_name)
 # Merge on write: a run restricted to some markers (PBWPFVC_JM_MARKERS) replaces
 # only its own marker/model/adjustment rows in each table and keeps the rest, so
 # the full set can be assembled from several runs (a lab-only rerun, a longer-
