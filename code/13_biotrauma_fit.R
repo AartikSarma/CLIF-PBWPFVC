@@ -134,6 +134,10 @@ HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
 # death R-hat 3.2 with 472 deaths). The longitudinal submodel keeps the spline.
 HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
 stopifnot(HAZARD_AGE %in% c("linear", "spline"))
+# Resume: PBWPFVC_JM_RESUME=1 rebuilds every table from the fit bundles already on
+# disk (jm_fit_*.rds) without running the MCMC, for a stage whose fits finished
+# but whose collection failed; fits without a bundle are fitted as usual.
+USE_RESUME <- identical(Sys.getenv("PBWPFVC_JM_RESUME", "0"), "1")
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
@@ -236,7 +240,20 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   tag <- paste(mk$name, model, adj_lab, sep = "_")
   stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
   stamp("start")
-
+  bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
+                                              if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
+  resumed <- USE_RESUME && file.exists(bundle_file)
+  if (resumed) {
+    # everything the summary below needs, from the bundle the worker saved
+    b <- readRDS(bundle_file)
+    stopifnot(identical(b$mod_form, MOD_FORM), identical(b$baseline_form, BASELINE_FORM), isTRUE(all.equal(b$horizon, JM_HORIZON)))
+    ld <- b$long_data; surv_cr <- b$surv_cr; counts <- b$counts
+    lme_fit <- b$lme; cox_cr <- b$cox; jm_fit <- b$jm; lme_formula <- b$lme_formula; mf_terms <- b$mf_terms
+    n_pts <- counts$n_patients; n_deaths <- counts$n_deaths
+    within_sd <- counts$dose_within_sd; frac_moved <- counts$frac_days_dose_moved_gt_0.5
+    acc_b <- mean(jm_fit$acc_rates$b, na.rm = TRUE)
+    stamp("resumed from ", basename(bundle_file), " (", n_pts, " patients, ", n_deaths, " deaths); no MCMC")
+  } else {
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
     filter(period >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
@@ -407,6 +424,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   stamp(sprintf("JM done (%.1f min); random-effects acceptance %.3f, fixed-effects acceptance %.3f",
                 as.numeric(difftime(Sys.time(), t_jm, units = "mins")), acc_b,
                 mean(unlist(jm_fit$acc_rates$betas), na.rm = TRUE)))
+  }   # end of the fitting branch (skipped on resume)
 
   # --- estimates: every block of summary(jm) that carries a coefficient table
   s <- summary(jm_fit)
@@ -471,20 +489,30 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # terms with predvars: carries the ns() knots so the report can rebuild the
   # fixed-effects design on a prediction grid without re-deriving the basis
-  mf_terms <- terms(model.frame(lme_formula, data = ld))
-  saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model, binary = isTRUE(mk$binary),
-               adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
-               lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
-               mod_form = MOD_FORM,
-               baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
-          file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
-                                       if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds")))
-  list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
-       counts = counts, estimates = est, absorption = absorption, scaling = scaling,
-       max_rhat = max_rhat, key_rhat = key_rhat,
-       worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
-       acc_b = acc_b)
+  if (!resumed) {
+    mf_terms <- terms(model.frame(lme_formula, data = ld))
+    saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model, binary = isTRUE(mk$binary),
+                 adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
+                 lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
+                 mod_form = MOD_FORM,
+                 baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
+            bundle_file)
+  }
+  result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
+                 counts = counts, estimates = est, absorption = absorption, scaling = scaling,
+                 max_rhat = max_rhat, key_rhat = key_rhat,
+                 worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
+                 acc_b = acc_b)
+  # the small result list also goes to disk, so a cluster failure after the fits
+  # finished loses nothing (the master collects these files if the cluster dies)
+  saveRDS(result, result_file(mk$name, model, adj_lab))
+  result
 }
+# per-fit result file (aggregates only; beside the bundles in intermediate/)
+result_file <- function(marker, model, adj_lab)
+  file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
+                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
+RUN_START <- Sys.time()
 
 # =============================================================================
 # 13g. Run the model set
@@ -513,8 +541,19 @@ if (N_FITS_PAR > 1L) {
     library(tidyverse); library(splines); library(nlme); library(survival); library(JMbayes2)
   }))
   clusterExport(cl, setdiff(ls(envir = .GlobalEnv), "cl"), envir = .GlobalEnv)
-  results <- clusterMap(cl, run_job, jobs$marker, jobs$model, jobs$adjusted, SIMPLIFY = FALSE, USE.NAMES = FALSE)
-  stopCluster(cl)
+  results <- tryCatch(clusterMap(cl, run_job, jobs$marker, jobs$model, jobs$adjusted, SIMPLIFY = FALSE, USE.NAMES = FALSE),
+                      error = function(e) {
+                        message("\nCLUSTER FAILED while collecting results (", conditionMessage(e),
+                                "); collecting the per-fit result files written during this run instead")
+                        NULL
+                      })
+  try(stopCluster(cl), silent = TRUE)
+  if (is.null(results)) results <- pmap(jobs, function(marker, model, adjusted) {
+    f <- result_file(markers[[marker]]$name, model, adj_label(adjusted))
+    if (file.exists(f) && file.mtime(f) >= RUN_START) readRDS(f) else
+      list(status = "failed", reason = "cluster failed before this fit's result was written; rerun with PBWPFVC_JM_RESUME=1",
+           counts = tibble(marker = markers[[marker]]$name, model = model, adjustment = adj_label(adjusted)))
+  })
 } else {
   results <- pmap(jobs, run_job)
 }

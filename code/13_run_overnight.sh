@@ -18,7 +18,8 @@
 #   caffeinate -i nohup bash code/13_run_overnight.sh > overnight.out 2>&1 &
 #   bash code/13_run_overnight.sh --dry-run          # print the stages only
 # Knobs (environment): MARKERS_INJ, MARKERS_JM, HORIZONS, FORMS, ITER, BURNIN,
-#   CHAINS, HEARTBEAT (fit progress interval, s), plus PBWPFVC_SITE_NAME /
+#   CHAINS, HEARTBEAT (fit progress interval, s), RESUME (1: reuse fit bundles
+#   already on disk, fit only what is missing), plus PBWPFVC_SITE_NAME /
 #   PBWPFVC_TABLES_PATH as in utils/config.R.
 # Logs: output/{site}_output/logs/overnight_{stamp}/{stage}.log and status.tsv;
 # the existing jm_*/injury_*/quick_* tables are copied there first, because the
@@ -33,6 +34,7 @@ HORIZONS=${HORIZONS:-48 72 24}                                    # fit order: t
 FORMS=${FORMS:-pfvc channels disc_level}
 ITER=${ITER:-25000}; BURNIN=${BURNIN:-5000}; CHAINS=${CHAINS:-3}
 HEARTBEAT=${HEARTBEAT:-300}
+RESUME=${RESUME:-0}            # 1: rebuild tables from fit bundles already on disk, fit only what is missing
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
 # site name from config.json by sed: Rscript's stdout carries renv's start-up notices
@@ -107,7 +109,7 @@ for H in $HORIZONS; do
   for FORM in $FORMS; do
     run_stage "fit_${FORM}_${H}h" PBWPFVC_JM_HORIZON_H=$H PBWPFVC_JM_MODIFIER=$FORM PBWPFVC_JM_MARKERS=$MARKERS_JM \
       PBWPFVC_JM_MODELS=main PBWPFVC_JM_ITER=$ITER PBWPFVC_JM_BURNIN=$BURNIN PBWPFVC_JM_CHAINS=$CHAINS \
-      PBWPFVC_JM_FRESH=1 PBWPFVC_JM_HEARTBEAT=$HEARTBEAT -- Rscript code/13_biotrauma_fit.R
+      PBWPFVC_JM_FRESH=1 PBWPFVC_JM_HEARTBEAT=$HEARTBEAT PBWPFVC_JM_RESUME=$RESUME -- Rscript code/13_biotrauma_fit.R
     n_ok=$(usable_fits "$FINAL/jm_manifest_$(tag_of $FORM $H).csv"); [[ $DRY == 1 ]] && n_ok=1
     if [[ $(rc_of fit_${FORM}_${H}h) -eq 0 && $n_ok -gt 0 ]]; then
       run_stage "report_${FORM}_${H}h"  PBWPFVC_JM_HORIZON_H=$H PBWPFVC_JM_MODIFIER=$FORM -- Rscript code/13_biotrauma_report.R
