@@ -47,7 +47,7 @@ final_dir  <- here("output", paste0(site_name, "_output"), "final")
 source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels"))
 out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                    h_suffix, "_", site_name)
@@ -124,17 +124,26 @@ for (i in seq_len(nrow(usable))) {
   # ---- PFVC-level question: marker difference per SD of log PFVC (or of log
   #      PBW/PFVC) at each horizon hour within the grid, level + divergence x time,
   #      from the joint posterior (death before H handled by the shared random effects)
-  for (ex in c("log_pfvc_sd", "ldisc_sd")) {
-    if (!ex %in% colnames(draws)) next
-    b_lev <- draws[, ex]
+  #      Channels form: one contrast per GLI piece (per log unit of the piece), and
+  #      a Wald test on the posterior mean and covariance of the four contrasts
+  #      that they are equal (equal = lung size is the operative quantity).
+  contrast_draws <- function(ex, hh) {
     tcol <- intersect(c(paste0(ex, ":vent_day"), paste0("vent_day:", ex)), colnames(draws))   # R orders the pair by appearance
-    b_tim <- if (length(tcol)) draws[, tcol[1]] else 0
-    for (hh in LEVEL_HOURS[LEVEL_HOURS <= JM_HORIZON * 24]) {
-      v <- b_lev + b_tim * hh / 24
+    draws[, ex] + (if (length(tcol)) draws[, tcol[1]] else 0) * hh / 24
+  }
+  for (hh in LEVEL_HOURS[LEVEL_HOURS <= JM_HORIZON * 24]) {
+    exs <- intersect(c("log_pfvc_sd", "ldisc_sd", CHANNELS), colnames(draws))
+    if (!length(exs)) next
+    V <- sapply(exs, contrast_draws, hh = hh)                       # draws x exposures
+    p_equal <- if (all(CHANNELS %in% exs)) channels_equal_p(colMeans(V[, CHANNELS]), cov(V[, CHANNELS])) else NA_real_
+    for (ex in exs) {
+      v <- V[, ex]
       level_rows[[length(level_rows) + 1L]] <- tibble(
         marker = u$marker, model = u$model, adjustment = u$adjustment, exposure = ex, horizon_h = hh,
         estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
         p_gt0 = mean(v > 0), per_sd_marker = if (binary) NA_real_ else mean(v) / sd_log_y,
+        unit = if (ex %in% CHANNELS) "per log unit of the piece" else "per SD of the exposure",
+        p_equal = if (ex %in% CHANNELS) p_equal else NA_real_,
         scale = if (binary) "log-odds of any pressor" else "log marker",
         n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
     }
@@ -184,7 +193,7 @@ for (i in seq_len(nrow(usable))) {
       mutate(vtpbw_pt_mean = dose_med, l_vtpbw_within = dose - dose_med,
              ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
              log_pbw = median(ld$log_pbw), log_pfvc = median(ld$log_pfvc),
-             log_pfvc_sd = 0, ldisc_sd = 0,
+             log_pfvc_sd = 0, ldisc_sd = 0, ch_height = 0, ch_age = 0, ch_sex = 0, ch_race = 0,
              mean_prior_vtpfvc = median(ld$l_vtpfvc, na.rm = TRUE), cum_days_above = 0)
     grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots
@@ -226,8 +235,9 @@ heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_da
 level_contrast  <- bind_rows(level_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 if (nrow(level_contrast)) {
   write_csv(level_contrast, file.path(final_dir, paste0("jm_level_contrast_", out_tag, ".csv")))
-  message("--- marker difference per SD of the size exposure at each horizon (log units)")
-  print(as.data.frame(level_contrast %>% select(marker, adjustment, exposure, horizon_h, estimate, lo, hi, p_gt0, n_patients, n_deaths) %>%
+  message("--- marker difference per unit of the size exposure at each horizon (log units; ",
+          "per SD for log_pfvc_sd / ldisc_sd, per log unit for the ch_* pieces; p_equal tests the four pieces equal)")
+  print(as.data.frame(level_contrast %>% select(marker, adjustment, exposure, horizon_h, estimate, lo, hi, p_gt0, p_equal, n_patients, n_deaths) %>%
                         mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 }
 write_csv(trajectory_grid, file.path(final_dir, paste0("jm_trajectory_grid_", out_tag, ".csv")))

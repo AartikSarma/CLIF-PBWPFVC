@@ -55,6 +55,30 @@ ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_.*\\.csv$", full.names = T
 ql <- list.files(fig_dir, "^quick_lme_[a-z_]+_.*\\.csv$", full.names = TRUE) %>% map_dfr(read_if) %>%
   { if (nrow(.) && !"model_horizon_h" %in% names(.)) mutate(., model_horizon_h = horizon_h) else . }
 
+# ---- channels form: the size effect identified through each GLI input, from the joint model
+if (MOD_FORM == "channels") {
+  chd <- lc %>% filter(exposure %in% CHANNELS, model == "main", marker %in% names(lab)) %>%
+    mutate(channel = factor(sub("^ch_", "", exposure), c("height", "age", "sex", "race")),
+           inj = if_else(worse[marker] == "higher", -estimate, estimate),
+           inj_lo = if_else(worse[marker] == "higher", -hi, lo), inj_hi = if_else(worse[marker] == "higher", -lo, hi),
+           horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
+           marker_lab = sprintf("%s\n(worse = %s; n = %d, deaths = %d)", lab[marker], worse[marker], n_patients, n_deaths),
+           panel = sprintf("%s, p(equal) = %.2g", horizon, p_equal))
+  p_ch <- ggplot(chd, aes(inj, channel)) +
+    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
+    geom_pointrange(aes(xmin = inj_lo, xmax = inj_hi), colour = okabe[1]) +
+    facet_grid(marker_lab ~ panel, scales = "free_x") +
+    labs(title = "The size effect identified through each input to PFVC, joint model (death before H modelled)",
+         subtitle = paste0(site_name, ": difference toward injury per log unit LOWER of each GLI piece; ",
+                           "equal pieces = lung size is the operative quantity; log-odds for any vasopressor"),
+         x = "difference in the log marker toward injury per log unit lower (95% interval)", y = NULL) +
+    theme(strip.text.y = element_text(angle = 0))
+  ggsave(file.path(fig_dir, paste0("biotrauma_fig_channels_", tag, ".pdf")), p_ch,
+         width = 10, height = 2 + 1.6 * n_distinct(chd$marker))
+  message("13_biotrauma_figures (channels form): ", n_distinct(chd$marker), " markers -> ", fig_dir)
+  quit(save = "no")
+}
+
 # ---- 0. the level contrasts: the scientific question, one figure
 #         Joint-model marker difference at 24/48/72 h per SD LOWER log PFVC at a
 #         given VT/PBW, oriented so that right of zero is MORE injury for every

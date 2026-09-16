@@ -117,8 +117,15 @@ CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cu
 # marker difference per SD of log PFVC at H from the joint posterior, which the
 # shared random effects correct for death before H. "disc_level" is its
 # companion with log PBW/PFVC. Log PBW and log PFVC are never entered together.
+# "channels" (2026-09-15): the pfvc form with log PFVC replaced by its four GLI
+# pieces (height, age, sex, race; 13_biotrauma_grid.R), each with a level and a
+# divergence term, in BOTH submodels, in place of the demographic covariates.
+# One arm only (the pieces are the demographics). The report tests whether the
+# four horizon contrasts are equal: if lung size is the operative quantity they
+# are, and the form collapses to the pfvc form unadjusted.
 MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels"))
+adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
 # Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
@@ -130,7 +137,7 @@ stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
-               "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd",
+               "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd", "^ch_", "vent_day:ch_",
                "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
                "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
@@ -225,7 +232,7 @@ base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi"
 # =============================================================================
 fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   model <- match.arg(model)
-  adj_lab <- if (adjusted) "adjusted" else "unadjusted"
+  adj_lab <- adj_label(adjusted)
   tag <- paste(mk$name, model, adj_lab, sep = "_")
   stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
   stamp("start")
@@ -237,7 +244,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
-                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(mk$y0)),
+                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within),
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
@@ -258,7 +265,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     and log PFVC (size), the paper's primary parameterization
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi)) %>%   # the hazard keeps BMI (paper's set)
+    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height)) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
   lv <- sort(unique(ld$hospitalization_id))
@@ -282,7 +289,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
-                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CUM_TERM,
+                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
@@ -291,7 +298,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
-  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time"),
+  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
     stop("non-finite values in the survival design: ",
@@ -315,14 +322,15 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     saturated  = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
     none       = "l_vtpbw_within",
     pfvc       = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
-    disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"))
+    disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
+    channels   = c("l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
   rhs <- c(time_term, mod_terms, "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
-           lag_terms, base_rhs_for(mk$y), if (adjusted) DEMO_RHS)
+           lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
   random_spec <- switch(mk$random,
     pddiag       = list(id = nlme::pdDiag(~ vent_day)),
@@ -358,9 +366,11 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
-  cox_rhs <- paste(c(if (HAZARD_INT) "vtpbw_idx * log_pfvc" else c("vtpbw_idx", "log_pfvc"),
+  # channels form: the size term of the hazard is the four pieces too, in place of log PFVC and the demographics
+  size_haz <- if (MOD_FORM == "channels") CHANNELS else if (HAZARD_INT) "vtpbw_idx * log_pfvc" else "log_pfvc"
+  cox_rhs <- paste(c(if (!HAZARD_INT || MOD_FORM == "channels") "vtpbw_idx", size_haz,
                      "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
-                     if (adjusted) DEMO_RHS_HAZARD()), collapse = " + ")
+                     if (adjusted && MOD_FORM != "channels") DEMO_RHS_HAZARD()), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
@@ -480,15 +490,15 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 # 13g. Run the model set
 # =============================================================================
 jobs <- expand_grid(marker = names(markers), model = want_models, adjusted = c(TRUE, FALSE)) %>%
-  filter(!(model == "hetero" & !adjusted))   # heterogeneity: adjusted only
+  filter(!(model == "hetero" & !adjusted)) %>%          # heterogeneity: adjusted only
+  filter(!(MOD_FORM == "channels" & adjusted))          # channels: one arm, the pieces are the demographics
 run_job <- function(marker, model, adjusted) {
   tryCatch(fit_one(markers[[marker]], model, adjusted),
            error = function(e) {
-             message(sprintf("  %s/%s/%s FAILED: %s", marker, model,
-                             if (adjusted) "adjusted" else "unadjusted", conditionMessage(e)))
+             message(sprintf("  %s/%s/%s FAILED: %s", marker, model, adj_label(adjusted), conditionMessage(e)))
              list(status = "failed", reason = conditionMessage(e),
                   counts = tibble(marker = markers[[marker]]$name, model = model,
-                                  adjustment = if (adjusted) "adjusted" else "unadjusted"))
+                                  adjustment = adj_label(adjusted)))
            })
 }
 # Fits run in parallel across PSOCK workers, each fit using one core per chain,

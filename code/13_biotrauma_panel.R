@@ -314,6 +314,8 @@ surv <- base %>%
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0,
          ends_with("_0_day"))
+# channel pieces of log PFVC (13_biotrauma_grid.R): the size term of the "channels" joint-model form
+surv <- bind_cols(surv, pfvc_channels(surv, "log_pfvc"))
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
         ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
 
