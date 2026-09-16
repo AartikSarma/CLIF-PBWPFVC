@@ -44,6 +44,9 @@
 # Outputs: final/injury_at_horizon_{marker}_{site}.csv  one row per horizon x
 #          exposure x adjustment x outcome type, with counts of who was excluded
 #          final/injury_at_horizon_{marker}_{site}.pdf  the forest
+#          final/injury_channels_{marker}_{site}.csv/.pdf  the channel decomposition
+#          (13_biotrauma_grid.R): the size effect identified through each GLI
+#          input separately, with a test that the four agree
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -66,6 +69,7 @@ MAX_VENT_DAY <- 27L
 is_synthetic <- identical(site_name, "synthetic_clif")
 PANEL_NORM   <- "pfvc"
 source(here("code", "10_panel_common.R"))
+source(here("code", "13_biotrauma_grid.R"))   # pfvc_channels(), channels_equal_p()
 
 MARKER   <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp"))
@@ -194,12 +198,41 @@ fit_horizon <- function(H) {
            note = if (family == "gaussian") "log marker at H, baseline as covariate" else "logistic: any pressor at H")
   }
   rows <- list()
+  # ---- channel decomposition: the exposure split into its height, age, sex and
+  #      race pieces, each with its own coefficient (per log unit of the exposure),
+  #      beside the constrained one-beta model on their sum; Wald test of equality.
+  #      The pieces replace the demographic covariates, so there is one form only.
+  chan_rows <- list()
+  channels <- function(dat, lhs, expo_base, outcome_type, family = "gaussian", extra = "log_y0") {
+    ch <- pfvc_channels(dat, expo_base)
+    dd <- bind_cols(dat, ch)
+    f_free <- as.formula(paste(lhs, "~", paste(CHANNELS, collapse = " + "), "+", extra, "+", base_rhs))
+    f_one  <- as.formula(paste(lhs, "~ ch_sum +", extra, "+", base_rhs))
+    fit  <- function(f) if (family == "gaussian") lm(f, data = dd) else glm(f, data = dd, family = binomial)
+    free <- fit(f_free); one_fit <- fit(f_one)
+    b <- coef(free)[CHANNELS]; V <- vcov(free)[CHANNELS, CHANNELS]
+    co1 <- summary(one_fit)$coefficients["ch_sum", ]
+    sd_expo <- sd(dd$ch_sum + dd$ch_remainder)
+    bind_rows(
+      tibble(channel = c("height", "age", "sex", "race"), estimate = unname(b), se = sqrt(diag(V))),
+      tibble(channel = "all (one beta)", estimate = unname(co1[1]), se = unname(co1[2]))) %>%
+      mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, per_sd = estimate * sd_expo,
+             # the same coefficient read per 100 mL of PFVC at the median PFVC (d log PFVC = dPFVC / PFVC)
+             per_100ml_at_median = if (expo_base == "log_pfvc") estimate * 0.1 / median(dd$pfvc_gli) else NA_real_,
+             horizon_h = H, marker = MARKER, outcome_type = outcome_type,
+             exposure = if (expo_base == "log_pfvc") "log PFVC" else "log PBW/PFVC (VT/PFVC at a given VT/PBW)",
+             p_equal = channels_equal_p(b, V), n = nrow(dd),
+             channel_sd = c(sapply(dd[CHANNELS], sd), sd_expo), remainder_sd = sd(dd$ch_remainder),
+             worse_is = worse_is)
+  }
   if (MARKER == "ne_equiv") {
     # actual weight from BMI and height (kg), for the absolute dose in mcg/min
     cc <- cc %>% mutate(any_H = as.integer(yH > 0), log_y0 = log(y0 + 0.01),
                         weight_kg = bmi * (height_cm / 100)^2)
     on <- cc %>% filter(yH > 0) %>% mutate(log_yH = log(yH), log_yH_abs = log(yH * weight_kg),
                                            log_y0_abs = log(y0 * weight_kg + 0.01))
+    for (eb in c("log_pfvc", "ldisc"))
+      chan_rows[[length(chan_rows) + 1]] <- channels(cc, "any_H", eb, "any pressor at H", "binomial")
     for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE)) {
       rows[[length(rows) + 1]] <- one(cc, "any_H", expo, adj, "any pressor at H", "binomial")
       if (nrow(on) >= 50) {
@@ -213,6 +246,8 @@ fit_horizon <- function(H) {
     cc <- cc %>% mutate(log_yH = log(yH), log_y0 = log(y0))
     for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE))
       rows[[length(rows) + 1]] <- one(cc, "log_yH", expo, adj, "log marker at H")
+    for (eb in c("log_pfvc", "ldisc"))
+      chan_rows[[length(chan_rows) + 1]] <- channels(cc, "log_yH", eb, "log marker at H")
   }
   # composite-rank sensitivity: death before H worst, RRT before H next, then the marker
   # (worse direction first), on everyone with a baseline; rank scaled to (0, 1)
@@ -230,16 +265,39 @@ fit_horizon <- function(H) {
       rows[[length(rows) + 1]] <- one(comp, "rank01", expo, adj, "composite rank (death, RRT, marker)") %>%
         mutate(note = sprintf("rank 0-1; %d deaths and %d RRT before H ranked worst",
                                               sum(comp$dead_before_H), sum(comp$rrt_before_H & MARKER == "creatinine")))
-  list(counts = counts, rows = bind_rows(rows))
+  list(counts = counts, rows = bind_rows(rows), chan = bind_rows(chan_rows))
 }
 
 res <- map(HORIZONS, fit_horizon)
 counts  <- map_dfr(res, "counts") %>% mutate(marker = MARKER, site = site_name)
 results <- map_dfr(res, "rows") %>% mutate(site = site_name)
+chan    <- map_dfr(res, "chan") %>% mutate(site = site_name)
 if (nrow(results) == 0) stop("no horizon had enough patients to fit")
 
 write_csv(results, file.path(final_dir, paste0("injury_at_horizon_", MARKER, "_", site_name, ".csv")))
 write_csv(counts,  file.path(final_dir, paste0("injury_at_horizon_counts_", MARKER, "_", site_name, ".csv")))
+write_csv(chan,    file.path(final_dir, paste0("injury_channels_", MARKER, "_", site_name, ".csv")))
+message("\n--- channel decomposition: the exposure effect per log unit, identified through each GLI input",
+        " (equal coefficients = lung size is the operative quantity; p_equal tests that)")
+print(as.data.frame(chan %>% filter(horizon_h == HORIZONS[1]) %>%
+                      select(exposure, channel, estimate, lo, hi, per_sd, per_100ml_at_median, p_equal, n) %>%
+                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+message("remainder of the decomposition (SD, log units): ", signif(max(chan$remainder_sd), 2))
+pc <- chan %>%
+  mutate(channel = factor(channel, c("height", "age", "sex", "race", "all (one beta)")),
+         horizon = factor(paste0(horizon_h, " h"), paste0(sort(unique(horizon_h)), " h")),
+         strip = sprintf("%s\np(equal) = %.2g", exposure, p_equal))
+p_ch <- ggplot(pc, aes(estimate, channel, colour = channel == "all (one beta)")) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
+  geom_vline(data = pc %>% filter(channel == "all (one beta)"), aes(xintercept = estimate), colour = okabe[2]) +
+  geom_pointrange(aes(xmin = lo, xmax = hi)) +
+  facet_wrap(~ strip + horizon, scales = "free_x", ncol = n_distinct(pc$horizon), dir = "h") +
+  scale_colour_manual(values = okabe[c(1, 2)], guide = "none") +
+  labs(title = sprintf("%s at the horizon: the size effect identified through each input to PFVC (%s)", MARKER, site_name),
+       subtitle = "one coefficient per GLI piece (log units of the exposure); the line is the one-beta model on their sum",
+       x = "Change per log unit of the exposure (log marker; log-odds for any pressor)", y = NULL) +
+  theme_minimal(base_size = 11)
+ggsave(file.path(final_dir, paste0("injury_channels_", MARKER, "_", site_name, ".pdf")), p_ch, width = 11, height = 8)
 message("\n--- counts"); print(as.data.frame(counts), row.names = FALSE)
 message("\n--- log PFVC per SD (direction of a LOWER PFVC is the negative of this)")
 print(as.data.frame(results %>% filter(exposure == "log_pfvc_sd") %>%

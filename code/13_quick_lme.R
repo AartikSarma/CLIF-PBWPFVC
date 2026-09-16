@@ -17,6 +17,10 @@
 # without the survival linkage, so death before the horizon is NOT accounted
 # for: it is the fast look, and the joint-model contrast is the read.
 #
+# Also writes quick_channels_{marker}_{site}.csv: the channel decomposition of
+# the exposure (13_biotrauma_grid.R), the contrast at each horizon identified
+# through height, age, sex and race separately, with a test that they agree.
+#
 # Needs the 72-hour panel: PBWPFVC_JM_HORIZON_H=72 Rscript code/13_biotrauma_panel.R
 # (written beside the 48-hour files, not over them).
 #
@@ -52,7 +56,7 @@ surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parque
 y0_day <- paste0(y0_col, "_day")
 d_all <- long %>%
   filter(period >= 1L, !is.na(.data[[y_col]]), !is.na(l_vtpbw_within), !is.na(l_sf), !is.na(l_pressor)) %>%
-  inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category,
+  inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category, height_cm, pfvc_gli,
                              vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
   filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), if (MARKER == "dp") !is.na(bmi) else TRUE) %>%
   mutate(log_y = log(.data[[y_col]] + offset), log_y0 = log(.data[[y0_col]] + offset), l_log_sf = log(l_sf))
@@ -85,6 +89,52 @@ out <- map_dfr(QUICK_HOURS, function(hh) {
   })
 })
 if (nrow(out) == 0) stop("no window had 50 patients with two or more rows")
+
+# ---- channel decomposition (13_biotrauma_grid.R): the size exposure split into its
+#      height, age, sex and race pieces, each with a level and a divergence term, in
+#      place of the exposure and the demographic covariates; the contrast at each
+#      window's horizon per channel, beside the one-beta model on their sum, and a
+#      Wald test that the four contrasts are equal
+EXPO_BASE <- if (EXPO == "ldisc_sd") "ldisc" else "log_pfvc"
+d_ch <- d_all %>%
+  left_join(d_all %>% distinct(hospitalization_id, .keep_all = TRUE) %>%
+              { bind_cols(select(., hospitalization_id), pfvc_channels(., EXPO_BASE)) },
+            by = "hospitalization_id")
+chan_rhs <- function(terms) paste(c("vent_day", terms, paste0(terms, ":vent_day"), "l_vtpbw_within", "vtpbw_pt_mean",
+                                    "log_y0", lags, "np_sofa", if (MARKER == "dp") "bmi"), collapse = " + ")
+chan <- map_dfr(QUICK_HOURS, function(hh) {
+  d <- d_ch %>%
+    filter(vent_day <= hh / 24, .data[[y0_day]] * STEP < hh / 24) %>%
+    group_by(hospitalization_id) %>% filter(n() >= 2L) %>% ungroup() %>%
+    mutate(id = factor(hospitalization_id))
+  if (n_distinct(d$id) < 50) return(NULL)
+  ctrl <- lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)
+  free <- lme(as.formula(paste("log_y ~", chan_rhs(CHANNELS))), random = list(id = pdDiag(~ vent_day)), data = d, control = ctrl)
+  one  <- lme(as.formula(paste("log_y ~", chan_rhs("ch_sum"))),  random = list(id = pdDiag(~ vent_day)), data = d, control = ctrl)
+  contrast <- function(f, terms) {
+    b <- fixef(f); V <- vcov(f)
+    W <- sapply(terms, function(tm) {
+      tn <- intersect(c(paste0(tm, ":vent_day"), paste0("vent_day:", tm)), names(b))
+      w <- setNames(rep(0, length(b)), names(b)); w[tm] <- 1; w[tn] <- hh / 24; w })
+    list(est = as.numeric(t(W) %*% b), V = t(W) %*% as.matrix(V) %*% W)
+  }
+  cf <- contrast(free, CHANNELS); c1 <- contrast(one, "ch_sum")
+  pt <- d %>% distinct(hospitalization_id, .keep_all = TRUE)
+  sd_expo <- sd(pt$ch_sum + pt$ch_remainder)
+  bind_rows(tibble(channel = c("height", "age", "sex", "race"), estimate = cf$est, se = sqrt(diag(cf$V))),
+            tibble(channel = "all (one beta)", estimate = c1$est, se = sqrt(diag(c1$V)))) %>%
+    mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, per_sd = estimate * sd_expo,
+           per_100ml_at_median = if (EXPO_BASE == "log_pfvc") estimate * 0.1 / median(pt$pfvc_gli) else NA_real_,
+           marker = MARKER, exposure = if (EXPO_BASE == "log_pfvc") "log PFVC" else "log PBW/PFVC (VT/PFVC at a given VT/PBW)",
+           model_horizon_h = hh, p_equal = channels_equal_p(cf$est, cf$V),
+           n_patients = n_distinct(d$id), remainder_sd = sd(pt$ch_remainder))
+})
+message("\nChannel decomposition at each window's horizon: the size effect per log unit of ", EXPO_BASE,
+        ", identified through each GLI input (equal = lung size is the operative quantity; p_equal)")
+print(as.data.frame(chan %>% select(model_horizon_h, channel, estimate, lo, hi, per_sd, per_100ml_at_median, p_equal, n_patients) %>%
+                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+write_csv(chan %>% mutate(grid = JM_GRID, site = site_name),
+          file.path(final_dir, paste0("quick_channels_", MARKER, "_", site_name, ".csv")))
 message("\nMarker difference per SD of ", EXPO, " at each window's horizon, one model per window ",
         "(log units; a lower PFVC is the negative of this). No correction for death before the horizon.")
 print(as.data.frame(out %>% mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
