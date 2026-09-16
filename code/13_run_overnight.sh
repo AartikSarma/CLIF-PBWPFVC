@@ -19,7 +19,8 @@
 #   bash code/13_run_overnight.sh --dry-run          # print the stages only
 # Knobs (environment): MARKERS_INJ, MARKERS_JM, HORIZONS, FORMS, ITER, BURNIN,
 #   CHAINS, HEARTBEAT (fit progress interval, s), RESUME (1: reuse fit bundles
-#   already on disk, fit only what is missing), plus PBWPFVC_SITE_NAME /
+#   already on disk, fit only what is missing), SKIP_JM (1: no joint models;
+#   e.g. SKIP_JM=1 HORIZONS=72 for a second dataset), plus PBWPFVC_SITE_NAME /
 #   PBWPFVC_TABLES_PATH as in utils/config.R.
 # Logs: output/{site}_output/logs/overnight_{stamp}/{stage}.log and status.tsv;
 # the existing jm_*/injury_*/quick_* tables are copied there first, because the
@@ -35,6 +36,7 @@ FORMS=${FORMS:-pfvc channels disc_level}
 ITER=${ITER:-25000}; BURNIN=${BURNIN:-5000}; CHAINS=${CHAINS:-3}
 HEARTBEAT=${HEARTBEAT:-300}
 RESUME=${RESUME:-0}            # 1: rebuild tables from fit bundles already on disk, fit only what is missing
+SKIP_JM=${SKIP_JM:-0}          # 1: panels, comparators, quick LMEs and summary only (a second dataset without joint models)
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
 # site name from config.json by sed: Rscript's stdout carries renv's start-up notices
@@ -110,7 +112,9 @@ else
 fi
 
 # ---- 4. joint models: per horizon, per form; report + figures when the fit left usable models
+[[ $SKIP_JM == 1 ]] && echo "joint models skipped (SKIP_JM=1)"
 for H in $HORIZONS; do
+  [[ $SKIP_JM == 1 ]] && break
   if [[ $(rc_of panel_${H}h) -ne 0 ]]; then echo "fits at ${H}h skipped: panel failed"; continue; fi
   for FORM in $FORMS; do
     run_stage "fit_${FORM}_${H}h" PBWPFVC_JM_HORIZON_H=$H PBWPFVC_JM_MODIFIER=$FORM PBWPFVC_JM_MARKERS=$MARKERS_JM \
