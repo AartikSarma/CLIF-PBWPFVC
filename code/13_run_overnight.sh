@@ -35,7 +35,9 @@ ITER=${ITER:-25000}; BURNIN=${BURNIN:-5000}; CHAINS=${CHAINS:-3}
 HEARTBEAT=${HEARTBEAT:-300}
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
-SITE=${PBWPFVC_SITE_NAME:-$(Rscript -e 'cat(jsonlite::fromJSON("config/config.json")$site_name)')}
+# site name from config.json by sed: Rscript's stdout carries renv's start-up notices
+SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
+[[ -n "$SITE" ]] || { echo "could not read site_name from config/config.json"; exit 1; }
 FINAL="output/${SITE}_output/final"
 STAMP=$(date +%Y%m%d_%H%M)
 LOGDIR="output/${SITE}_output/logs/overnight_${STAMP}"
@@ -75,7 +77,7 @@ run_stage() {
 usable_fits() {
   local f=$1
   [[ -f "$f" ]] || { echo 0; return; }
-  Rscript -e "m <- read.csv('$f'); cat(sum(m\$status %in% c('converged', 'rhat_fail')))"
+  Rscript -e "m <- read.csv('$f'); cat(sum(m\$status %in% c('converged', 'rhat_fail')), '\n')" 2>/dev/null | tail -n 1 | tr -dc '0-9'
 }
 tag_of() { local form=$1 h=$2; echo "${form}_${h}h_${SITE}"; }
 
