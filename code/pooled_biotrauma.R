@@ -26,6 +26,11 @@
 # Usage: PBWPFVC_RESULTS_ROOT=/path/to/results Rscript code/pooled_biotrauma.R
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(here); library(metafor) })
+# PFVC exposure scale, matching the sites' runs (13_biotrauma_grid.R): per 100 mL by default. Sites that ran
+# both scales carry both in their CSVs (merge-on-write), so pool one scale only.
+PFVC_EXPO <- Sys.getenv("PBWPFVC_PFVC_EXPO", "pfvc_100")
+stopifnot(PFVC_EXPO %in% c("pfvc_100", "log_pfvc_sd"))
+PFVC_UNIT <- if (PFVC_EXPO == "pfvc_100") "per 100 mL PFVC" else "per SD of log PFVC"
 rm(list = ls())
 
 root <- Sys.getenv("PBWPFVC_RESULTS_ROOT", here("results"))
@@ -96,8 +101,9 @@ if (nrow(ah)) {
 # --- 3. key longitudinal terms from the estimates tables
 es <- read_family("^jm_estimates_.*\\.csv$")
 if (nrow(es)) {
-  key <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c", "log_pfvc_sd",
-           "vent_day:log_pfvc_sd", "log_pfvc_sd:vent_day", "ldisc_sd", "vent_day:ldisc_sd", "ldisc_sd:vent_day",
+  key <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c", "log_pfvc_sd", "pfvc_100",
+           "vent_day:log_pfvc_sd", "log_pfvc_sd:vent_day", "vent_day:pfvc_100", "pfvc_100:vent_day",
+           "ldisc_sd", "vent_day:ldisc_sd", "ldisc_sd:vent_day",
            "ers_pfvc_0:l_vtpbw_within", "vtpbw_pt_mean")
   es <- es %>% filter(block == "longitudinal", term %in% key) %>%
     mutate(se = sd, grid = if ("grid" %in% names(es)) grid else NA_character_,
@@ -126,9 +132,9 @@ for (nm in names(pooled)) {
 
 # --- forests: the PFVC-level contrast per marker and horizon, per site and pooled
 if (nrow(lc)) {
-  fd <- lc %>% filter(exposure == "log_pfvc_sd", model == "main") %>%
+  fd <- lc %>% filter(exposure == PFVC_EXPO, model == "main") %>%
     transmute(marker, adjustment, horizon_h, site = anon(site), estimate, lo, hi, pooled = FALSE) %>%
-    bind_rows(pooled$level_contrast %>% filter(exposure == "log_pfvc_sd", model == "main") %>%
+    bind_rows(pooled$level_contrast %>% filter(exposure == PFVC_EXPO, model == "main") %>%
                 transmute(marker, adjustment, horizon_h, site = "Pooled", estimate = pooled, lo, hi, pooled = TRUE)) %>%
     mutate(site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")),
            adjustment = factor(adjustment, c("adjusted", "unadjusted")))
@@ -137,9 +143,9 @@ if (nrow(lc)) {
     geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
     facet_grid(marker ~ horizon_h, scales = "free", labeller = labeller(horizon_h = function(x) paste(x, "h"))) +
     scale_colour_manual(values = okabe[1:2]) + scale_shape_manual(values = c(16, 18), guide = "none") +
-    labs(title = "Marker difference per SD of log PFVC at the horizon, joint model (death before H modelled)",
+    labs(title = paste("Marker difference", PFVC_UNIT, "at the horizon, joint model (death before H modelled)"),
          subtitle = "a lower PFVC is the negative of the estimate; log-odds scale for any_pressor",
-         x = "per SD of log PFVC", y = NULL) +
+         x = PFVC_UNIT, y = NULL) +
     theme_minimal(base_size = 10)
   ggsave(file.path(out_dir, "pooled_biotrauma_level_contrast.pdf"), p, width = 11,
          height = 2 + 1.2 * n_distinct(fd$marker) * (1 + n_distinct(fd$site) / 6))

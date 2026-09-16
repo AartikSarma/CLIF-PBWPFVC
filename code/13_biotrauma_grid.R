@@ -29,3 +29,10 @@ if (JM_GRID == "6h") {
 }
 STEP      <- STEP_H / 24
 N_PERIODS <- as.integer(round(JM_HORIZON / STEP))
+# The PFVC exposure of the PFVC-level question. "pfvc_100" (default): PFVC in
+# units of 100 mL, so every estimate reads "per 100 mL more predicted FVC";
+# "log_pfvc_sd": per SD of log PFVC (the paper's mortality scale), kept as an
+# option. Set PBWPFVC_PFVC_EXPO. The hazard keeps log PFVC (the paper's set).
+PFVC_EXPO <- Sys.getenv("PBWPFVC_PFVC_EXPO", "pfvc_100")
+stopifnot(PFVC_EXPO %in% c("pfvc_100", "log_pfvc_sd"))
+PFVC_UNIT <- if (PFVC_EXPO == "pfvc_100") "per 100 mL PFVC" else "per SD of log PFVC"

@@ -130,7 +130,7 @@ stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
-               "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd",
+               "^log_pfvc_sd", "^pfvc_100", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:pfvc_100", "vent_day:ldisc_sd",
                "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
                "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
@@ -237,7 +237,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
-                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(mk$y0)),
+                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, pfvc_100, ldisc_sd, all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within),
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
@@ -282,7 +282,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
-                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CUM_TERM,
+                          "log_pbw", "log_pfvc", "log_pfvc_sd", "pfvc_100", "ldisc_sd", CUM_TERM,
                           "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
@@ -314,7 +314,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     disc       = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
     saturated  = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
     none       = "l_vtpbw_within",
-    pfvc       = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
+    pfvc       = c("l_vtpbw_within", PFVC_EXPO, paste0(PFVC_EXPO, ":vent_day")),   # per 100 mL by default (13_biotrauma_grid.R)
     disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"))
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid

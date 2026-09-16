@@ -8,7 +8,7 @@
 # (VT/PBW as the clinician's dose, log PFVC as the size term, with PBW/PFVC as
 # the companion) applied to an organ-injury marker instead of mortality:
 #
-#   log marker at H  ~  log marker at baseline + log PFVC (per SD)
+#   log marker at H  ~  log marker at baseline + PFVC (per 100 mL, centred; PBWPFVC_PFVC_EXPO=log_pfvc_sd for per SD)
 #                        + mean VT/PBW over [0, H) + non-respiratory SOFA
 #                        + log baseline SF [+ BMI, driving pressure only]
 #                        [+ ns(age, 4) + sex + race]
@@ -71,6 +71,10 @@ MARKER   <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp"))
 HORIZONS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_INJ_HORIZONS_H", "48,24,72"), ",")[[1]])
 BASE_WINDOW_H <- 12
+# PFVC exposure scale, shared with the joint-model suite (13_biotrauma_grid.R): per 100 mL by default.
+PFVC_EXPO <- Sys.getenv("PBWPFVC_PFVC_EXPO", "pfvc_100")
+stopifnot(PFVC_EXPO %in% c("pfvc_100", "log_pfvc_sd"))
+PFVC_UNIT <- if (PFVC_EXPO == "pfvc_100") "per 100 mL PFVC" else "per SD of log PFVC"
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
 message("=== 13_injury_at_horizon: marker ", MARKER, ", horizons ", paste(HORIZONS, collapse = "/"), " h, site ", site_name, " ===")
 
@@ -159,6 +163,7 @@ fit_horizon <- function(H) {
       rrt_before_H  = !is.na(rrt_h) & rrt_h <= H,
       log_pfvc = log(pfvc_gli), ldisc = log(pbw / pfvc_gli),
       log_pfvc_sd = as.numeric(scale(log_pfvc)), ldisc_sd = as.numeric(scale(ldisc)),
+      pfvc_100 = (pfvc_gli - median(pfvc_gli, na.rm = TRUE)) * 10,
       log_sf_0 = log(sf_0)
     )
   # the survival-side SF baseline and np_sofa come from base via the shared panel;
@@ -191,6 +196,9 @@ fit_horizon <- function(H) {
            adjustment = if (adjusted) "adjusted" else "unadjusted",
            estimate = unname(co[1]), se = unname(co[2]), lo = unname(ci[1]), hi = unname(ci[2]),
            p = unname(co[4]), n = nrow(dat), worse_is = worse_is,
+           # percent change in the marker (odds ratio - 1 for the logistic) per unit of the exposure
+           pct_change = 100 * (exp(unname(co[1])) - 1), pct_lo = 100 * (exp(unname(ci[1])) - 1),
+           pct_hi = 100 * (exp(unname(ci[2])) - 1),
            note = if (family == "gaussian") "log marker at H, baseline as covariate" else "logistic: any pressor at H")
   }
   rows <- list()
@@ -200,7 +208,7 @@ fit_horizon <- function(H) {
                         weight_kg = bmi * (height_cm / 100)^2)
     on <- cc %>% filter(yH > 0) %>% mutate(log_yH = log(yH), log_yH_abs = log(yH * weight_kg),
                                            log_y0_abs = log(y0 * weight_kg + 0.01))
-    for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE)) {
+    for (expo in c(PFVC_EXPO, "ldisc_sd")) for (adj in c(TRUE, FALSE)) {
       rows[[length(rows) + 1]] <- one(cc, "any_H", expo, adj, "any pressor at H", "binomial")
       if (nrow(on) >= 50) {
         rows[[length(rows) + 1]] <- one(on, "log_yH", expo, adj, "log dose per kg given any") %>%
@@ -211,7 +219,7 @@ fit_horizon <- function(H) {
     }
   } else {
     cc <- cc %>% mutate(log_yH = log(yH), log_y0 = log(y0))
-    for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE))
+    for (expo in c(PFVC_EXPO, "ldisc_sd")) for (adj in c(TRUE, FALSE))
       rows[[length(rows) + 1]] <- one(cc, "log_yH", expo, adj, "log marker at H")
   }
   # composite-rank sensitivity: death before H worst, RRT before H next, then the marker
@@ -226,7 +234,7 @@ fit_horizon <- function(H) {
     filter(!is.na(score)) %>%
     mutate(rank01 = (rank(score) - 0.5) / n(), log_y0 = if (MARKER == "ne_equiv") log(y0 + 0.01) else log(y0))
   if (nrow(comp) >= 50)
-    for (expo in c("log_pfvc_sd", "ldisc_sd")) for (adj in c(TRUE, FALSE))
+    for (expo in c(PFVC_EXPO, "ldisc_sd")) for (adj in c(TRUE, FALSE))
       rows[[length(rows) + 1]] <- one(comp, "rank01", expo, adj, "composite rank (death, RRT, marker)") %>%
         mutate(note = sprintf("rank 0-1; %d deaths and %d RRT before H ranked worst",
                                               sum(comp$dead_before_H), sum(comp$rrt_before_H & MARKER == "creatinine")))
@@ -241,13 +249,13 @@ if (nrow(results) == 0) stop("no horizon had enough patients to fit")
 write_csv(results, file.path(final_dir, paste0("injury_at_horizon_", MARKER, "_", site_name, ".csv")))
 write_csv(counts,  file.path(final_dir, paste0("injury_at_horizon_counts_", MARKER, "_", site_name, ".csv")))
 message("\n--- counts"); print(as.data.frame(counts), row.names = FALSE)
-message("\n--- log PFVC per SD (direction of a LOWER PFVC is the negative of this)")
-print(as.data.frame(results %>% filter(exposure == "log_pfvc_sd") %>%
+message("\n--- ", PFVC_UNIT, " (direction of a LOWER PFVC is the negative of this)")
+print(as.data.frame(results %>% filter(exposure == PFVC_EXPO) %>%
                       select(horizon_h, outcome_type, adjustment, estimate, lo, hi, p, n) %>%
                       mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 
-# forest: log PFVC per SD by horizon, outcome type and adjustment
-fp <- results %>% filter(exposure == "log_pfvc_sd") %>%
+# forest: the PFVC exposure by horizon, outcome type and adjustment
+fp <- results %>% filter(exposure == PFVC_EXPO) %>%
   mutate(adjustment = factor(adjustment, c("adjusted", "unadjusted")),
          horizon = factor(paste0(horizon_h, " h"), paste0(sort(unique(horizon_h)), " h")))
 p <- ggplot(fp, aes(estimate, horizon, colour = adjustment)) +
@@ -255,10 +263,10 @@ p <- ggplot(fp, aes(estimate, horizon, colour = adjustment)) +
   geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
   facet_wrap(~ outcome_type, scales = "free_x", ncol = 1) +
   scale_colour_manual(values = okabe[1:2]) +
-  labs(title = sprintf("%s at the horizon per SD of log PFVC, at a given VT/PBW (%s)", MARKER, site_name),
+  labs(title = sprintf("%s at the horizon %s, at a given VT/PBW (%s)", MARKER, PFVC_UNIT, site_name),
        subtitle = sprintf("worse injury is %s on this marker; a protective PFVC is %s",
                           worse_is, if (worse_is == "higher") "negative" else "positive"),
-       x = "Change per SD of log PFVC (log units; rank units for the composite; log-odds for any pressor)", y = NULL) +
+       x = paste0("Change ", PFVC_UNIT, " (log units; rank units for the composite; log-odds for any pressor)"), y = NULL) +
   theme_minimal(base_size = 11)
 ggsave(file.path(final_dir, paste0("injury_at_horizon_", MARKER, "_", site_name, ".pdf")), p, width = 9, height = 7)
 message("13_injury_at_horizon complete -> ", final_dir)

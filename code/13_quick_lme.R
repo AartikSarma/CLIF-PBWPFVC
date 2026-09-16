@@ -4,7 +4,7 @@
 # Fits the PFVC-level question as a plain linear mixed model on the panel
 # tables 13_biotrauma_panel.R wrote, in seconds:
 #
-#   log marker ~ time + log PFVC (per SD) + log PFVC x time
+#   log marker ~ time + PFVC (per 100 mL, centred) + PFVC x time
 #                + dose (patient mean, within-patient change)
 #                + baseline marker + lagged SF and pressor + non-respiratory
 #                  SOFA + BMI  [+ ns(age, 4) + sex + race]
@@ -12,7 +12,7 @@
 #
 # fitted SEPARATELY for the 24, 48 and 72-hour windows: each model uses only the
 # rows up to its horizon and only patients whose baseline was observed before
-# it, and reports the marker difference per SD of log PFVC at that horizon
+# it, and reports the marker difference per 100 mL PFVC at that horizon
 # (level + divergence x time). This is the joint model's longitudinal part
 # without the survival linkage, so death before the horizon is NOT accounted
 # for: it is the fast look, and the joint-model contrast is the read.
@@ -36,7 +36,7 @@ QUICK_HOURS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_QUICK_HORIZONS_H", "24,48
 QUICK_HOURS <- QUICK_HOURS[QUICK_HOURS <= JM_HORIZON * 24]
 
 MARKER <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
-EXPO   <- Sys.getenv("PBWPFVC_QUICK_EXPO", "log_pfvc_sd")
+EXPO   <- Sys.getenv("PBWPFVC_QUICK_EXPO", PFVC_EXPO)   # per 100 mL PFVC by default
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
             bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
 y0_col <- c(creatinine = "creatinine_0", ne_equiv = "ne_equiv_0", platelets = "platelet_0",
@@ -53,7 +53,7 @@ y0_day <- paste0(y0_col, "_day")
 d_all <- long %>%
   filter(period >= 1L, !is.na(.data[[y_col]]), !is.na(l_vtpbw_within), !is.na(l_sf), !is.na(l_pressor)) %>%
   inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category,
-                             vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
+                             vtpbw_pt_mean, log_pfvc_sd, pfvc_100, ldisc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
   filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), if (MARKER == "dp") !is.na(bmi) else TRUE) %>%
   mutate(log_y = log(.data[[y_col]] + offset), log_y0 = log(.data[[y0_col]] + offset), l_log_sf = log(l_sf))
 
@@ -80,13 +80,15 @@ out <- map_dfr(QUICK_HOURS, function(hh) {
     est <- sum(w * b); se <- sqrt(as.numeric(t(w) %*% V %*% w))
     tibble(marker = MARKER, exposure = EXPO, adjustment = adj_lab, model_horizon_h = hh,
            estimate = est, lo = est - 1.96 * se, hi = est + 1.96 * se,
+           pct_change = 100 * (exp(est) - 1),   # percent change in the marker per unit of the exposure
            level = unname(b[EXPO]), divergence_per_day = unname(if (length(tn)) b[tn] else 0),
            dose_within = unname(b["l_vtpbw_within"]), n_patients = n_distinct(d$id), n_rows = nrow(d))
   })
 })
 if (nrow(out) == 0) stop("no window had 50 patients with two or more rows")
-message("\nMarker difference per SD of ", EXPO, " at each window's horizon, one model per window ",
-        "(log units; a lower PFVC is the negative of this). No correction for death before the horizon.")
+message("\nMarker difference per unit of ", EXPO, " (", if (EXPO == "pfvc_100") "100 mL of PFVC" else "1 SD of log PFVC",
+        ") at each window's horizon, one model per window (log units; a lower PFVC is the negative of this). ",
+        "No correction for death before the horizon.")
 print(as.data.frame(out %>% mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 write_csv(out %>% mutate(grid = JM_GRID, site = site_name),
           file.path(final_dir, paste0("quick_lme_", MARKER, "_", site_name, ".csv")))
