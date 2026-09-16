@@ -34,6 +34,8 @@ source("utils/config.R")
 site_name <- config$site_name
 source(here("code", "13_biotrauma_grid.R"))
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
+SIZE_EX   <- if (MOD_FORM == "disc_level") "ldisc_sd" else "log_pfvc_sd"   # the form's size exposure column
+SIZE_LAB  <- if (MOD_FORM == "disc_level") "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)" else "per SD of log PFVC"
 fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
 tag       <- paste0(if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
@@ -85,7 +87,7 @@ if (MOD_FORM == "channels") {
 #         marker (sign flipped for markers whose worse direction is lower), in log
 #         units; any vasopressor as an odds ratio. Each point is
 #         labelled with the posterior probability of harm.
-lc0 <- lc %>% filter(exposure == "log_pfvc_sd", model == "main", marker %in% names(lab)) %>%
+lc0 <- lc %>% filter(exposure == SIZE_EX, model == "main", marker %in% names(lab)) %>%
   mutate(binary = marker == "any_pressor",
          # log-scale contrast per unit LOWER PFVC, in the injury direction
          inj = if_else(worse[marker] == "higher", -estimate, estimate),
@@ -96,7 +98,10 @@ lc0 <- lc %>% filter(exposure == "log_pfvc_sd", model == "main", marker %in% nam
          horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
          marker_lab = paste0(lab[marker], "\n(worse = ", worse[marker], "; n = ", n_patients, ", deaths = ", n_deaths, ")"),
          p_lab = sprintf("P(harm) %.2f", p_harm))
-unit_lower <- "per SD lower log PFVC"
+unit_lower <- if (MOD_FORM == "disc_level") "per SD HIGHER log PBW/PFVC (a lung smaller than PBW predicts)" else "per SD lower log PFVC"
+# for the discordance form a HIGHER discordance is the smaller lung: the injury direction flips
+if (MOD_FORM == "disc_level") lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
+                                                    p_lab = sprintf("P(harm) %.2f", p_harm)) %>% select(-i_lo)
 p0_cont <- lc0 %>% filter(!binary)
 p0_bin  <- lc0 %>% filter(binary)
 plot_level <- function(d, xvar, lovar, hivar, ref, xlab, title, log_x = FALSE) {
@@ -122,6 +127,7 @@ if (nrow(p0_bin)) p0_list$bin <- plot_level(
   p0_bin %>% mutate(or = exp(inj), or_lo = exp(inj_lo), or_hi = exp(inj_hi)), "or", "or_lo", "or_hi", 1,
   xlab = paste0("odds ratio of a vasopressor running, ", unit_lower, " (log scale)"),
   title = "Any vasopressor", log_x = TRUE)
+if (!length(p0_list)) stop("no level contrasts for exposure ", SIZE_EX, " in tag ", tag)
 p0 <- wrap_plots(p0_list, ncol = 1, heights = c(if (nrow(p0_cont)) n_distinct(p0_cont$marker), if (nrow(p0_bin)) 1)) +
   plot_layout(guides = "collect") +
   plot_annotation(
@@ -134,11 +140,11 @@ ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")),
 
 # ---- 1. estimator comparison
 est <- bind_rows(
-  lc %>% filter(exposure == "log_pfvc_sd", model == "main") %>%
+  lc %>% filter(exposure == SIZE_EX, model == "main") %>%
     transmute(marker, adjustment, horizon_h, estimate, lo, hi, estimator = "Joint model (death modelled)"),
-  if (nrow(ql)) ql %>% filter(exposure == "log_pfvc_sd") %>%
+  if (nrow(ql)) ql %>% filter(exposure == SIZE_EX) %>%
     transmute(marker, adjustment, horizon_h = model_horizon_h, estimate, lo, hi, estimator = "Longitudinal model only"),
-  if (nrow(ih)) ih %>% filter(exposure == "log_pfvc_sd", outcome_type %in% c("log marker at H", "any pressor at H")) %>%
+  if (nrow(ih)) ih %>% filter(exposure == SIZE_EX, outcome_type %in% c("log marker at H", "any pressor at H")) %>%
     mutate(marker = if_else(outcome_type == "any pressor at H", "any_pressor", marker)) %>%
     transmute(marker, adjustment, horizon_h, estimate, lo, hi, estimator = "Fixed horizon, survivors only")
 ) %>%
@@ -160,11 +166,11 @@ ggsave(file.path(fig_dir, paste0("biotrauma_fig_estimators_", tag, ".pdf")), p1,
        width = 10, height = 2 + 1.6 * n_distinct(est$marker))
 
 # ---- 2. divergence per day (the rate term), adjusted beside unadjusted
-div <- es %>% filter(block == "longitudinal", term %in% c("vent_day:log_pfvc_sd", "log_pfvc_sd:vent_day"),
+div <- es %>% filter(block == "longitudinal", term %in% c(paste0("vent_day:", SIZE_EX), paste0(SIZE_EX, ":vent_day")),
                      model == "main", marker %in% names(lab)) %>%
   transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
             marker_lab = marker_label(marker))
-lev <- es %>% filter(block == "longitudinal", term == "log_pfvc_sd", model == "main", marker %in% names(lab)) %>%
+lev <- es %>% filter(block == "longitudinal", term == SIZE_EX, model == "main", marker %in% names(lab)) %>%
   transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
             marker_lab = marker_label(marker))
 p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +

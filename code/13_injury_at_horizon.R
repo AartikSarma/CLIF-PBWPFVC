@@ -47,6 +47,19 @@
 #          final/injury_channels_{marker}_{site}.csv/.pdf  the channel decomposition
 #          (13_biotrauma_grid.R): the size effect identified through each GLI
 #          input separately, with a test that the four agree
+#          Supports for the channel read (2026-09-15), on the same fits:
+#          final/injury_nested_{marker}_{site}.csv        nested ladder: demographics
+#              only, size only, both, the pieces free, pieces + free demographics;
+#              likelihood-ratio tests and AIC (does PFVC add to age/sex/race?)
+#          final/injury_dose_channels_{marker}_{site}.csv  dose x piece: does each
+#              piece's effect scale with the delivered VT/PBW (a lung-size
+#              mechanism does, a direct age effect does not)
+#          final/injury_sf_channels_{marker}_{site}.csv    severity x piece: the same
+#              with baseline SF (the baby-lung gradient; skipped for sf)
+#          final/injury_negctrl_{marker}_{site}.csv        negative control: the pieces
+#              on the BASELINE marker, before ventilation can act, on everyone with
+#              a baseline; each piece's direct effect, read against the at-H result
+#          final/injury_supports_{marker}_{site}.pdf
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -55,6 +68,7 @@ suppressPackageStartupMessages({
   library(arrow)
   library(here)
   library(splines)
+  library(patchwork)
 })
 rm(list = ls())
 source("utils/config.R")
@@ -249,6 +263,110 @@ fit_horizon <- function(H) {
     for (eb in c("log_pfvc", "ldisc"))
       chan_rows[[length(chan_rows) + 1]] <- channels(cc, "log_yH", eb, "log marker at H")
   }
+  # ---- supports for the channel read: nested ladder, dose x piece, severity x
+  #      piece (all on cc, the complete cases at H) and the baseline negative
+  #      control (on d, everyone with a baseline, computed once)
+  lhs   <- if (MARKER == "ne_equiv") "any_H" else "log_yH"
+  fam   <- if (MARKER == "ne_equiv") "binomial" else "gaussian"
+  otype <- if (MARKER == "ne_equiv") "any pressor at H" else "log marker at H"
+  base_terms <- c("vtpbw_H", "np_sofa", "log_sf_0", if (MARKER == "dp") "bmi")
+  ccs <- bind_cols(cc, pfvc_channels(cc, "log_pfvc")) %>%
+    mutate(vtpbw_H_c = vtpbw_H - median(vtpbw_H), log_sf_0_c = log_sf_0 - median(log_sf_0))
+  fitf <- function(rhs, dat = ccs, y = lhs, family = fam) {
+    f <- as.formula(paste(y, "~", rhs))
+    if (family == "gaussian") lm(f, data = dat) else glm(f, data = dat, family = binomial)
+  }
+  # fit metric: R^2 for the linear models, the rank (Wilcoxon) AUC for the logistic
+  fit_metric <- function(m) if (inherits(m, "glm")) {
+    y <- m$y; r <- rank(fitted(m)); n1 <- sum(y == 1); n0 <- sum(y == 0)
+    (sum(r[y == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+  } else summary(m)$r.squared
+  coef_rows <- function(m, terms, model) {
+    b <- coef(m)[terms]; V <- vcov(m)[terms, terms, drop = FALSE]
+    tibble(model = model, term = terms, estimate = unname(b), se = sqrt(diag(V))) %>%
+      mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, p = 2 * pnorm(-abs(estimate / se)))
+  }
+  # a term of a fitted model by its components, whatever order R put them in
+  term_by <- function(m, comps) { nm <- names(coef(m)); nm[sapply(strsplit(nm, ":"), setequal, comps)] }
+
+  # nested ladder (every LR pair exactly nested; ch_sum is the size term so that
+  # one_beta sits inside pieces_free; pieces_demo omits ch_sex/ch_race, which
+  # the sex and race factors already span)
+  tail_rhs <- paste("log_y0 +", base_rhs)
+  fits <- list(
+    demo_only     = fitf(paste(demo_rhs, "+", tail_rhs)),
+    one_beta      = fitf(paste("ch_sum +", tail_rhs)),
+    one_beta_demo = fitf(paste("ch_sum +", demo_rhs, "+", tail_rhs)),
+    pieces_free   = fitf(paste(paste(CHANNELS, collapse = " + "), "+", tail_rhs)),
+    pieces_demo   = fitf(paste("ch_height + ch_age +", demo_rhs, "+", tail_rhs)),
+    log_pfvc_demo = fitf(paste("log_pfvc +", demo_rhs, "+", tail_rhs)))
+  lr_row <- function(small, big, test, nested = TRUE) {
+    ll <- function(nm) logLik(fits[[nm]])
+    lr <- if (nested) as.numeric(2 * (ll(big) - ll(small))) else NA_real_
+    df <- if (nested) attr(ll(big), "df") - attr(ll(small), "df") else NA_real_
+    tibble(test = test, small = small, big = big, lr = lr, df = df,
+           p = if (nested) pchisq(lr, df, lower.tail = FALSE) else NA_real_,
+           d_aic = AIC(fits[[big]]) - AIC(fits[[small]]), d_fit = fit_metric(fits[[big]]) - fit_metric(fits[[small]]),
+           aic_small = AIC(fits[[small]]), aic_big = AIC(fits[[big]]))
+  }
+  nested <- bind_rows(
+    lr_row("demo_only", "one_beta_demo", "a_vs_c: size adds to demographics"),
+    lr_row("one_beta", "one_beta_demo", "b_vs_c: demographics add to size"),
+    lr_row("one_beta", "pieces_free", "b_vs_d: the pieces disagree"),
+    lr_row("pieces_free", "pieces_demo", "d_vs_top: free demographic shape beyond the pieces"),
+    lr_row("one_beta_demo", "pieces_demo", "c_vs_top: pieces beyond one beta + demographics"),
+    lr_row("one_beta_demo", "pieces_free", "d_vs_c: not nested, AIC only", nested = FALSE),
+    imap_dfr(fits, ~ tibble(test = "model", small = NA_character_, big = .y, lr = NA_real_, df = NA_real_,
+                            p = NA_real_, d_aic = NA_real_, d_fit = fit_metric(.x), aic_small = NA_real_, aic_big = AIC(.x)))) %>%
+    mutate(horizon_h = H, marker = MARKER, outcome_type = otype, fit_metric = if (fam == "gaussian") "r2" else "auc",
+           n = nrow(ccs), remainder_sd = sd(ccs$ch_remainder))
+
+  # dose x piece and severity x piece: the pieces' effects as a function of the
+  # delivered VT/PBW over [0, H) and of the baseline SF (each centred at its median)
+  interactions <- function(modifier, source_term, label) {
+    base_here <- paste(setdiff(base_terms, source_term), collapse = " + ")
+    free <- fitf(paste0("(", paste(CHANNELS, collapse = " + "), ") * ", modifier, " + log_y0 + ", base_here))
+    one  <- fitf(paste0("log_pfvc * ", modifier, " + ", demo_rhs, " + log_y0 + ", base_here))
+    it   <- sapply(CHANNELS, function(ch) term_by(free, c(ch, modifier)))
+    b <- coef(free)[it]; V <- vcov(free)[it, it]
+    hm <- b[1] - b[2]; hm_se <- sqrt(V[1, 1] + V[2, 2] - 2 * V[1, 2])
+    bind_rows(
+      coef_rows(free, unname(it), "pieces_free") %>% mutate(p_int_equal = channels_equal_p(b, V)),
+      tibble(model = "pieces_free", term = "height_minus_age", estimate = unname(hm), se = hm_se,
+             lo = hm - 1.96 * hm_se, hi = hm + 1.96 * hm_se, p = 2 * pnorm(-abs(hm / hm_se)), p_int_equal = NA_real_),
+      coef_rows(one, term_by(one, c("log_pfvc", modifier)), "single_index_adjusted") %>% mutate(p_int_equal = NA_real_)) %>%
+      mutate(horizon_h = H, marker = MARKER, outcome_type = otype, modifier = label,
+             modifier_median = median(ccs[[source_term]]), modifier_sd = sd(ccs[[source_term]]), n = nrow(ccs))
+  }
+  dose_ch <- interactions("vtpbw_H_c", "vtpbw_H", "mean VT/PBW over [0, H), mL/kg, centred")
+  sf_ch   <- if (MARKER == "sf") tibble(horizon_h = H, marker = MARKER, note = "skipped: SF is this marker's own baseline") else
+    interactions("log_sf_0_c", "log_sf_0", "log baseline SF, centred")
+
+  # baseline negative control, once: the pieces on the baseline marker, on everyone
+  # with a baseline (not the survivors at H); no dose term (nothing delivered yet)
+  negctrl <- NULL
+  if (H == HORIZONS[1]) {
+    nc <- d %>% filter(!is.na(y0), !is.na(np_sofa), !is.na(sf_0), !is.na(age10), !is.na(sex_category),
+                       !is.na(race_category), !is.na(height_cm), if (MARKER == "dp") !is.na(bmi) else TRUE)
+    nc <- bind_cols(nc, pfvc_channels(nc, "log_pfvc"))
+    nc_rhs <- paste(c("np_sofa", if (MARKER != "sf") "log_sf_0", if (MARKER == "dp") "bmi"), collapse = " + ")
+    if (MARKER == "ne_equiv") {
+      nc$any_0 <- as.integer(nc$y0 > 0); nc_lhs <- "any_0"; nc_fam <- "binomial"; nc_out <- "any pressor at baseline"
+    } else { nc$log_y0 <- log(nc$y0); nc_lhs <- "log_y0"; nc_fam <- "gaussian"; nc_out <- "log baseline marker" }
+    nfit <- list(
+      pieces_free           = fitf(paste(paste(CHANNELS, collapse = " + "), "+", nc_rhs), nc, nc_lhs, nc_fam),
+      single_index_adjusted = fitf(paste("log_pfvc +", nc_rhs, "+", demo_rhs), nc, nc_lhs, nc_fam),
+      pieces_only           = fitf(paste(CHANNELS, collapse = " + "), nc, nc_lhs, nc_fam))
+    negctrl <- imap_dfr(nfit, function(m, nm) {
+      terms <- if (nm == "single_index_adjusted") "log_pfvc" else CHANNELS
+      coef_rows(m, terms, nm) %>%
+        mutate(p_equal = if (nm == "single_index_adjusted") NA_real_ else
+                 channels_equal_p(coef(m)[CHANNELS], vcov(m)[CHANNELS, CHANNELS]),
+               separation_flag = any(abs(coef(m)) > 15, na.rm = TRUE))
+    }) %>% mutate(marker = MARKER, outcome = nc_out, n = nrow(nc),
+                  n_events = if (nc_fam == "binomial") sum(nc[[nc_lhs]]) else NA_integer_)
+  }
+
   # composite-rank sensitivity: death before H worst, RRT before H next, then the marker
   # (worse direction first), on everyone with a baseline; rank scaled to (0, 1)
   comp <- d %>% filter(!is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0),
@@ -265,18 +383,64 @@ fit_horizon <- function(H) {
       rows[[length(rows) + 1]] <- one(comp, "rank01", expo, adj, "composite rank (death, RRT, marker)") %>%
         mutate(note = sprintf("rank 0-1; %d deaths and %d RRT before H ranked worst",
                                               sum(comp$dead_before_H), sum(comp$rrt_before_H & MARKER == "creatinine")))
-  list(counts = counts, rows = bind_rows(rows), chan = bind_rows(chan_rows))
+  list(counts = counts, rows = bind_rows(rows), chan = bind_rows(chan_rows),
+       nested = nested, dose_ch = dose_ch, sf_ch = sf_ch, negctrl = negctrl)
 }
 
 res <- map(HORIZONS, fit_horizon)
 counts  <- map_dfr(res, "counts") %>% mutate(marker = MARKER, site = site_name)
 results <- map_dfr(res, "rows") %>% mutate(site = site_name)
 chan    <- map_dfr(res, "chan") %>% mutate(site = site_name)
+nested  <- map_dfr(res, "nested")  %>% mutate(site = site_name)
+dose_ch <- map_dfr(res, "dose_ch") %>% mutate(site = site_name)
+sf_ch   <- map_dfr(res, "sf_ch")   %>% mutate(site = site_name)
+negctrl <- map_dfr(res, "negctrl") %>% mutate(site = site_name)
 if (nrow(results) == 0) stop("no horizon had enough patients to fit")
 
 write_csv(results, file.path(final_dir, paste0("injury_at_horizon_", MARKER, "_", site_name, ".csv")))
 write_csv(counts,  file.path(final_dir, paste0("injury_at_horizon_counts_", MARKER, "_", site_name, ".csv")))
 write_csv(chan,    file.path(final_dir, paste0("injury_channels_", MARKER, "_", site_name, ".csv")))
+write_csv(nested,  file.path(final_dir, paste0("injury_nested_", MARKER, "_", site_name, ".csv")))
+write_csv(dose_ch, file.path(final_dir, paste0("injury_dose_channels_", MARKER, "_", site_name, ".csv")))
+write_csv(sf_ch,   file.path(final_dir, paste0("injury_sf_channels_", MARKER, "_", site_name, ".csv")))
+write_csv(negctrl, file.path(final_dir, paste0("injury_negctrl_", MARKER, "_", site_name, ".csv")))
+message("\n--- nested ladder at ", HORIZONS[1], " h (LR tests; d_aic < 0 favours the bigger model)")
+print(as.data.frame(nested %>% filter(horizon_h == HORIZONS[1], test != "model") %>%
+                      select(test, lr, df, p, d_aic, d_fit) %>% mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+message("\n--- dose x piece at ", HORIZONS[1], " h (per log unit of the piece per mL/kg)")
+print(as.data.frame(dose_ch %>% filter(horizon_h == HORIZONS[1]) %>% select(model, term, estimate, lo, hi, p, p_int_equal) %>%
+                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+message("\n--- baseline negative control (", unique(negctrl$outcome), "): the pieces' direct effects")
+print(as.data.frame(negctrl %>% select(model, term, estimate, lo, hi, p, p_equal, separation_flag) %>%
+                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+
+# supports figure: ladder (dAIC), dose x piece, severity x piece, negative control beside the at-H pieces
+hz <- function(x) factor(paste0(x, " h"), paste0(sort(unique(x)), " h"))
+p_lad <- ggplot(nested %>% filter(test != "model") %>% mutate(horizon = hz(horizon_h)),
+                aes(d_aic, test, fill = d_aic < 0)) +
+  geom_col() + facet_wrap(~ horizon, nrow = 1) +
+  scale_fill_manual(values = okabe[c(4, 3)], guide = "none") +
+  labs(title = "Nested ladder: change in AIC (negative favours the bigger model)", x = "dAIC (big - small)", y = NULL)
+int_plot <- function(dd, title) ggplot(dd %>% mutate(horizon = hz(horizon_h), term = sub(":.*$", "", term)),
+                                       aes(estimate, term, colour = model)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
+  geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
+  facet_wrap(~ horizon, nrow = 1, scales = "free_x") + scale_colour_manual(values = okabe[1:2], name = NULL) +
+  labs(title = title, x = "interaction per log unit of the piece per unit of the modifier", y = NULL)
+p_dose <- int_plot(dose_ch, "Dose x piece: does the piece's effect scale with the delivered VT/PBW?")
+p_sf   <- if ("estimate" %in% names(sf_ch)) int_plot(sf_ch, "Severity x piece: does it scale with baseline SF (baby lung)?") else plot_spacer()
+nc_plot <- bind_rows(
+  negctrl %>% filter(model == "pieces_free") %>% transmute(term, estimate, lo, hi, when = "baseline (negative control)"),
+  chan %>% filter(exposure == "log PFVC", horizon_h == HORIZONS[1], channel != "all (one beta)") %>%
+    transmute(term = paste0("ch_", channel), estimate, lo, hi, when = paste0("at ", HORIZONS[1], " h")))
+p_nc <- ggplot(nc_plot, aes(estimate, term, colour = when)) +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
+  geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
+  scale_colour_manual(values = okabe[c(4, 1)], name = NULL) +
+  labs(title = "Negative control: the pieces on the baseline marker vs at the horizon", x = "per log unit of the piece", y = NULL)
+p_sup <- (p_lad / p_dose / p_sf / p_nc) + plot_layout(heights = c(1.2, 1, 1, 1)) +
+  plot_annotation(title = sprintf("%s: supports for the channel read (%s)", MARKER, site_name)) & theme_minimal(base_size = 10)
+ggsave(file.path(final_dir, paste0("injury_supports_", MARKER, "_", site_name, ".pdf")), p_sup, width = 11, height = 14)
 message("\n--- channel decomposition: the exposure effect per log unit, identified through each GLI input",
         " (equal coefficients = lung size is the operative quantity; p_equal tests that)")
 print(as.data.frame(chan %>% filter(horizon_h == HORIZONS[1]) %>%

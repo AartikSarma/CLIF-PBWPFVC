@@ -541,6 +541,9 @@ out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
 # only its own marker/model/adjustment rows in each table and keeps the rest, so
 # the full set can be assembled from several runs (a lab-only rerun, a longer-
 # chain rerun of one marker). PBWPFVC_JM_FRESH=1 discards the existing tables.
+if (identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1"))
+  for (nm in c("manifest", "estimates", "absorption", "scaling"))
+    unlink(file.path(final_dir, paste0("jm_", nm, "_", out_tag, ".csv")))
 merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
   if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1") && nrow(new)) {

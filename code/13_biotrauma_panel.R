@@ -6,20 +6,23 @@
 # Builds the two tables the biotrauma joint models (13_biotrauma_fit.R) consume,
 # from the shared daily panel of 10_panel_common.R:
 #
-#   jm_long_{H}d.parquet   one row per patient-day (index day 0 to day H) with the
-#                          organ-injury markers observed that day, the previous
-#                          day's strain and confounders, and the patient's
-#                          baseline covariates
-#   jm_surv_{H}d.parquet   one row per patient: competing-risk coding of death vs
-#                          extubation within H days (same-day tie counts as death),
-#                          the RRT start day, and every baseline covariate
-#   jm_meta_{H}d.rds       horizon, cohort tag, counts
+#   jm_long_{48h|72h|24h|7d}.parquet  one row per patient-period (index period 0
+#                          to the horizon) with the organ-injury markers observed
+#                          in that period, the previous period's strain and
+#                          confounders, and the patient's baseline covariates
+#   jm_surv_{tag}.parquet  one row per patient: competing-risk coding of death vs
+#                          extubation within the horizon (tie counts as death),
+#                          the RRT start, every baseline covariate, and the GLI
+#                          channel pieces of log PFVC
+#   jm_meta_{tag}.rds      horizon, cohort tag, counts
 #
 # and one aggregate table for the deliverable:
 #
-#   final/jm_panel_summary_{site}.csv   patients, patient-days and events per
-#                                       marker; RRT censoring counts; the size of
-#                                       the plateau-measured subset
+#   final/jm_panel_summary_{tag}_{site}.csv  patients, patient-periods and events
+#                                       per marker; RRT censoring counts; the size
+#                                       of the plateau-measured subset
+# The tag is set by 13_biotrauma_grid.R (PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON_H);
+# panels for different horizons sit side by side.
 #
 # Design (docs/joint_model_plan_2026-09.md, sections 3 and 4):
 #   * every index-IMV patient enters at day 0; no survival-based restriction, and
