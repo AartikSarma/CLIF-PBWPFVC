@@ -289,7 +289,6 @@ surv <- base %>%
     ldisc_c    = log(pbw / pfvc_gli) - median(log(pbw / pfvc_gli), na.rm = TRUE),
     # per-SD versions for the PFVC-level question (the paper reports PFVC per SD)
     log_pfvc_sd = as.numeric(scale(log_pfvc)),
-    pfvc_100    = (pfvc_gli - median(pfvc_gli, na.rm = TRUE)) * 10,   # PFVC in 100-mL units, centred on the cohort median
     ldisc_sd    = as.numeric(scale(log(pbw / pfvc_gli))),
     death_in  = !is.na(death_time) & death_time <= JM_HORIZON,
     extub_in  = !is.na(extub_time) & extub_time <= JM_HORIZON,
@@ -312,7 +311,7 @@ surv <- base %>%
          death_day, imv_extub_day, death_time, extub_time, rrt_day, rrt_period, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
-         vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, pfvc_100, ldisc_sd, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
+         vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0,
          ends_with("_0_day"))
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
