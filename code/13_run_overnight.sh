@@ -49,6 +49,12 @@ set_rc() { eval "RC_${1//[^A-Za-z0-9]/_}=$2"; }
 rc_of()  { eval "echo \${RC_${1//[^A-Za-z0-9]/_}:-1}"; }
 
 echo "site $SITE; markers $MARKERS_INJ / $MARKERS_JM; horizons $HORIZONS; forms $FORMS; chains $ITER/$BURNIN x $CHAINS"
+# preflight: the site's script-03 outputs must exist, or every stage fails in seconds
+need="output/${SITE}_output/intermediate/ne_equiv_admin.parquet"
+if [[ $DRY == 0 && ! -f "$need" ]]; then
+  echo "ABORT: $need is missing. config/config.json names site '$SITE'; run scripts 01-03 for it, or point the config at the site you meant."
+  exit 1
+fi
 if [[ $DRY == 0 ]]; then
   mkdir -p "$LOGDIR/previous_tables"
   printf 'stage\tstart\tend\texit\n' > "$STATUS"
