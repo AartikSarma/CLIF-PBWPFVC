@@ -2,8 +2,12 @@
 # Script 13 (figures): the PFVC-level question, drawn from the aggregate tables
 # =============================================================================
 # Reads only the site's final/ CSVs (no patient rows), so it runs on any site's
-# outputs and, with PBWPFVC_FIG_DIR, on a pooled folder. Four figures:
+# outputs and, with PBWPFVC_FIG_DIR, on a pooled folder. Five figures:
 #
+#   biotrauma_fig_level_contrast_{tag}.pdf   THE question: the joint model's marker
+#       difference at 24/48/72 h per 100 mL LOWER PFVC at a given VT/PBW, oriented
+#       so that right of zero is more injury for every marker (percent change;
+#       odds ratio for any vasopressor), adjusted beside unadjusted, with P(harm)
 #   biotrauma_fig_estimators_{tag}.pdf   the marker difference per unit PFVC (100 mL by default; PBWPFVC_PFVC_EXPO)
 #       at each horizon from the three estimators side by side: the joint model
 #       (death before H modelled), the quick LME (longitudinal submodel alone),
@@ -46,10 +50,64 @@ marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")")
 lc <- read_if(file.path(fig_dir, paste0("jm_level_contrast_", tag, ".csv")))
 es <- read_if(file.path(fig_dir, paste0("jm_estimates_", tag, ".csv")))
 if (is.null(lc) || is.null(es)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
-ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_" , full.names = TRUE) %>%
+ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_.*\\.csv$", full.names = TRUE) %>%
   discard(~ grepl("counts_", .x)) %>% map_dfr(read_if)
-ql <- list.files(fig_dir, "^quick_lme_[a-z_]+_", full.names = TRUE) %>% map_dfr(read_if) %>%
+ql <- list.files(fig_dir, "^quick_lme_[a-z_]+_.*\\.csv$", full.names = TRUE) %>% map_dfr(read_if) %>%
   { if (nrow(.) && !"model_horizon_h" %in% names(.)) mutate(., model_horizon_h = horizon_h) else . }
+
+# ---- 0. the level contrasts: the scientific question, one figure
+#         Joint-model marker difference at 24/48/72 h per 100 mL LOWER PFVC at a
+#         given VT/PBW, oriented so that right of zero is MORE injury for every
+#         marker (sign flipped for markers whose worse direction is lower), on the
+#         percent-change scale; any vasopressor as an odds ratio. Each point is
+#         labelled with the posterior probability of harm.
+lc0 <- lc %>% filter(exposure == PFVC_EXPO, model == "main", marker %in% names(lab)) %>%
+  mutate(binary = marker == "any_pressor",
+         # log-scale contrast per unit LOWER PFVC, in the injury direction
+         inj = if_else(worse[marker] == "higher", -estimate, estimate),
+         inj_lo = if_else(worse[marker] == "higher", -hi, lo),
+         inj_hi = if_else(worse[marker] == "higher", -lo, hi),
+         p_harm = if_else(worse[marker] == "higher", 1 - p_gt0, p_gt0),
+         pct = 100 * (exp(inj) - 1), pct_lo = 100 * (exp(inj_lo) - 1), pct_hi = 100 * (exp(inj_hi) - 1),
+         adjustment = factor(adjustment, c("adjusted", "unadjusted")),
+         horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
+         marker_lab = paste0(lab[marker], "\n(worse = ", worse[marker], "; n = ", n_patients, ", deaths = ", n_deaths, ")"),
+         p_lab = sprintf("P(harm) %.2f", p_harm))
+unit_lower <- if (PFVC_EXPO == "pfvc_100") "per 100 mL lower PFVC" else "per SD lower log PFVC"
+p0_cont <- lc0 %>% filter(!binary)
+p0_bin  <- lc0 %>% filter(binary)
+plot_level <- function(d, xvar, lovar, hivar, ref, xlab, title, log_x = FALSE) {
+  p <- ggplot(d, aes(.data[[xvar]], horizon, colour = adjustment)) +
+    geom_vline(xintercept = ref, linetype = 2, colour = "grey55") +
+    geom_pointrange(aes(xmin = .data[[lovar]], xmax = .data[[hivar]]), position = position_dodge(width = 0.6)) +
+    geom_text(aes(label = p_lab, x = .data[[hivar]]), position = position_dodge(width = 0.6), hjust = -0.15, size = 2.8,
+              show.legend = FALSE) +
+    facet_grid(marker_lab ~ ., scales = "free_x") +
+    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+    (if (log_x) scale_x_log10(expand = expansion(mult = c(0.05, 0.35))) else
+                scale_x_continuous(expand = expansion(mult = c(0.05, 0.35)))) +
+    labs(title = title, x = xlab, y = "Horizon") +
+    theme(legend.position = "top", strip.text.y = element_text(angle = 0))
+  p
+}
+p0_list <- list()
+if (nrow(p0_cont)) p0_list$cont <- plot_level(
+  p0_cont, "pct", "pct_lo", "pct_hi", 0,
+  xlab = paste0("percent change in the marker toward injury, ", unit_lower, " (95% interval)"),
+  title = "Injury markers")
+if (nrow(p0_bin)) p0_list$bin <- plot_level(
+  p0_bin %>% mutate(or = exp(inj), or_lo = exp(inj_lo), or_hi = exp(inj_hi)), "or", "or_lo", "or_hi", 1,
+  xlab = paste0("odds ratio of a vasopressor running, ", unit_lower, " (log scale)"),
+  title = "Any vasopressor", log_x = TRUE)
+p0 <- wrap_plots(p0_list, ncol = 1, heights = c(if (nrow(p0_cont)) n_distinct(p0_cont$marker), if (nrow(p0_bin)) 1)) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = paste0("Is a lower PFVC, at a given VT/PBW, associated with more injury? Joint model, ", unit_lower),
+    subtitle = paste0(site_name, ": right of the line = more injury; death before the horizon is modelled\n",
+                      "P(harm) = posterior probability that the contrast lies in the injury direction")) &
+  theme(legend.position = "top")
+ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")), p0,
+       width = 10, height = 2.5 + 1.5 * n_distinct(lc0$marker))
 
 # ---- 1. estimator comparison
 est <- bind_rows(
