@@ -163,16 +163,23 @@ if (nrow(lc) && any(lc$form == "pfvc" & lc$panel_h == paste0(lc$horizon_h, "h"))
                 transmute(marker, adjustment, horizon_h, site = "Pooled", estimate = pooled, lo, hi, pooled = TRUE)) %>%
     mutate(site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")),
            adjustment = factor(adjustment, c("adjusted", "unadjusted")))
+  # one panel per marker x horizon with its own x scale (facet_grid shares x down a
+  # column, so the any-pressor log-odds would set the scale for the labs); the strip
+  # names the injury direction so the sign reads without flipping
+  worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
+             ne_equiv_peak = "higher", any_pressor = "higher")
+  fd <- fd %>% mutate(panel = factor(paste0(marker, " (worse = ", worse[marker], ")\n", horizon_h, " h"),
+                                     levels = unique(paste0(marker, " (worse = ", worse[marker], ")\n", horizon_h, " h")[order(marker, horizon_h)])))
   p <- ggplot(fd, aes(estimate, site, colour = adjustment, shape = pooled)) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
-    facet_grid(marker ~ horizon_h, scales = "free", labeller = labeller(horizon_h = function(x) paste(x, "h"))) +
+    facet_wrap(~ panel, scales = "free_x", ncol = n_distinct(fd$horizon_h), dir = "h") +
     scale_colour_manual(values = okabe[1:2]) + scale_shape_manual(values = c(16, 18), guide = "none") +
     labs(title = "Marker difference per SD of log PFVC at the horizon, joint model (death before H modelled)",
          subtitle = "a lower PFVC is the negative of the estimate; log-odds scale for any_pressor",
          x = "per SD of log PFVC", y = NULL) +
     theme_minimal(base_size = 10)
-  ggsave(file.path(out_dir, "pooled_biotrauma_level_contrast.pdf"), p, width = 11,
+  ggsave(file.path(out_dir, "pooled_biotrauma_level_contrast.pdf"), p, width = 4 + 3.5 * n_distinct(fd$horizon_h),
          height = 2 + 1.2 * n_distinct(fd$marker) * (1 + n_distinct(fd$site) / 6))
 }
 message("pooled_biotrauma complete -> ", out_dir)
