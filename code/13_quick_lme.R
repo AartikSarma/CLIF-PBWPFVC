@@ -51,9 +51,9 @@ MARKER <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 HAS_DOSE <- config$cohort == "imv"
 if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist outside the ventilated cohort")
 EXPOS  <- c(log_pfvc_sd = "log_pfvc", ldisc_sd = "ldisc")   # exposure column -> channel base
-# the size contrasts: the two above plus log VT/PFVC (patient mean over the window,
-# per SD) at a given VT/PBW, the reader's form of the discordance contrast
-SIZE_EXPOS <- c(names(EXPOS), if (HAS_DOSE) "log_vtpfvc_sd")
+# the size contrasts: the two above plus VT/PFVC in percent of predicted FVC (patient
+# mean over the window, centred, per point) at a given VT/PBW, the reader's form
+SIZE_EXPOS <- c(names(EXPOS), if (HAS_DOSE) "vtpfvc_c")
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
             bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
 y0_col <- c(creatinine = "creatinine_0", ne_equiv = "ne_equiv_0", platelets = "platelet_0",
@@ -71,7 +71,7 @@ y0_day <- paste0(y0_col, "_day")
 d_all <- long %>%
   filter(period >= 1L, !is.na(.data[[y_col]]), if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
   inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category, height_cm, pfvc_gli,
-                             sf_0, vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, log_vtpfvc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
+                             sf_0, vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, vtpfvc_c, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
   filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), if (MARKER == "dp") !is.na(bmi) else TRUE) %>%
   mutate(log_y = log(.data[[y_col]] + offset), log_y0 = log(.data[[y0_col]] + offset), l_log_sf = log(l_sf))
 

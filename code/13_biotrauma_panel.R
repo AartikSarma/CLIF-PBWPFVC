@@ -300,12 +300,12 @@ surv <- base %>%
     # per-SD versions for the PFVC-level question (the paper reports PFVC per SD)
     log_pfvc_sd = as.numeric(scale(log_pfvc)),
     ldisc_sd    = as.numeric(scale(log(pbw / pfvc_gli))),
-    # VT/PFVC as the reader meets it: at a given VT/PBW, log VT/PFVC = log VT/PBW +
-    # log PBW/PFVC, so this contrast is the discordance contrast under its clinical
-    # name; the patient mean over the window (per SD of its log) for the
-    # longitudinal submodel, the index value for the hazard
-    log_vtpfvc_sd  = as.numeric(scale(log(vtpfvc_pt_mean))),
-    log_vtpfvc_idx = log(vtpfvc_0),
+    # VT/PFVC as the reader meets it: the patient's mean VT/PFVC over the window in
+    # percent of predicted FVC (the project's unit; the 11% ceiling), centred at the
+    # cohort median, per point; the index value for the hazard on the same scale.
+    # At a given VT/PBW this is the PBW/PFVC discordance contrast scaled by the dose.
+    vtpfvc_c   = vtpfvc_pt_mean - median(vtpfvc_pt_mean, na.rm = TRUE),
+    vtpfvc_idx = vtpfvc_0,
     death_in  = !is.na(death_time) & death_time <= JM_HORIZON,
     extub_in  = !is.na(extub_time) & extub_time <= JM_HORIZON,
     event = case_when(
@@ -327,7 +327,7 @@ surv <- base %>%
          death_day, imv_extub_day, death_time, extub_time, rrt_day, rrt_period, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
-         vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, log_vtpfvc_sd, log_vtpfvc_idx,
+         vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
          vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0,
          ends_with("_0_day"))

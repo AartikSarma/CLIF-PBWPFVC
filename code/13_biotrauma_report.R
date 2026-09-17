@@ -132,7 +132,7 @@ for (i in seq_len(nrow(usable))) {
     draws[, ex] + (if (length(tcol)) draws[, tcol[1]] else 0) * hh / 24
   }
   for (hh in LEVEL_HOURS[LEVEL_HOURS <= JM_HORIZON * 24]) {
-    exs <- intersect(c("log_pfvc_sd", "ldisc_sd", "log_vtpfvc_sd", CHANNELS), colnames(draws))
+    exs <- intersect(c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS), colnames(draws))
     if (!length(exs)) next
     V <- sapply(exs, contrast_draws, hh = hh)                       # draws x exposures
     p_equal <- if (all(CHANNELS %in% exs)) channels_equal_p(colMeans(V[, CHANNELS]), cov(V[, CHANNELS])) else NA_real_
@@ -193,7 +193,7 @@ for (i in seq_len(nrow(usable))) {
       mutate(vtpbw_pt_mean = dose_med, l_vtpbw_within = dose - dose_med,
              ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
              log_pbw = median(ld$log_pbw), log_pfvc = median(ld$log_pfvc),
-             log_pfvc_sd = 0, ldisc_sd = 0, log_vtpfvc_sd = 0, ch_height = 0, ch_age = 0, ch_sex = 0, ch_race = 0,
+             log_pfvc_sd = 0, ldisc_sd = 0, vtpfvc_c = 0, ch_height = 0, ch_age = 0, ch_sex = 0, ch_race = 0,
              mean_prior_vtpfvc = median(ld$l_vtpfvc, na.rm = TRUE), cum_days_above = 0)
     grid <- bind_cols(grid, population_row(ld)[rep(1L, nrow(grid)), ])
     tt <- delete.response(b$mf_terms)     # predvars carry the fitted ns() knots

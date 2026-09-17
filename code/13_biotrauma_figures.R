@@ -34,9 +34,10 @@ source("utils/config.R")
 site_name <- config$site_name
 source(here("code", "13_biotrauma_grid.R"))
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "log_vtpfvc_sd", "log_pfvc_sd")   # the form's size exposure column
+SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column
 SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)",
-                    vtpfvc = "per SD of log VT/PFVC at a given VT/PBW", "per SD of log PFVC")
+                    vtpfvc = "per point of VT/PFVC (% of predicted FVC) at a given VT/PBW", "per SD of log PFVC")
+TRAJ_STEP <- if (MOD_FORM == "vtpfvc") 2 else 1   # the trajectory figure's contrast: +/- 2 points of VT/PFVC, else +/- 1 SD
 FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
 fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
 tag       <- paste0(if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
@@ -101,7 +102,7 @@ lc0 <- lc %>% filter(exposure == SIZE_EX, model == "main", marker %in% names(lab
          marker_lab = paste0(lab[marker], "\n(worse = ", worse[marker], "; n = ", n_patients, ", deaths = ", n_deaths, ")"),
          p_lab = sprintf("P(harm) %.2f", p_harm))
 unit_lower <- switch(MOD_FORM, disc_level = "per SD HIGHER log PBW/PFVC (a lung smaller than PBW predicts)",
-                     vtpfvc = "per SD HIGHER log VT/PFVC at the same VT/PBW", "per SD lower log PFVC")
+                     vtpfvc = "per point HIGHER VT/PFVC (% of predicted FVC) at the same VT/PBW", "per SD lower log PFVC")
 # for the discordance form a HIGHER discordance is the smaller lung: the injury direction flips
 if (FLIP_INJ) lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
                                                     p_lab = sprintf("P(harm) %.2f", p_harm)) %>% select(-i_lo)
@@ -193,7 +194,8 @@ p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_divergence_", tag, ".pdf")), p2, width = 8, height = 2.5 + 1.1 * n_distinct(div$marker))
 
 # ---- 3. predicted trajectory difference at PFVC -1 / 0 / +1 SD over the window
-TRAJ_LABELS <- if (FLIP_INJ) c("-1 SD (larger lung for the dose)", "median", "+1 SD (smaller lung for the dose)") else
+TRAJ_LABELS <- if (MOD_FORM == "vtpfvc") c("-2 points (larger lung for the dose)", "median", "+2 points (smaller lung for the dose)") else
+               if (FLIP_INJ) c("-1 SD (larger lung for the dose)", "median", "+1 SD (smaller lung for the dose)") else
                               c("-1 SD (smaller lung)", "median", "+1 SD (larger lung)")
 #         (level + divergence x t; the band is the interval of the sum at each t,
 #          taken from the posterior intervals of the two terms assuming independence,
@@ -202,8 +204,8 @@ traj <- lev %>% transmute(marker, adjustment, level = estimate, level_se = (hi -
   inner_join(div %>% transmute(marker, adjustment, slope = estimate, slope_se = (hi - lo) / 3.92),
              by = c("marker", "adjustment")) %>%
   crossing(t_day = seq(0, JM_HORIZON, by = STEP), pfvc_sd = c(-1, 0, 1)) %>%
-  mutate(diff = pfvc_sd * (level + slope * t_day),
-         se = abs(pfvc_sd) * sqrt(level_se^2 + (slope_se * t_day)^2),
+  mutate(diff = pfvc_sd * TRAJ_STEP * (level + slope * t_day),
+         se = abs(pfvc_sd) * TRAJ_STEP * sqrt(level_se^2 + (slope_se * t_day)^2),
          lo = diff - 1.96 * se, hi = diff + 1.96 * se,
          pfvc_lab = factor(TRAJ_LABELS[pfvc_sd + 2], TRAJ_LABELS),
          marker_lab = marker_label(marker))

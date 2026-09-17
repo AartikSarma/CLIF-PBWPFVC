@@ -184,8 +184,9 @@ fit_horizon <- function(H) {
       rrt_before_H  = !is.na(rrt_h) & rrt_h <= H,
       log_pfvc = log(pfvc_gli), ldisc = log(pbw / pfvc_gli),
       log_pfvc_sd = as.numeric(scale(log_pfvc)), ldisc_sd = as.numeric(scale(ldisc)),
-      # VT/PFVC over the window, per SD of its log: at a given VT/PBW, the discordance contrast under its clinical name
-      log_vtpfvc_sd = if (HAS_DOSE) as.numeric(scale(log(vtpfvc_H))) else NA_real_,
+      # VT/PFVC over the window in percent of predicted FVC, centred, per point: at a
+      # given VT/PBW, the discordance contrast scaled by the dose, under its clinical name
+      vtpfvc_c = if (HAS_DOSE) vtpfvc_H * 0.1 - median(vtpfvc_H * 0.1, na.rm = TRUE) else NA_real_,
       log_sf_0 = log(sf_0)
     )
   # the survival-side SF baseline and np_sofa come from base via the shared panel;
@@ -258,7 +259,7 @@ fit_horizon <- function(H) {
                                            log_y0_abs = log(y0 * weight_kg + 0.01))
     for (eb in c("log_pfvc", "ldisc"))
       chan_rows[[length(chan_rows) + 1]] <- channels(cc, "any_H", eb, "any pressor at H", "binomial")
-    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "log_vtpfvc_sd")) for (adj in c(TRUE, FALSE)) {
+    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "vtpfvc_c")) for (adj in c(TRUE, FALSE)) {
       rows[[length(rows) + 1]] <- one(cc, "any_H", expo, adj, "any pressor at H", "binomial")
       if (nrow(on) >= 50) {
         rows[[length(rows) + 1]] <- one(on, "log_yH", expo, adj, "log dose per kg given any") %>%
@@ -269,7 +270,7 @@ fit_horizon <- function(H) {
     }
   } else {
     cc <- cc %>% mutate(log_yH = log(yH), log_y0 = log(y0))
-    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "log_vtpfvc_sd")) for (adj in c(TRUE, FALSE))
+    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "vtpfvc_c")) for (adj in c(TRUE, FALSE))
       rows[[length(rows) + 1]] <- one(cc, "log_yH", expo, adj, "log marker at H")
     for (eb in c("log_pfvc", "ldisc"))
       chan_rows[[length(chan_rows) + 1]] <- channels(cc, "log_yH", eb, "log marker at H")
@@ -390,7 +391,7 @@ fit_horizon <- function(H) {
     filter(!is.na(score)) %>%
     mutate(rank01 = (rank(score) - 0.5) / n(), log_y0 = if (MARKER == "ne_equiv") log(y0 + 0.01) else log(y0))
   if (nrow(comp) >= 50)
-    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "log_vtpfvc_sd")) for (adj in c(TRUE, FALSE))
+    for (expo in c("log_pfvc_sd", "ldisc_sd", if (HAS_DOSE) "vtpfvc_c")) for (adj in c(TRUE, FALSE))
       rows[[length(rows) + 1]] <- one(comp, "rank01", expo, adj, "composite rank (death, RRT, marker)") %>%
         mutate(note = sprintf("rank 0-1; %d deaths and %d RRT before H ranked worst",
                                               sum(comp$dead_before_H), sum(comp$rrt_before_H & MARKER == "creatinine")))
