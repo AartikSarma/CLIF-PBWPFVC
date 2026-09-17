@@ -37,7 +37,8 @@ VT_PCT_PFVC_ARMA <- 11   # % of predicted FVC, that arm's delivered VT/PFVC (p75
 # =============================================================================
 
 cohort_ids <- readRDS(file.path(output_dir, "cohort_hospitalization_ids.rds"))
-resp_waterfall <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet"))
+resp_waterfall <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+  estimate_fio2_nosupport()   # no-support control only: FiO2 on room air / cannula
 cohort_demographics <- read_parquet(file.path(output_dir, "cohort_demographics.parquet"))
 cohort_vitals <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet"))
 cohort_labs <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet"))
@@ -384,14 +385,14 @@ message("Day-1 SOFA available for ", nrow(sofa_scores), " hospitalizations")
 # Build per-timepoint dataset from the waterfall output (IMV rows only; for the
 # never-intubated control, the HFNC / NIPPV / CPAP rows, with every ventilator
 # setting blanked so no dose or pressure variable is derived)
-spine_devices <- if (config$cohort == "niv") NIV_DEVICES else "imv"
+spine_devices <- switch(config$cohort, imv = "imv", niv = NIV_DEVICES, nosupport = NOSUPPORT_DEVICES)
 imv_timepoints <- resp_waterfall %>%
   filter(tolower(device_category) %in% spine_devices) %>%
   select(hospitalization_id, recorded_dttm, device_category, mode_category,
          fio2_set, tidal_volume_set, peep_set, plateau_pressure_obs,
          resp_rate_set, peak_inspiratory_pressure_obs,
          any_of("minute_vent_obs"))
-if (config$cohort == "niv")
+if (config$cohort != "imv")
   imv_timepoints <- imv_timepoints %>%
     mutate(tidal_volume_set = NA_real_, plateau_pressure_obs = NA_real_, peak_inspiratory_pressure_obs = NA_real_)
 
@@ -816,7 +817,7 @@ SF_HYPOXEMIA_THRESHOLD <- 315
 analysis_with_completeness <- analysis_with_sf %>%
   mutate(
     # the control has no tidal volume: complete = SF and SOFA observed
-    has_all_data = (config$cohort == "niv" | (!is.na(vtpbw) & !is.na(vtpfvc))) &
+    has_all_data = (config$cohort != "imv" | (!is.na(vtpbw) & !is.na(vtpfvc))) &
       !is.na(sf_ratio) & !is.na(sofa_total)
   )
 
@@ -838,8 +839,11 @@ write_parquet(analysis_with_completeness,
 # the cohort relative to the original.
 # the control keeps the hypoxemia gate (acute hypoxemic respiratory failure on
 # HFNC/NIV) and has no lung-protective band to apply
+# the no-support control has no hypoxemia gate either (its patients are, by and
+# large, not hypoxemic): the index is the first row with SF and SOFA observed
 qualifying_timepoints <- analysis_with_completeness %>%
-  filter(has_all_data, config$cohort == "niv" | (vtpbw >= 6 & vtpbw <= 8), sf_ratio < SF_HYPOXEMIA_THRESHOLD)
+  filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8),
+         config$cohort == "nosupport" | sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 
 message("Patients with >=1 complete-data IMV timepoint: ",
         n_distinct(analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]))
@@ -889,17 +893,28 @@ cross_sectional <- bind_rows(index_tier1, index_tier2) %>%
                        weight_kg / (height_cm / 100)^2, NA_real_))
 
 eligible_patients <- cross_sectional$hospitalization_id
-if (config$cohort == "niv") {
-  # escalation: the first invasive-ventilation row at or after the index (the
-  # biotrauma suite's competing event for the control)
+if (config$cohort != "imv") {
+  # escalation: the first row of the next level of support at or after the index
+  # (invasive ventilation for the NIV arm; any advanced support for the no-support
+  # control), the biotrauma suite's competing event for the control arms
+  esc_devices <- if (config$cohort == "niv") "imv" else SUPPORT_DEVICES
   esc <- resp_waterfall %>%
-    filter(tolower(device_category) == "imv" | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
+    filter(tolower(device_category) %in% esc_devices | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
     inner_join(cross_sectional %>% select(hospitalization_id, t0 = recorded_dttm), by = "hospitalization_id") %>%
     filter(recorded_dttm >= t0) %>%
     group_by(hospitalization_id) %>% summarise(escalation_dttm = min(recorded_dttm), .groups = "drop")
   cross_sectional <- cross_sectional %>% left_join(esc, by = "hospitalization_id")
-  message("Control cohort: ", nrow(cross_sectional), " patients on HFNC/NIV at the index; ",
-          nrow(esc), " later intubated (escalation recorded as a competing event)")
+  if (config$cohort == "nosupport") {
+    # 24-hour landmark: a patient escalated within a day of the index is the
+    # pre-support stub of a supported course, not an unsupported patient
+    early <- !is.na(cross_sectional$escalation_dttm) &
+      cross_sectional$escalation_dttm < cross_sectional$recorded_dttm + lubridate::hours(24)
+    message("No-support control: ", sum(early), " patients escalated within 24 h of the index removed")
+    cross_sectional <- cross_sectional[!early, ]
+    eligible_patients <- cross_sectional$hospitalization_id
+  }
+  message("Control cohort (", config$cohort, "): ", nrow(cross_sectional), " patients at the index; ",
+          sum(!is.na(cross_sectional$escalation_dttm)), " later escalated (recorded as a competing event)")
 }
 
 message("Index timepoint: ", nrow(index_tier1), " patients used a pressure-complete ",
@@ -1010,7 +1025,7 @@ n_step5 <- n_distinct(
   analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]
 )
 n_step6 <- analysis_with_completeness %>%
-  filter(has_all_data, config$cohort == "niv" | (vtpbw >= 6 & vtpbw <= 8)) %>%
+  filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8)) %>%
   summarise(n = n_distinct(hospitalization_id)) %>% pull(n)
 n_step7 <- length(eligible_patients)
 
@@ -1022,13 +1037,13 @@ attrition <- read_csv(partial_path, show_col_types = FALSE) %>%
   attrition_add(ATTRITION_STEPS[4], n_step4,
                 exclusion_reason = "Height outside 150-210 cm or PBW/PFVC missing") %>%
   attrition_add(ATTRITION_STEPS[5], n_step5,
-                exclusion_reason = if (config$cohort == "niv") "Incomplete index data (SF, SOFA)" else
+                exclusion_reason = if (config$cohort != "imv") "Incomplete index data (SF, SOFA)" else
                   "Incomplete index data (VT/PBW, VT/PFVC, SF, SOFA)") %>%
   attrition_add(ATTRITION_STEPS[6], n_step6,
-                exclusion_reason = if (config$cohort == "niv") "(no lung-protective band for the control)" else
+                exclusion_reason = if (config$cohort != "imv") "(no lung-protective band for the control arms)" else
                   "Not lung-protective (VT/PBW outside 6-8)") %>%
   attrition_add(ATTRITION_STEPS[7], n_step7,
-                exclusion_reason = "Not hypoxemic (SF ratio >= 315)") %>%
+                exclusion_reason = if (config$cohort == "nosupport") "Escalated within 24 h of the index" else "Not hypoxemic (SF ratio >= 315)") %>%
   mutate(site = site_name, .before = 1)
 
 write_csv(attrition, file.path(final_dir, paste0("attrition_log_", site_name, ".csv")))

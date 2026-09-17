@@ -171,15 +171,22 @@ rs_dev <- clif_respiratory_support %>%
             device_category = tolower(device_category),
             vt_num = suppressWarnings(as.numeric(tidal_volume_set))) %>%
   mutate(is_imv = replace_na(device_category == "imv", FALSE) | (!is.na(vt_num) & vt_num > 0),
-         is_niv = replace_na(device_category %in% NIV_DEVICES, FALSE)) %>%
-  filter(is_imv | is_niv, !is.na(t))
-niv_first <- rs_dev %>% group_by(hospitalization_id) %>%
-  summarise(first_niv = suppressWarnings(min(t[is_niv])), first_imv = suppressWarnings(min(t[is_imv])), .groups = "drop") %>%
-  filter(is.finite(first_niv), !is.finite(first_imv) | first_niv < first_imv)
-niv_ids <- niv_first$hospitalization_id
-cohort_ids <- if (config$cohort == "niv") niv_ids else imv_ids
-cohort_rule <- if (config$cohort == "niv") "No HFNC / non-invasive ventilation as the first advanced support" else
-  "No invasive ventilation with set tidal volume"
+         is_niv = replace_na(device_category %in% NIV_DEVICES, FALSE),
+         is_nosup = replace_na(device_category %in% NOSUPPORT_DEVICES, FALSE)) %>%
+  filter(is_imv | is_niv | is_nosup, !is.na(t))
+first_support <- rs_dev %>% group_by(hospitalization_id) %>%
+  summarise(first_niv = suppressWarnings(min(t[is_niv])), first_imv = suppressWarnings(min(t[is_imv])),
+            first_adv = suppressWarnings(min(t[is_imv | is_niv])), first_nosup = suppressWarnings(min(t[is_nosup])),
+            .groups = "drop")
+niv_ids   <- first_support %>% filter(is.finite(first_niv), !is.finite(first_imv) | first_niv < first_imv) %>% pull(hospitalization_id)
+# no-support control: a room-air / nasal-cannula row before any advanced support
+# (the 24-hour landmark after the index is applied in script 03)
+nosup_ids <- first_support %>% filter(is.finite(first_nosup), !is.finite(first_adv) | first_nosup < first_adv) %>% pull(hospitalization_id)
+cohort_ids <- switch(config$cohort, imv = imv_ids, niv = niv_ids, nosupport = nosup_ids)
+cohort_rule <- switch(config$cohort,
+  imv = "No invasive ventilation with set tidal volume",
+  niv = "No HFNC / non-invasive ventilation as the first advanced support",
+  nosupport = "No room-air / nasal-cannula period before any advanced support")
 
 cohort_patient_and_hospitalization_ids <- clif_hospitalization %>%
   filter(age_at_admission >= 18) %>% # Only adults

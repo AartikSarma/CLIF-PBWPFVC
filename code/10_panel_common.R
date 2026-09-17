@@ -169,10 +169,12 @@ base <- cs %>%
 # never-intubated control, the HFNC / NIPPV / CPAP rows with a documented FiO2 and
 # every ventilator setting blanked (no dose exists for them)
 wf <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+  estimate_fio2_nosupport() %>%
   select(hospitalization_id, recorded_dttm, device_category, tidal_volume_set, fio2_set, peep_set,
          resp_rate_set, plateau_pressure_obs)
-wf <- if (config$cohort == "niv") {
-  wf %>% filter(tolower(device_category) %in% NIV_DEVICES, !is.na(fio2_set)) %>%
+wf <- if (config$cohort != "imv") {
+  spine_devices <- if (config$cohort == "niv") NIV_DEVICES else NOSUPPORT_DEVICES
+  wf %>% filter(tolower(device_category) %in% spine_devices, !is.na(fio2_set)) %>%
     mutate(tidal_volume_set = NA_real_, peep_set = NA_real_, resp_rate_set = NA_real_, plateau_pressure_obs = NA_real_)
 } else wf %>% filter(!is.na(tidal_volume_set), tidal_volume_set > 0)
 wf <- wf %>% select(-device_category) %>%
@@ -218,6 +220,7 @@ vit <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet")) %>%
 # oxyhemoglobin dissociation curve) rather than filtered, so a fully-oxygenated day
 # keeps a high (good) SF instead of being dropped, and off-curve readings are bounded.
 fio2_dt <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+  estimate_fio2_nosupport() %>%
   filter(!is.na(fio2_set)) %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
   transmute(hospitalization_id, fio2_set, t = as.numeric(recorded_dttm)) %>%
@@ -298,8 +301,8 @@ imv_extub <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.pa
   group_by(hospitalization_id) %>%
   summarise(imv_extub_day = max(vent_day) + 1L, .groups = "drop")
 base <- base %>% left_join(imv_extub, by = "hospitalization_id")
-if (config$cohort == "niv") {
-  message("Control cohort: escalation to invasive ventilation within the window for ",
+if (config$cohort != "imv") {
+  message("Control cohort (", config$cohort, "): escalation within the window for ",
           sum(!is.na(base$escalation_time_days)), " of ", nrow(base), " patients")
 } else {
   message("IMV-course extubation derived for ", sum(!is.na(base$imv_extub_day)), " of ",
@@ -315,7 +318,7 @@ panel_full <- daily %>%
   left_join(base, by = "hospitalization_id") %>%
   mutate(on_pressor = coalesce(on_pressor, 0L),
          ne_equiv_peak = coalesce(ne_equiv_peak, 0),
-         keep = (config$cohort == "niv" | (is.finite(vtpfvc) & is.finite(peep) & is.finite(rr))) &
+         keep = (config$cohort != "imv" | (is.finite(vtpfvc) & is.finite(peep) & is.finite(rr))) &
                 is.finite(fio2) & is.finite(sf) & is.finite(map))
 panel <- panel_full %>% filter(keep) %>% select(-keep)
 # Extubation for the liberation endpoint = the IMV-course day (imv_extub_day, derived

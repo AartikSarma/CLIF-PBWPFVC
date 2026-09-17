@@ -44,15 +44,17 @@ PAR=${PAR:-1}                  # fits at a time; raise to 2 once one fit has bee
 HEARTBEAT=${HEARTBEAT:-300}
 FRESH=${FRESH:-0}              # 1: ignore every cache and redo everything
 SKIP_JM=${SKIP_JM:-0}          # 1: panels, comparators, quick LMEs and summary only
-COHORT=${COHORT:-imv}          # niv: the never-intubated control (HFNC/NIV first); runs under {site}_niv, no joint models
+COHORT=${COHORT:-imv}          # niv (HFNC/NIV first, the middle arm) or nosupport (room air / cannula, the control); under {site}_{cohort}, no joint models
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
 # site name from config.json by sed: Rscript's stdout carries renv's start-up notices
 SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
 [[ -n "$SITE" ]] || { echo "could not read site_name from config/config.json"; exit 1; }
-if [[ $COHORT == niv ]]; then
-  SITE="${SITE%_niv}_niv"; export PBWPFVC_SITE_NAME=$SITE PBWPFVC_COHORT=niv; SKIP_JM=1
-elif [[ $COHORT != imv ]]; then echo "COHORT must be imv or niv"; exit 1; fi
+case $COHORT in
+  imv) ;;
+  niv|nosupport) SITE="${SITE%_niv}"; SITE="${SITE%_nosupport}_${COHORT}"; export PBWPFVC_SITE_NAME=$SITE PBWPFVC_COHORT=$COHORT; SKIP_JM=1 ;;
+  *) echo "COHORT must be imv, niv or nosupport"; exit 1 ;;
+esac
 FINAL="output/${SITE}_output/final"
 INTER="output/${SITE}_output/intermediate"
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -66,8 +68,8 @@ echo "site $SITE (cohort $COHORT); markers $MARKERS_INJ / $MARKERS_JM; horizons 
 # its own (scripts 01-03 under {site}_niv); the analytic cohort must be built first.
 need="$INTER/ne_equiv_admin.parquet"
 if [[ $DRY == 0 && ! -f "$need" ]]; then
-  if [[ $COHORT == niv ]]; then
-    echo "[$(date +%T)] building the control cohort for $SITE: scripts 01-03"
+  if [[ $COHORT != imv ]]; then
+    echo "[$(date +%T)] building the $COHORT cohort for $SITE: scripts 01-03"
     mkdir -p "output/${SITE}_output"
     for s in 01_cohort_identification 02_quality_checks 03_variable_derivation; do
       Rscript "code/$s.R" > "output/${SITE}_output/${s}.log" 2>&1 || { echo "ABORT: $s failed (output/${SITE}_output/${s}.log)"; exit 1; }

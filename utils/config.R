@@ -35,20 +35,44 @@ load_config <- function() {
   }
   if (!config$file_type %in% c("parquet", "csv", "fst"))
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
-  # Cohort: "imv" (the analytic cohort: invasive ventilation with a set tidal
-  # volume) or "niv" (the never-intubated negative control for the biotrauma
-  # suite: first advanced support is high-flow nasal cannula or non-invasive
-  # ventilation, no invasive ventilation before it; intubation later is a
-  # competing event). PBWPFVC_COHORT; run the control under its own site name
-  # (PBWPFVC_SITE_NAME={site}_niv) so its outputs sit beside, not over, the site's.
+  # Cohort (PBWPFVC_COHORT), the strain gradient of the biotrauma suite:
+  #   "imv"        the analytic cohort: invasive ventilation with a set tidal volume
+  #   "niv"        the middle arm: first advanced support is high-flow nasal cannula
+  #                or non-invasive ventilation (spontaneous volumes, titrated
+  #                pressures; a weaker, less controlled strain), no invasive
+  #                ventilation before it; intubation later is a competing event
+  #   "nosupport"  the negative control: room air or nasal cannula only, no
+  #                advanced support before the index nor in the 24 h after it, so
+  #                strain per lung size cannot act; escalation to any support
+  #                later is a competing event
+  # Each control runs under its own site name (PBWPFVC_SITE_NAME={site}_{cohort})
+  # so its outputs sit beside, not over, the site's.
   config$cohort <- Sys.getenv("PBWPFVC_COHORT", "imv")
-  if (!config$cohort %in% c("imv", "niv"))
-    stop("PBWPFVC_COHORT must be imv or niv; got '", config$cohort, "'")
-  if (config$cohort == "niv") message("  cohort: niv (never-intubated control; PBWPFVC_COHORT)")
+  if (!config$cohort %in% c("imv", "niv", "nosupport"))
+    stop("PBWPFVC_COHORT must be imv, niv or nosupport; got '", config$cohort, "'")
+  if (config$cohort != "imv") message("  cohort: ", config$cohort, " (PBWPFVC_COHORT)")
   return(config)
 }
-# device categories of the never-intubated control (CLIF mCIDE, lower case)
-NIV_DEVICES <- c("high flow nc", "nippv", "cpap")
+# device categories (CLIF mCIDE, lower case): the middle arm's, the control's, and
+# everything that counts as advanced support (escalation)
+NIV_DEVICES       <- c("high flow nc", "nippv", "cpap")
+NOSUPPORT_DEVICES <- c("room air", "nasal cannula")
+SUPPORT_DEVICES   <- c("imv", NIV_DEVICES)
+# FiO2 on room air and nasal cannula, for the no-support control only (the
+# analytic cohort's SF uses documented FiO2): 0.21 on room air, 0.21 + 0.03 per
+# L/min on a cannula capped at 0.60, the rule script 01 uses for its mortality
+# controls. Documented fio2_set is kept where present.
+estimate_fio2_nosupport <- function(df) {
+  if (config$cohort != "nosupport") return(df)
+  dev <- tolower(df$device_category)
+  lpm <- if ("lpm_set" %in% names(df)) suppressWarnings(as.numeric(df$lpm_set)) else NA_real_
+  est <- dplyr::case_when(!is.na(df$fio2_set) ~ as.numeric(df$fio2_set),
+                          dev == "room air" ~ 0.21,
+                          dev == "nasal cannula" & !is.na(lpm) ~ pmin(0.21 + 0.03 * lpm, 0.60),
+                          TRUE ~ NA_real_)
+  df$fio2_set <- est
+  df
+}
 
 # Load the configuration
 config <- load_config()

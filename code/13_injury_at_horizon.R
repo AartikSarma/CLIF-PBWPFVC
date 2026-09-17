@@ -89,8 +89,8 @@ MARKER   <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp"))
 # the never-intubated control has no ventilator dose: the dose term and the
 # dose x piece interaction are dropped, intubation before H excludes like death
-HAS_DOSE <- config$cohort != "niv"
-if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist in the never-intubated control")
+HAS_DOSE <- config$cohort == "imv"
+if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist outside the ventilated cohort")
 HORIZONS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_INJ_HORIZONS_H", "48,24,72"), ",")[[1]])
 BASE_WINDOW_H <- 12
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
@@ -345,7 +345,7 @@ fit_horizon <- function(H) {
              modifier_median = median(ccs[[source_term]]), modifier_sd = sd(ccs[[source_term]]), n = nrow(ccs))
   }
   dose_ch <- if (HAS_DOSE) interactions("vtpbw_H_c", "vtpbw_H", "mean VT/PBW over [0, H), mL/kg, centred") else
-    tibble(horizon_h = H, marker = MARKER, note = "skipped: no ventilator dose in the never-intubated control")
+    tibble(horizon_h = H, marker = MARKER, note = "skipped: no ventilator dose outside the ventilated cohort")
   sf_ch   <- if (MARKER == "sf") tibble(horizon_h = H, marker = MARKER, note = "skipped: SF is this marker's own baseline") else
     interactions("log_sf_0_c", "log_sf_0", "log baseline SF, centred")
 

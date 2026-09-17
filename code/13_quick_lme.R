@@ -48,8 +48,8 @@ QUICK_HOURS <- QUICK_HOURS[QUICK_HOURS <= JM_HORIZON * 24]
 
 MARKER <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 # the never-intubated control has no ventilator dose: dose terms and the dose x piece block are dropped
-HAS_DOSE <- config$cohort != "niv"
-if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist in the never-intubated control")
+HAS_DOSE <- config$cohort == "imv"
+if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist outside the ventilated cohort")
 EXPOS  <- c(log_pfvc_sd = "log_pfvc", ldisc_sd = "ldisc")   # exposure column -> channel base
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
             bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
@@ -193,7 +193,7 @@ for (EXPO in names(EXPOS)) {
 }
 chan   <- bind_rows(chan_rows);   nested <- bind_rows(nested_rows)
 dose_ch <- bind_rows(dose_rows);  sf_ch  <- bind_rows(sf_rows)
-if (!nrow(dose_ch)) dose_ch <- tibble(marker = MARKER, note = "skipped: no ventilator dose in the never-intubated control")
+if (!nrow(dose_ch)) dose_ch <- tibble(marker = MARKER, note = "skipped: no ventilator dose outside the ventilated cohort")
 if (!nrow(sf_ch)) sf_ch <- tibble(marker = MARKER, note = "skipped: SF is this marker's own baseline")
 
 message("\nMarker difference per SD of each size exposure at each window's horizon, one model per window ",

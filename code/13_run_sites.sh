@@ -12,16 +12,17 @@
 # Usage:
 #   caffeinate -i nohup bash code/13_run_sites.sh \
 #       UCSF=/path/to/ucsf_clif MIMIC=/path/to/mimic_clif > sites.out 2>&1 &
-# With CONTROL=1 (default) each site is followed by its never-intubated control
-# (COHORT=niv: HFNC/NIV first, no dose, intubation as the competing event), built
-# and analysed under output/{site}_niv_output/. CONTROL=0 skips it.
+# CONTROL (default "nosupport niv") names the control arms run after each site:
+# nosupport = room air / cannula only (the negative control), niv = HFNC/NIV first
+# (the middle arm of the strain gradient); each built and analysed under
+# output/{site}_{arm}_output/. CONTROL="" skips them.
 #   bash code/13_run_sites.sh --dry-run UCSF=/path/to/ucsf_clif
 # Each site's own log is output/{site}_output/biotrauma.out; the per-stage logs
 # are under output/{site}_output/logs/biotrauma_{stamp}/.
 # =============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
-CONTROL=${CONTROL:-1}          # 1: after each site, the never-intubated control (COHORT=niv, under {site}_niv)
+CONTROL=${CONTROL:-nosupport niv}   # control arms run after each site (COHORT values; empty string = none)
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && { DRY=1; shift; }
 [[ $# -ge 1 ]] || { echo "usage: bash code/13_run_sites.sh [--dry-run] NAME=TABLES_PATH[=FILE_TYPE] ..."; exit 1; }
 
@@ -49,12 +50,12 @@ for spec in "$@"; do
   bash code/13_run_biotrauma.sh > "$out/biotrauma.out" 2>&1
   echo "[$(date +%FT%T)] $name done; $(grep -c 'exit [1-9]' "$out/biotrauma.out") failed stages; log $out/biotrauma.out"
   tail -n 4 "$out/biotrauma.out"
-  if [[ $CONTROL == 1 ]]; then
-    mkdir -p "output/${name}_niv_output"
-    COHORT=niv bash code/13_run_biotrauma.sh > "output/${name}_niv_output/biotrauma.out" 2>&1
-    echo "[$(date +%FT%T)] ${name}_niv (never-intubated control) done; $(grep -c 'exit [1-9]' "output/${name}_niv_output/biotrauma.out") failed stages"
-    tail -n 3 "output/${name}_niv_output/biotrauma.out"
-  fi
+  for arm in $CONTROL; do
+    mkdir -p "output/${name}_${arm}_output"
+    COHORT=$arm bash code/13_run_biotrauma.sh > "output/${name}_${arm}_output/biotrauma.out" 2>&1
+    echo "[$(date +%FT%T)] ${name}_${arm} done; $(grep -c 'exit [1-9]' "output/${name}_${arm}_output/biotrauma.out") failed stages"
+    tail -n 3 "output/${name}_${arm}_output/biotrauma.out"
+  done
 done
 unset PBWPFVC_SITE_NAME PBWPFVC_TABLES_PATH PBWPFVC_FILE_TYPE
 echo "[$(date +%FT%T)] all sites done"

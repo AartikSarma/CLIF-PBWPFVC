@@ -91,7 +91,7 @@ if (JM_GRID == "daily") {
   dpp <- dp_daily   %>% mutate(period = as.integer(vent_day))
   # the competing event: extubation (analytic cohort) or escalation to invasive ventilation (control)
   extub_time <- base %>% transmute(hospitalization_id,
-                                   extub_time = if (config$cohort == "niv") escalation_time_days else as.numeric(imv_extub_day))
+                                   extub_time = if (config$cohort != "imv") escalation_time_days else as.numeric(imv_extub_day))
 } else {
   per <- function(dttm, t0) as.integer(floor(as.numeric(difftime(dttm, t0, units = "hours")) / STEP_H))
   b0  <- base %>% select(hospitalization_id, t0)
@@ -141,7 +141,7 @@ if (JM_GRID == "daily") {
               .groups = "drop")
   # the competing event at period resolution: extubation = last IMV period + 1
   # (analytic cohort); escalation to invasive ventilation (the control)
-  extub_time <- if (config$cohort == "niv") {
+  extub_time <- if (config$cohort != "imv") {
     base %>% transmute(hospitalization_id, extub_time = escalation_time_days)
   } else read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
     select(hospitalization_id, recorded_dttm, device_category) %>%
@@ -161,7 +161,7 @@ if (JM_GRID == "daily") {
   message("Six-hour panel: ", nrow(pf), " patient-periods, ", n_distinct(pf$hospitalization_id),
           " patients; SF on ", sum(!is.na(pf$sf)), ", creatinine on ", sum(!is.na(pf$creatinine)), " periods")
 }
-COMPETING_EVENT <- if (config$cohort == "niv") "intubation" else "extubation"
+COMPETING_EVENT <- switch(config$cohort, imv = "extubation", niv = "intubation", nosupport = "escalation")
 death_time <- base %>%
   transmute(hospitalization_id,
             death_time = if (JM_GRID == "daily") death_day else death_time_days)
