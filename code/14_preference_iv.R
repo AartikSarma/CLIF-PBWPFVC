@@ -237,7 +237,8 @@ run_iv_dose <- function(z, label, with_period, unit_fe = TRUE) {
     iv$est %>% mutate(estimator = "2SLS RD per point of VT/PFVC (dose instrument)", exposure = "mean VT/PFVC (D)",
                       first_stage_F = iv$F, first_stage_coef = iv$first_stage$estimate),
     iv$first_stage %>% mutate(estimator = "first stage (D on unit dose preference)", exposure = "dose instrument", first_stage_F = iv$F),
-    iv$est %>% mutate(estimate = estimate * shift, se = se * shift, lo = lo * shift, hi = hi * shift,
+    # the policy LOWERS strain by `shift`, so its risk difference is minus the per-point effect times the shift
+    iv$est %>% mutate(estimate = -estimate * shift, se = se * shift, lo = -hi * shift, hi = -lo * shift,
                       estimator = sprintf("2SLS policy RD: everyone to <= %g%% (mean shift %.2f points)", C_LOW, shift),
                       exposure = "strain-limiting policy", first_stage_F = iv$F)) %>%
     mutate(instrument = label, n = nrow(dd), n_deaths = sum(dd$Y), n_strain_limited = sum(dd$A),
