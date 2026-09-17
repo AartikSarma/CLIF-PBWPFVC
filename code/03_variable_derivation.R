@@ -381,13 +381,19 @@ message("Day-1 SOFA available for ", nrow(sofa_scores), " hospitalizations")
 
 
 
-# Build per-timepoint dataset from the waterfall output (IMV rows only)
+# Build per-timepoint dataset from the waterfall output (IMV rows only; for the
+# never-intubated control, the HFNC / NIPPV / CPAP rows, with every ventilator
+# setting blanked so no dose or pressure variable is derived)
+spine_devices <- if (config$cohort == "niv") NIV_DEVICES else "imv"
 imv_timepoints <- resp_waterfall %>%
-  filter(tolower(device_category) == "imv") %>%
+  filter(tolower(device_category) %in% spine_devices) %>%
   select(hospitalization_id, recorded_dttm, device_category, mode_category,
          fio2_set, tidal_volume_set, peep_set, plateau_pressure_obs,
          resp_rate_set, peak_inspiratory_pressure_obs,
          any_of("minute_vent_obs"))
+if (config$cohort == "niv")
+  imv_timepoints <- imv_timepoints %>%
+    mutate(tidal_volume_set = NA_real_, plateau_pressure_obs = NA_real_, peak_inspiratory_pressure_obs = NA_real_)
 
 # Join with PBW/PFVC data
 analysis_data <- imv_timepoints %>%
@@ -809,7 +815,8 @@ SF_HYPOXEMIA_THRESHOLD <- 315
 # otherwise shrink the cohort dramatically.
 analysis_with_completeness <- analysis_with_sf %>%
   mutate(
-    has_all_data = !is.na(vtpbw) & !is.na(vtpfvc) &
+    # the control has no tidal volume: complete = SF and SOFA observed
+    has_all_data = (config$cohort == "niv" | (!is.na(vtpbw) & !is.na(vtpfvc))) &
       !is.na(sf_ratio) & !is.na(sofa_total)
   )
 
@@ -829,8 +836,10 @@ write_parquet(analysis_with_completeness,
 # required each patient's *first* complete-data timepoint to itself meet the
 # criteria, which discarded patients whose later timepoints qualified and shrank
 # the cohort relative to the original.
+# the control keeps the hypoxemia gate (acute hypoxemic respiratory failure on
+# HFNC/NIV) and has no lung-protective band to apply
 qualifying_timepoints <- analysis_with_completeness %>%
-  filter(has_all_data, vtpbw >= 6, vtpbw <= 8, sf_ratio < SF_HYPOXEMIA_THRESHOLD)
+  filter(has_all_data, config$cohort == "niv" | (vtpbw >= 6 & vtpbw <= 8), sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 
 message("Patients with >=1 complete-data IMV timepoint: ",
         n_distinct(analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]))
@@ -880,6 +889,18 @@ cross_sectional <- bind_rows(index_tier1, index_tier2) %>%
                        weight_kg / (height_cm / 100)^2, NA_real_))
 
 eligible_patients <- cross_sectional$hospitalization_id
+if (config$cohort == "niv") {
+  # escalation: the first invasive-ventilation row at or after the index (the
+  # biotrauma suite's competing event for the control)
+  esc <- resp_waterfall %>%
+    filter(tolower(device_category) == "imv" | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
+    inner_join(cross_sectional %>% select(hospitalization_id, t0 = recorded_dttm), by = "hospitalization_id") %>%
+    filter(recorded_dttm >= t0) %>%
+    group_by(hospitalization_id) %>% summarise(escalation_dttm = min(recorded_dttm), .groups = "drop")
+  cross_sectional <- cross_sectional %>% left_join(esc, by = "hospitalization_id")
+  message("Control cohort: ", nrow(cross_sectional), " patients on HFNC/NIV at the index; ",
+          nrow(esc), " later intubated (escalation recorded as a competing event)")
+}
 
 message("Index timepoint: ", nrow(index_tier1), " patients used a pressure-complete ",
         "qualifying timepoint within ", INDEX_WINDOW_HOURS, " h of ventilation; ",
@@ -967,8 +988,8 @@ message("28-day VFDs computed. Median VFD-28: ",
 
 cross_sectional <- cross_sectional %>%
   mutate(
-    vfr_tercile = ntile(vtpfvc, 3),
-    vfr_tercile = factor(vfr_tercile, labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
+    vfr_tercile = if (all(is.na(vtpfvc))) factor(rep(NA_character_, n()), levels = c("T1 (Low)", "T2 (Mid)", "T3 (High)")) else
+      factor(ntile(vtpfvc, 3), labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
   )
 
 # =============================================================================
@@ -989,7 +1010,7 @@ n_step5 <- n_distinct(
   analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]
 )
 n_step6 <- analysis_with_completeness %>%
-  filter(has_all_data, vtpbw >= 6, vtpbw <= 8) %>%
+  filter(has_all_data, config$cohort == "niv" | (vtpbw >= 6 & vtpbw <= 8)) %>%
   summarise(n = n_distinct(hospitalization_id)) %>% pull(n)
 n_step7 <- length(eligible_patients)
 
@@ -1001,9 +1022,11 @@ attrition <- read_csv(partial_path, show_col_types = FALSE) %>%
   attrition_add(ATTRITION_STEPS[4], n_step4,
                 exclusion_reason = "Height outside 150-210 cm or PBW/PFVC missing") %>%
   attrition_add(ATTRITION_STEPS[5], n_step5,
-                exclusion_reason = "Incomplete index data (VT/PBW, VT/PFVC, SF, SOFA)") %>%
+                exclusion_reason = if (config$cohort == "niv") "Incomplete index data (SF, SOFA)" else
+                  "Incomplete index data (VT/PBW, VT/PFVC, SF, SOFA)") %>%
   attrition_add(ATTRITION_STEPS[6], n_step6,
-                exclusion_reason = "Not lung-protective (VT/PBW outside 6-8)") %>%
+                exclusion_reason = if (config$cohort == "niv") "(no lung-protective band for the control)" else
+                  "Not lung-protective (VT/PBW outside 6-8)") %>%
   attrition_add(ATTRITION_STEPS[7], n_step7,
                 exclusion_reason = "Not hypoxemic (SF ratio >= 315)") %>%
   mutate(site = site_name, .before = 1)

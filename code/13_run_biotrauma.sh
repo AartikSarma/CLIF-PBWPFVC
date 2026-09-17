@@ -44,11 +44,15 @@ PAR=${PAR:-1}                  # fits at a time; raise to 2 once one fit has bee
 HEARTBEAT=${HEARTBEAT:-300}
 FRESH=${FRESH:-0}              # 1: ignore every cache and redo everything
 SKIP_JM=${SKIP_JM:-0}          # 1: panels, comparators, quick LMEs and summary only
+COHORT=${COHORT:-imv}          # niv: the never-intubated control (HFNC/NIV first); runs under {site}_niv, no joint models
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
 # site name from config.json by sed: Rscript's stdout carries renv's start-up notices
 SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
 [[ -n "$SITE" ]] || { echo "could not read site_name from config/config.json"; exit 1; }
+if [[ $COHORT == niv ]]; then
+  SITE="${SITE%_niv}_niv"; export PBWPFVC_SITE_NAME=$SITE PBWPFVC_COHORT=niv; SKIP_JM=1
+elif [[ $COHORT != imv ]]; then echo "COHORT must be imv or niv"; exit 1; fi
 FINAL="output/${SITE}_output/final"
 INTER="output/${SITE}_output/intermediate"
 STAMP=$(date +%Y%m%d_%H%M%S)
@@ -57,12 +61,22 @@ STATUS="$LOGDIR/status.tsv"
 set_rc() { eval "RC_${1//[^A-Za-z0-9]/_}=$2"; }
 rc_of()  { eval "echo \${RC_${1//[^A-Za-z0-9]/_}:-1}"; }
 
-echo "site $SITE; markers $MARKERS_INJ / $MARKERS_JM; horizons $HORIZONS; forms $FORMS; chains $ITER/$BURNIN x $CHAINS, thin $THIN, $PAR fits at a time; fresh $FRESH"
-# preflight: the site's script-03 outputs must exist, or every stage fails in seconds
+echo "site $SITE (cohort $COHORT); markers $MARKERS_INJ / $MARKERS_JM; horizons $HORIZONS; forms $FORMS; chains $ITER/$BURNIN x $CHAINS, thin $THIN, $PAR fits at a time; fresh $FRESH"
+# preflight: the site's script-03 outputs must exist. The control cohort builds
+# its own (scripts 01-03 under {site}_niv); the analytic cohort must be built first.
 need="$INTER/ne_equiv_admin.parquet"
 if [[ $DRY == 0 && ! -f "$need" ]]; then
-  echo "ABORT: $need is missing. config/config.json names site '$SITE'; run scripts 01-03 for it, or point the config at the site you meant."
-  exit 1
+  if [[ $COHORT == niv ]]; then
+    echo "[$(date +%T)] building the control cohort for $SITE: scripts 01-03"
+    mkdir -p "output/${SITE}_output"
+    for s in 01_cohort_identification 02_quality_checks 03_variable_derivation; do
+      Rscript "code/$s.R" > "output/${SITE}_output/${s}.log" 2>&1 || { echo "ABORT: $s failed (output/${SITE}_output/${s}.log)"; exit 1; }
+      echo "[$(date +%T)] $s done"
+    done
+  else
+    echo "ABORT: $need is missing. config/config.json names site '$SITE'; run scripts 01-03 for it, or point the config at the site you meant."
+    exit 1
+  fi
 fi
 if [[ $DRY == 0 ]]; then
   mkdir -p "$LOGDIR"

@@ -89,7 +89,9 @@ message("=== 13_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " da
 if (JM_GRID == "daily") {
   pf  <- panel_full %>% mutate(period = as.integer(vent_day))
   dpp <- dp_daily   %>% mutate(period = as.integer(vent_day))
-  extub_time <- base %>% transmute(hospitalization_id, extub_time = as.numeric(imv_extub_day))
+  # the competing event: extubation (analytic cohort) or escalation to invasive ventilation (control)
+  extub_time <- base %>% transmute(hospitalization_id,
+                                   extub_time = if (config$cohort == "niv") escalation_time_days else as.numeric(imv_extub_day))
 } else {
   per <- function(dttm, t0) as.integer(floor(as.numeric(difftime(dttm, t0, units = "hours")) / STEP_H))
   b0  <- base %>% select(hospitalization_id, t0)
@@ -98,7 +100,8 @@ if (JM_GRID == "daily") {
   set_p <- wf %>% mutate(period = per(recorded_dttm, t0)) %>%
     filter(period >= 0L, period <= MAXP) %>%
     group_by(hospitalization_id, period) %>%
-    summarise(vtpfvc = median(vtpfvc, na.rm = TRUE), vtpfvc_max = max(vtpfvc, na.rm = TRUE),
+    summarise(vtpfvc = median(vtpfvc, na.rm = TRUE),
+              vtpfvc_max = if (all(is.na(vtpfvc))) NA_real_ else max(vtpfvc, na.rm = TRUE),
               vt_ml = median(tidal_volume_set, na.rm = TRUE),
               fio2 = median(fio2_set, na.rm = TRUE), peep = median(peep_set, na.rm = TRUE),
               rr = median(resp_rate_set, na.rm = TRUE), .groups = "drop")
@@ -136,8 +139,11 @@ if (JM_GRID == "daily") {
               platelets  = { v <- lab_value_numeric[lab_category == "platelet_count"];  if (length(v)) min(v) else NA_real_ },
               bilirubin  = { v <- lab_value_numeric[lab_category == "bilirubin_total"]; if (length(v)) max(v) else NA_real_ },
               .groups = "drop")
-  # extubation at period resolution: last IMV period + 1
-  extub_time <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+  # the competing event at period resolution: extubation = last IMV period + 1
+  # (analytic cohort); escalation to invasive ventilation (the control)
+  extub_time <- if (config$cohort == "niv") {
+    base %>% transmute(hospitalization_id, extub_time = escalation_time_days)
+  } else read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
     select(hospitalization_id, recorded_dttm, device_category) %>%
     filter(tolower(device_category) == "imv") %>% inner_join(b0, by = "hospitalization_id") %>%
     mutate(period = per(recorded_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
@@ -155,6 +161,7 @@ if (JM_GRID == "daily") {
   message("Six-hour panel: ", nrow(pf), " patient-periods, ", n_distinct(pf$hospitalization_id),
           " patients; SF on ", sum(!is.na(pf$sf)), ", creatinine on ", sum(!is.na(pf$creatinine)), " periods")
 }
+COMPETING_EVENT <- if (config$cohort == "niv") "intubation" else "extubation"
 death_time <- base %>%
   transmute(hospitalization_id,
             death_time = if (JM_GRID == "daily") death_day else death_time_days)
@@ -303,8 +310,8 @@ surv <- base %>%
                           event == 2L ~ extub_time,
                           TRUE        ~ as.numeric(JM_HORIZON)),
     event_time = pmax(event_day, STEP),   # JMbayes2 needs strictly positive times
-    event_factor = factor(c("censored", "death", "extubation")[event + 1L],
-                          levels = c("censored", "death", "extubation")),
+    event_factor = factor(c("censored", "death", COMPETING_EVENT)[event + 1L],
+                          levels = c("censored", "death", COMPETING_EVENT)),
     ers_pfvc_0 = ers * pfvc_gli,                 # specific elastance at the index (plateau subset)
     disc       = pbw / pfvc_gli,                 # PBW/PFVC discordance
     rrt_before_index = !is.na(rrt_day) & rrt_day < 0,
@@ -320,7 +327,7 @@ surv <- base %>%
 # channel pieces of log PFVC (13_biotrauma_grid.R): the size term of the "channels" joint-model form
 surv <- bind_cols(surv, pfvc_channels(surv, "log_pfvc"))
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
-        ", extubations ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
+        ", ", COMPETING_EVENT, "s ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
 
 # =============================================================================
 # 13c. Longitudinal table: markers by day with the previous day's exposure

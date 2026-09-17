@@ -161,9 +161,29 @@ icu_ids <- clif_adt %>%
     distinct(hospitalization_id) %>%
     pull(hospitalization_id)
 
+# Never-intubated control (config$cohort == "niv"): hospitalizations whose FIRST
+# advanced respiratory support is HFNC / NIPPV / CPAP with no invasive-ventilation
+# signal (device imv, or a set tidal volume) before it. Intubation later in the
+# stay does not exclude at entry; script 03 records it and the biotrauma suite
+# treats it as a competing event (escalation), like extubation in the analytic cohort.
+rs_dev <- clif_respiratory_support %>%
+  transmute(hospitalization_id, t = as.numeric(recorded_dttm),
+            device_category = tolower(device_category),
+            vt_num = suppressWarnings(as.numeric(tidal_volume_set))) %>%
+  mutate(is_imv = replace_na(device_category == "imv", FALSE) | (!is.na(vt_num) & vt_num > 0),
+         is_niv = replace_na(device_category %in% NIV_DEVICES, FALSE)) %>%
+  filter(is_imv | is_niv, !is.na(t))
+niv_first <- rs_dev %>% group_by(hospitalization_id) %>%
+  summarise(first_niv = suppressWarnings(min(t[is_niv])), first_imv = suppressWarnings(min(t[is_imv])), .groups = "drop") %>%
+  filter(is.finite(first_niv), !is.finite(first_imv) | first_niv < first_imv)
+niv_ids <- niv_first$hospitalization_id
+cohort_ids <- if (config$cohort == "niv") niv_ids else imv_ids
+cohort_rule <- if (config$cohort == "niv") "No HFNC / non-invasive ventilation as the first advanced support" else
+  "No invasive ventilation with set tidal volume"
+
 cohort_patient_and_hospitalization_ids <- clif_hospitalization %>%
   filter(age_at_admission >= 18) %>% # Only adults
-  filter(hospitalization_id %in% imv_ids) %>% # who received VC ventilation
+  filter(hospitalization_id %in% cohort_ids) %>% # who received VC ventilation (or, for the control, HFNC/NIV first)
   filter(hospitalization_id %in% icu_ids) %>% # in the ICU 
   arrange(desc(admission_dttm)) %>% # if multiple hospitalizations, we want the last admission
   distinct(patient_id, .keep_all = T) %>%
@@ -187,15 +207,14 @@ n_adult <- n_distinct(funnel$patient_id)
 funnel <- funnel %>% filter(hospitalization_id %in% icu_ids)
 n_icu <- n_distinct(funnel$patient_id)
 
-funnel <- funnel %>% filter(hospitalization_id %in% imv_ids)
+funnel <- funnel %>% filter(hospitalization_id %in% cohort_ids)
 n_imv <- n_distinct(funnel$patient_id)   # == length(eligible_patients)
 
 attrition <- attrition_init() %>%
   attrition_add(ATTRITION_STEPS[1], n_adult) %>%
   attrition_add(ATTRITION_STEPS[2], n_icu,
                 exclusion_reason = "No ICU admission") %>%
-  attrition_add(ATTRITION_STEPS[3], n_imv,
-                exclusion_reason = "No invasive ventilation with set tidal volume")
+  attrition_add(ATTRITION_STEPS[3], n_imv, exclusion_reason = cohort_rule)
 
 message("Attrition (steps 1-3): adults=", n_adult, ", +ICU=", n_icu, ", +IMV=", n_imv)
 

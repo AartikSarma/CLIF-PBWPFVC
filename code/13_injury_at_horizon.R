@@ -87,6 +87,10 @@ source(here("code", "13_biotrauma_grid.R"))   # pfvc_channels(), channels_equal_
 
 MARKER   <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
 stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp"))
+# the never-intubated control has no ventilator dose: the dose term and the
+# dose x piece interaction are dropped, intubation before H excludes like death
+HAS_DOSE <- config$cohort != "niv"
+if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist in the never-intubated control")
 HORIZONS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_INJ_HORIZONS_H", "48,24,72"), ",")[[1]])
 BASE_WINDOW_H <- 12
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
@@ -174,6 +178,7 @@ fit_horizon <- function(H) {
     left_join(sf0, by = "hospitalization_id") %>%
     mutate(
       dead_before_H = !is.na(death_time_days) & death_time_days * 24 <= H,
+      esc_before_H  = !is.na(escalation_time_days) & escalation_time_days * 24 <= H,   # control: intubated before H
       rrt_before_H  = !is.na(rrt_h) & rrt_h <= H,
       log_pfvc = log(pfvc_gli), ldisc = log(pbw / pfvc_gli),
       log_pfvc_sd = as.numeric(scale(log_pfvc)), ldisc_sd = as.numeric(scale(ldisc)),
@@ -183,11 +188,12 @@ fit_horizon <- function(H) {
   # sf_0 is the index-day worst SF (day-0 value)
   if (MARKER == "ne_equiv") d <- b0 %>% select(hospitalization_id) %>% left_join(d, by = "hospitalization_id")
   n_all <- nrow(d)
-  cc <- d %>% filter(!dead_before_H, !rrt_before_H | MARKER != "creatinine",
-                     !is.na(yH), !is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0),
+  cc <- d %>% filter(!dead_before_H, !esc_before_H, !rrt_before_H | MARKER != "creatinine",
+                     !is.na(yH), !is.na(y0), if (HAS_DOSE) !is.na(vtpbw_H) else TRUE, !is.na(np_sofa), !is.na(sf_0),
                      if (MARKER == "dp") !is.na(bmi) else TRUE,
                      !is.na(age10), !is.na(sex_category), !is.na(race_category))
   counts <- tibble(horizon_h = H, n_cohort = n_all, n_dead_before_H = sum(d$dead_before_H),
+                   n_escalated_before_H = sum(d$esc_before_H),
                    n_rrt_before_H = sum(d$rrt_before_H),
                    n_no_baseline = sum(!d$dead_before_H & is.na(d$y0)),
                    n_no_outcome_value = sum(!d$dead_before_H & !is.na(d$y0) & is.na(d$yH)),
@@ -197,7 +203,8 @@ fit_horizon <- function(H) {
                   counts$n_no_outcome_value, nrow(cc)))
   if (nrow(cc) < 50) return(list(counts = counts, rows = NULL))
 
-  base_rhs <- paste("vtpbw_H + np_sofa + log_sf_0", if (MARKER == "dp") "+ bmi" else "")
+  base_terms <- c(if (HAS_DOSE) "vtpbw_H", "np_sofa", "log_sf_0", if (MARKER == "dp") "bmi")
+  base_rhs <- paste(base_terms, collapse = " + ")
   demo_rhs <- "ns(age10, 4) + sex_category + race_category"
   # expo: the coefficient reported; extra: further right-hand-side terms (the baseline)
   one <- function(dat, lhs, expo, adjusted, outcome_type, family = "gaussian", extra = "log_y0") {
@@ -269,9 +276,8 @@ fit_horizon <- function(H) {
   lhs   <- if (MARKER == "ne_equiv") "any_H" else "log_yH"
   fam   <- if (MARKER == "ne_equiv") "binomial" else "gaussian"
   otype <- if (MARKER == "ne_equiv") "any pressor at H" else "log marker at H"
-  base_terms <- c("vtpbw_H", "np_sofa", "log_sf_0", if (MARKER == "dp") "bmi")
   ccs <- bind_cols(cc, pfvc_channels(cc, "log_pfvc")) %>%
-    mutate(vtpbw_H_c = vtpbw_H - median(vtpbw_H), log_sf_0_c = log_sf_0 - median(log_sf_0))
+    mutate(vtpbw_H_c = if (HAS_DOSE) vtpbw_H - median(vtpbw_H) else NA_real_, log_sf_0_c = log_sf_0 - median(log_sf_0))
   fitf <- function(rhs, dat = ccs, y = lhs, family = fam) {
     f <- as.formula(paste(y, "~", rhs))
     if (family == "gaussian") lm(f, data = dat) else glm(f, data = dat, family = binomial)
@@ -338,7 +344,8 @@ fit_horizon <- function(H) {
       mutate(horizon_h = H, marker = MARKER, outcome_type = otype, modifier = label,
              modifier_median = median(ccs[[source_term]]), modifier_sd = sd(ccs[[source_term]]), n = nrow(ccs))
   }
-  dose_ch <- interactions("vtpbw_H_c", "vtpbw_H", "mean VT/PBW over [0, H), mL/kg, centred")
+  dose_ch <- if (HAS_DOSE) interactions("vtpbw_H_c", "vtpbw_H", "mean VT/PBW over [0, H), mL/kg, centred") else
+    tibble(horizon_h = H, marker = MARKER, note = "skipped: no ventilator dose in the never-intubated control")
   sf_ch   <- if (MARKER == "sf") tibble(horizon_h = H, marker = MARKER, note = "skipped: SF is this marker's own baseline") else
     interactions("log_sf_0_c", "log_sf_0", "log baseline SF, centred")
 
@@ -369,7 +376,7 @@ fit_horizon <- function(H) {
 
   # composite-rank sensitivity: death before H worst, RRT before H next, then the marker
   # (worse direction first), on everyone with a baseline; rank scaled to (0, 1)
-  comp <- d %>% filter(!is.na(y0), !is.na(vtpbw_H), !is.na(np_sofa), !is.na(sf_0),
+  comp <- d %>% filter(!is.na(y0), if (HAS_DOSE) !is.na(vtpbw_H) else TRUE, !esc_before_H, !is.na(np_sofa), !is.na(sf_0),
                        if (MARKER == "dp") !is.na(bmi) else TRUE,
                        !is.na(age10), !is.na(sex_category), !is.na(race_category)) %>%
     mutate(score = case_when(dead_before_H ~ Inf,
@@ -407,9 +414,11 @@ write_csv(negctrl, file.path(final_dir, paste0("injury_negctrl_", MARKER, "_", s
 message("\n--- nested ladder at ", HORIZONS[1], " h (LR tests; d_aic < 0 favours the bigger model)")
 print(as.data.frame(nested %>% filter(horizon_h == HORIZONS[1], test != "model") %>%
                       select(test, lr, df, p, d_aic, d_fit) %>% mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
-message("\n--- dose x piece at ", HORIZONS[1], " h (per log unit of the piece per mL/kg)")
-print(as.data.frame(dose_ch %>% filter(horizon_h == HORIZONS[1]) %>% select(model, term, estimate, lo, hi, p, p_int_equal) %>%
-                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+if (HAS_DOSE) {
+  message("\n--- dose x piece at ", HORIZONS[1], " h (per log unit of the piece per mL/kg)")
+  print(as.data.frame(dose_ch %>% filter(horizon_h == HORIZONS[1]) %>% select(model, term, estimate, lo, hi, p, p_int_equal) %>%
+                        mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+}
 message("\n--- baseline negative control (", unique(negctrl$outcome), "): the pieces' direct effects")
 print(as.data.frame(negctrl %>% select(model, term, estimate, lo, hi, p, p_equal, separation_flag) %>%
                       mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
@@ -427,7 +436,7 @@ int_plot <- function(dd, title) ggplot(dd %>% mutate(horizon = hz(horizon_h), te
   geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
   facet_wrap(~ horizon, nrow = 1, scales = "free_x") + scale_colour_manual(values = okabe[1:2], name = NULL) +
   labs(title = title, x = "interaction per log unit of the piece per unit of the modifier", y = NULL)
-p_dose <- int_plot(dose_ch, "Dose x piece: does the piece's effect scale with the delivered VT/PBW?")
+p_dose <- if ("estimate" %in% names(dose_ch)) int_plot(dose_ch, "Dose x piece: does the piece's effect scale with the delivered VT/PBW?") else plot_spacer()
 p_sf   <- if ("estimate" %in% names(sf_ch)) int_plot(sf_ch, "Severity x piece: does it scale with baseline SF (baby lung)?") else plot_spacer()
 nc_plot <- bind_rows(
   negctrl %>% filter(model == "pieces_free") %>% transmute(term, estimate, lo, hi, when = "baseline (negative control)"),

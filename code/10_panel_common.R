@@ -123,6 +123,8 @@ if (is_synthetic) {
                       # unfloored death time, for the joint models' sub-daily grid
                       death_time_days = if_else(!is.na(idx) & idx >= 0 & idx <= HORIZON, idx, NA_real_))
 }
+# escalation to invasive ventilation (the never-intubated control only; NA otherwise)
+if (!"escalation_dttm" %in% names(cs)) cs$escalation_dttm <- as.POSIXct(NA)
 age_breaks <- quantile(cs$age_at_admission, c(1/3, 2/3), na.rm = TRUE)
 base <- cs %>%
   filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0,
@@ -134,6 +136,7 @@ base <- cs %>%
             pfvc = .data[[PANEL_NORM]], # the CEILING normalizer (switch); downstream stays normalizer-agnostic
             pfvc_age25,                 # ALWAYS carry the structural normalizer (12 secondary CATE + positivity)
             pbw, death_day, death_time_days,
+            escalation_time_days = as.numeric(difftime(escalation_dttm, recorded_dttm, units = "days")),
             # measured mechanics at the index timepoint (plateau subset only, so often NA).
             # ers (cmH2O/L) x the size normalizer is SPECIFIC elastance: near-constant across
             # lungs if the normalizer is right about this patient's aerated volume (Chiumello),
@@ -162,17 +165,25 @@ base <- cs %>%
 # =============================================================================
 # 10b. Daily exposure + time-varying confounder panel
 # =============================================================================
+# The panel spine: rows with a set tidal volume (the analytic cohort), or, for the
+# never-intubated control, the HFNC / NIPPV / CPAP rows with a documented FiO2 and
+# every ventilator setting blanked (no dose exists for them)
 wf <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
-  select(hospitalization_id, recorded_dttm, tidal_volume_set, fio2_set, peep_set,
-         resp_rate_set, plateau_pressure_obs) %>%
-  filter(!is.na(tidal_volume_set), tidal_volume_set > 0) %>%
+  select(hospitalization_id, recorded_dttm, device_category, tidal_volume_set, fio2_set, peep_set,
+         resp_rate_set, plateau_pressure_obs)
+wf <- if (config$cohort == "niv") {
+  wf %>% filter(tolower(device_category) %in% NIV_DEVICES, !is.na(fio2_set)) %>%
+    mutate(tidal_volume_set = NA_real_, peep_set = NA_real_, resp_rate_set = NA_real_, plateau_pressure_obs = NA_real_)
+} else wf %>% filter(!is.na(tidal_volume_set), tidal_volume_set > 0)
+wf <- wf %>% select(-device_category) %>%
   inner_join(base %>% select(hospitalization_id, t0, pfvc), by = "hospitalization_id") %>%
   mutate(vent_day = floor(as.numeric(difftime(recorded_dttm, t0, units = "days")))) %>%
   filter(vent_day >= 0, vent_day <= MAX_VENT_DAY) %>%
   mutate(vtpfvc = tidal_volume_set / pfvc * 0.1)
 daily <- wf %>%
   group_by(hospitalization_id, vent_day) %>%
-  summarise(vtpfvc = median(vtpfvc, na.rm = TRUE), vtpfvc_max = max(vtpfvc, na.rm = TRUE),
+  summarise(vtpfvc = median(vtpfvc, na.rm = TRUE),
+            vtpfvc_max = if (all(is.na(vtpfvc))) NA_real_ else max(vtpfvc, na.rm = TRUE),
             vt_ml = median(tidal_volume_set, na.rm = TRUE),   # absolute VT, for any other normalizer
             fio2 = median(fio2_set, na.rm = TRUE),
             peep = median(peep_set, na.rm = TRUE), rr = median(resp_rate_set, na.rm = TRUE),
@@ -287,8 +298,13 @@ imv_extub <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.pa
   group_by(hospitalization_id) %>%
   summarise(imv_extub_day = max(vent_day) + 1L, .groups = "drop")
 base <- base %>% left_join(imv_extub, by = "hospitalization_id")
-message("IMV-course extubation derived for ", sum(!is.na(base$imv_extub_day)), " of ",
-        nrow(base), " patients (every index-IMV patient should resolve).")
+if (config$cohort == "niv") {
+  message("Control cohort: escalation to invasive ventilation within the window for ",
+          sum(!is.na(base$escalation_time_days)), " of ", nrow(base), " patients")
+} else {
+  message("IMV-course extubation derived for ", sum(!is.na(base$imv_extub_day)), " of ",
+          nrow(base), " patients (every index-IMV patient should resolve).")
+}
 
 panel_full <- daily %>%
   left_join(vit, by = c("hospitalization_id", "vent_day")) %>%          # map (daily median)
@@ -299,8 +315,8 @@ panel_full <- daily %>%
   left_join(base, by = "hospitalization_id") %>%
   mutate(on_pressor = coalesce(on_pressor, 0L),
          ne_equiv_peak = coalesce(ne_equiv_peak, 0),
-         keep = is.finite(vtpfvc) & is.finite(fio2) & is.finite(peep) & is.finite(rr) &
-                is.finite(sf) & is.finite(map))
+         keep = (config$cohort == "niv" | (is.finite(vtpfvc) & is.finite(peep) & is.finite(rr))) &
+                is.finite(fio2) & is.finite(sf) & is.finite(map))
 panel <- panel_full %>% filter(keep) %>% select(-keep)
 # Extubation for the liberation endpoint = the IMV-course day (imv_extub_day, derived
 # above, carried in via base); the IPCW weight-freeze point stays at the last volume-

@@ -47,6 +47,9 @@ QUICK_HOURS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_QUICK_HORIZONS_H", "24,48
 QUICK_HOURS <- QUICK_HOURS[QUICK_HOURS <= JM_HORIZON * 24]
 
 MARKER <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
+# the never-intubated control has no ventilator dose: dose terms and the dose x piece block are dropped
+HAS_DOSE <- config$cohort != "niv"
+if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist in the never-intubated control")
 EXPOS  <- c(log_pfvc_sd = "log_pfvc", ldisc_sd = "ldisc")   # exposure column -> channel base
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
             bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
@@ -63,7 +66,7 @@ long <- read_parquet(panel_path)
 surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
 y0_day <- paste0(y0_col, "_day")
 d_all <- long %>%
-  filter(period >= 1L, !is.na(.data[[y_col]]), !is.na(l_vtpbw_within), !is.na(l_sf), !is.na(l_pressor)) %>%
+  filter(period >= 1L, !is.na(.data[[y_col]]), if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
   inner_join(surv %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category, race_category, height_cm, pfvc_gli,
                              sf_0, vtpbw_pt_mean, log_pfvc_sd, ldisc_sd, all_of(c(y0_col, y0_day))), by = "hospitalization_id") %>%
   filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), if (MARKER == "dp") !is.na(bmi) else TRUE) %>%
@@ -74,7 +77,8 @@ ctrl <- lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)
 # the common right-hand side: time, the size terms (level + divergence), the dose,
 # the baseline, the lags, non-respiratory SOFA; BMI only for the pressure-derived marker
 rhs_of <- function(size_terms, extra = NULL, dose_mean = "vtpbw_pt_mean")
-  paste(c("vent_day", size_terms, if (length(size_terms)) paste0(size_terms, ":vent_day"), extra, "l_vtpbw_within", dose_mean,
+  paste(c("vent_day", size_terms, if (length(size_terms)) paste0(size_terms, ":vent_day"), extra,
+          if (HAS_DOSE) c("l_vtpbw_within", dose_mean),
           "log_y0", lags, "np_sofa", if (MARKER == "dp") "bmi"), collapse = " + ")
 DEMO <- "ns(age10, 4) + sex_category + race_category"
 window_data <- function(dat, hh) dat %>%
@@ -183,12 +187,13 @@ for (EXPO in names(EXPOS)) {
                marker = MARKER, exposure = expo_label[[EXPO_BASE]], exposure_col = EXPO, model_horizon_h = hh,
                modifier = label, n_patients = n_distinct(d$id))
     }
-    dose_rows[[length(dose_rows) + 1]] <- interactions("vtpbw_c", "patient-mean VT/PBW, mL/kg, centred", dose_mean = "vtpbw_c")
+    if (HAS_DOSE) dose_rows[[length(dose_rows) + 1]] <- interactions("vtpbw_c", "patient-mean VT/PBW, mL/kg, centred", dose_mean = "vtpbw_c")
     if (MARKER != "sf") sf_rows[[length(sf_rows) + 1]] <- interactions("log_sf_0_c", "log index-day worst SF, centred")
   }
 }
 chan   <- bind_rows(chan_rows);   nested <- bind_rows(nested_rows)
 dose_ch <- bind_rows(dose_rows);  sf_ch  <- bind_rows(sf_rows)
+if (!nrow(dose_ch)) dose_ch <- tibble(marker = MARKER, note = "skipped: no ventilator dose in the never-intubated control")
 if (!nrow(sf_ch)) sf_ch <- tibble(marker = MARKER, note = "skipped: SF is this marker's own baseline")
 
 message("\nMarker difference per SD of each size exposure at each window's horizon, one model per window ",
@@ -202,10 +207,12 @@ print(as.data.frame(chan %>% filter(exposure_col == "log_pfvc_sd") %>%
 message("\nNested ladder (log PFVC, ML; d_aic < 0 favours the bigger model)")
 print(as.data.frame(nested %>% filter(exposure_col == "log_pfvc_sd", test != "model") %>%
                       select(model_horizon_h, test, lr, df, p, d_aic) %>% mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
-message("\nDose x piece (log PFVC): interaction contrast at the horizon per log unit of the piece per mL/kg")
-print(as.data.frame(dose_ch %>% filter(exposure_col == "log_pfvc_sd") %>%
-                      select(model_horizon_h, model, term, estimate, lo, hi, p, p_int_equal) %>%
-                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+if ("estimate" %in% names(dose_ch)) {
+  message("\nDose x piece (log PFVC): interaction contrast at the horizon per log unit of the piece per mL/kg")
+  print(as.data.frame(dose_ch %>% filter(exposure_col == "log_pfvc_sd") %>%
+                        select(model_horizon_h, model, term, estimate, lo, hi, p, p_int_equal) %>%
+                        mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+}
 tag <- function(x) x %>% mutate(grid = JM_GRID, site = site_name)
 write_csv(tag(out),     file.path(final_dir, paste0("quick_lme_", MARKER, "_", site_name, ".csv")))
 write_csv(tag(chan),    file.path(final_dir, paste0("quick_channels_", MARKER, "_", site_name, ".csv")))

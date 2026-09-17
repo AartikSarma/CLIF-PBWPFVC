@@ -35,8 +35,20 @@ load_config <- function() {
   }
   if (!config$file_type %in% c("parquet", "csv", "fst"))
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
+  # Cohort: "imv" (the analytic cohort: invasive ventilation with a set tidal
+  # volume) or "niv" (the never-intubated negative control for the biotrauma
+  # suite: first advanced support is high-flow nasal cannula or non-invasive
+  # ventilation, no invasive ventilation before it; intubation later is a
+  # competing event). PBWPFVC_COHORT; run the control under its own site name
+  # (PBWPFVC_SITE_NAME={site}_niv) so its outputs sit beside, not over, the site's.
+  config$cohort <- Sys.getenv("PBWPFVC_COHORT", "imv")
+  if (!config$cohort %in% c("imv", "niv"))
+    stop("PBWPFVC_COHORT must be imv or niv; got '", config$cohort, "'")
+  if (config$cohort == "niv") message("  cohort: niv (never-intubated control; PBWPFVC_COHORT)")
   return(config)
 }
+# device categories of the never-intubated control (CLIF mCIDE, lower case)
+NIV_DEVICES <- c("high flow nc", "nippv", "cpap")
 
 # Load the configuration
 config <- load_config()
