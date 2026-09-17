@@ -44,7 +44,7 @@ message("Sites: ", paste(sites, collapse = ", "))
 anon <- identity
 if (file.exists(here("utils", "site_anonymization.R"))) {
   source(here("utils", "site_anonymization.R"))
-  aliases <- tryCatch(build_site_aliases(file.path(root, sites)), error = function(e) NULL)
+  aliases <- tryCatch(build_site_aliases(file.path(root, sites))$aliases, error = function(e) NULL)
   if (!is.null(aliases)) anon <- function(x) anonymize_site(x, aliases) else
     message("site anonymization unavailable for this root (", "no cohort sizes); using folder names")
 }
