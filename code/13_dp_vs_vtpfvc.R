@@ -28,6 +28,10 @@
 #                                  exposure coefficient (cmH2O per point of
 #                                  predicted FVC, or per mL/kg), CI, p, n, R2
 #   final/dp_vs_vtpfvc_{site}.pdf  forest of both exposures across strata
+#   final/dp_vs_vtpfvc_curves_{site}.pdf  the fitted relationships: predicted
+#                                  driving pressure across VT/PFVC with the VT/PBW
+#                                  spline held at its median (and the mirror), with
+#                                  95% bands, over the observed binned means
 # Usage: Rscript code/13_dp_vs_vtpfvc.R
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(here); library(splines); library(patchwork) })
@@ -57,9 +61,11 @@ index_in <- function(band) ae %>% filter(vtpbw >= band[1], vtpbw < band[2] | (ba
 SETS <- list(none = NULL, severity = c("log_sf", "np_sofa"),
              demographics = c("ns(age10, 4)", "sex_category", "race_category"),
              both = c("log_sf", "np_sofa", "ns(age10, 4)", "sex_category", "race_category"))
+models <- list(); strata_data <- list()
 fit_one <- function(d, exposure, spline_of, extra, stratum, set) {
   f <- as.formula(paste("dp ~", exposure, "+ ns(", spline_of, ", 3) + bmi", if (length(extra)) paste("+", paste(extra, collapse = " + ")) else ""))
   m <- lm(f, data = d); co <- summary(m)$coefficients[exposure, ]; ci <- confint(m)[exposure, ]
+  models[[paste(stratum, set, exposure, sep = "|")]] <<- m
   tibble(stratum = stratum, adjustment = set, exposure = exposure,
          unit = if (exposure == "vtpfvc_pct") "cmH2O per point of predicted FVC (VT/PBW spline held)" else "cmH2O per mL/kg PBW (VT/PFVC spline held)",
          estimate = unname(co[1]), se = unname(co[2]), lo = unname(ci[1]), hi = unname(ci[2]), p = unname(co[4]),
@@ -71,6 +77,7 @@ res <- imap_dfr(STRATA, function(band, stratum) {
   d <- index_in(band)
   if (nrow(d) < 50) { message(stratum, ": ", nrow(d), " patients, skipped"); return(NULL) }
   message(stratum, ": ", nrow(d), " patients; VT/PBW median ", signif(median(d$vtpbw), 3), ", VT/PFVC median ", signif(median(d$vtpfvc_pct), 3), "%")
+  strata_data[[stratum]] <<- d
   imap_dfr(SETS, function(extra, set) bind_rows(
     fit_one(d, "vtpfvc_pct", "vtpbw", extra, stratum, set),
     fit_one(d, "vtpbw", "vtpfvc_pct", extra, stratum, set)))
@@ -93,4 +100,50 @@ p <- ggplot(fd, aes(estimate, adjustment, colour = exposure)) +
        x = "coefficient (cmH2O per unit, 95% CI)", y = "adjustment set") +
   theme_minimal(base_size = 10) + theme(strip.text.y = element_text(angle = 0))
 ggsave(file.path(final_dir, paste0("dp_vs_vtpfvc_", site_name, ".pdf")), p, width = 10, height = 2 + 1.6 * n_distinct(fd$stratum))
+# ---- the fitted relationships: predicted driving pressure across one exposure
+#      with the other's spline at its median, every other covariate at its median
+#      (factors at their commonest level), 95% confidence band; the observed
+#      binned means of the stratum underneath (1-point bins, >= 10 patients)
+mode_level <- function(x) names(sort(table(x), decreasing = TRUE))[1]
+curve_of <- function(stratum, set, exposure) {
+  key <- paste(stratum, set, exposure, sep = "|"); if (is.null(models[[key]])) return(NULL)
+  m <- models[[key]]; d <- strata_data[[stratum]]
+  other <- if (exposure == "vtpfvc_pct") "vtpbw" else "vtpfvc_pct"
+  xs <- seq(quantile(d[[exposure]], .02), quantile(d[[exposure]], .98), length.out = 60)
+  nd <- tibble(x = xs) %>% mutate(!!exposure := x, !!other := median(d[[other]]), bmi = median(d$bmi),
+                                  log_sf = median(d$log_sf), np_sofa = median(d$np_sofa), age10 = median(d$age10),
+                                  sex_category = mode_level(d$sex_category), race_category = mode_level(d$race_category))
+  pr <- predict(m, newdata = nd, se.fit = TRUE)
+  tibble(stratum = stratum, adjustment = set, exposure = exposure, x = xs, fit = pr$fit,
+         lo = pr$fit - 1.96 * pr$se.fit, hi = pr$fit + 1.96 * pr$se.fit)
+}
+curves <- bind_rows(lapply(names(strata_data), function(st) bind_rows(lapply(names(SETS), function(set)
+  bind_rows(curve_of(st, set, "vtpfvc_pct"), curve_of(st, set, "vtpbw"))))))
+obs <- bind_rows(lapply(names(strata_data), function(st) {
+  d <- strata_data[[st]]
+  bind_rows(d %>% mutate(bin = floor(vtpfvc_pct) + 0.5) %>% group_by(bin) %>% filter(n() >= 10) %>%
+              summarise(dp = mean(dp), se = sd(dp) / sqrt(n()), .groups = "drop") %>% mutate(exposure = "vtpfvc_pct"),
+            d %>% mutate(bin = floor(vtpbw * 2) / 2 + 0.25) %>% group_by(bin) %>% filter(n() >= 10) %>%
+              summarise(dp = mean(dp), se = sd(dp) / sqrt(n()), .groups = "drop") %>% mutate(exposure = "vtpbw")) %>%
+    mutate(stratum = st)
+}))
+if (nrow(curves)) {
+  lab_x <- c(vtpfvc_pct = "VT/PFVC (% of predicted FVC), VT/PBW spline at its median",
+             vtpbw = "VT/PBW (mL/kg), VT/PFVC spline at its median")
+  cv <- curves %>% mutate(adjustment = factor(adjustment, names(SETS)), stratum = factor(stratum, names(STRATA)),
+                          panel = lab_x[exposure])
+  ob <- obs %>% mutate(stratum = factor(stratum, names(STRATA)), panel = lab_x[exposure])
+  pc <- ggplot(cv, aes(x, fit, colour = adjustment, fill = adjustment)) +
+    geom_pointrange(data = ob, aes(bin, dp, ymin = dp - 1.96 * se, ymax = dp + 1.96 * se), inherit.aes = FALSE,
+                    colour = "grey45", size = 0.25) +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    facet_grid(stratum ~ panel, scales = "free") +
+    scale_colour_manual(values = okabe, name = "adjustment") + scale_fill_manual(values = okabe, name = "adjustment") +
+    labs(title = sprintf("Driving pressure across each normalizer's exposure, the other held as a spline at its median (%s)", site_name),
+         subtitle = "fitted lines with 95% bands (BMI and covariates at their medians); grey = observed binned means of the stratum",
+         x = NULL, y = "driving pressure (cmH2O)") +
+    theme_minimal(base_size = 10) + theme(strip.text.y = element_text(angle = 0), legend.position = "top")
+  ggsave(file.path(final_dir, paste0("dp_vs_vtpfvc_curves_", site_name, ".pdf")), pc, width = 11, height = 2.5 + 2.4 * n_distinct(cv$stratum))
+}
 message("13_dp_vs_vtpfvc complete -> ", final_dir)
