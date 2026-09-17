@@ -483,9 +483,16 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   key <- est %>% filter(grepl(paste(KEY_TERMS, collapse = "|"), term))
   key_rhat <- if (nrow(key)) max(key$rhat, na.rm = TRUE) else NA_real_
   key_gate <- is.finite(key_rhat) && key_rhat <= RHAT_GATE
-  stamp(sprintf("max R-hat %.3f (%s); key terms %.3f (%s); worst: %s",
-                max_rhat, if (gate) "passes" else "FAILS gate",
-                key_rhat, if (key_gate) "pass" else "fail",
+  # the gate by block: the trajectory contrasts come from the longitudinal block,
+  # the death correction from the association block, the hazard ratios from the
+  # hazard block; a ridge in the hazard block does not move the trajectory
+  block_rhat <- function(bl) { v <- est$rhat[est$block == bl]; if (length(v) && any(is.finite(v))) max(v, na.rm = TRUE) else NA_real_ }
+  longitudinal_rhat <- block_rhat("longitudinal"); association_rhat <- block_rhat("association"); hazard_rhat <- block_rhat("survival")
+  gate_of <- function(r) is.finite(r) && r <= RHAT_GATE
+  stamp(sprintf("R-hat: longitudinal %.3f (%s), association %.3f (%s), hazard %.3f (%s); overall %.3f; worst: %s",
+                longitudinal_rhat, if (gate_of(longitudinal_rhat)) "pass" else "FAIL",
+                association_rhat, if (gate_of(association_rhat)) "pass" else "FAIL",
+                hazard_rhat, if (gate_of(hazard_rhat)) "pass" else "FAIL", max_rhat,
                 paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
   # --- Q3: the hazard exposures on the DEATH hazard, plain Cox vs inside the JM.
@@ -524,6 +531,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
                  counts = counts, estimates = est, absorption = absorption, scaling = scaling,
                  max_rhat = max_rhat, key_rhat = key_rhat,
+                 longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN)
   # the small result list also goes to disk, so a cluster failure after the fits
@@ -585,6 +593,9 @@ manifest <- map_dfr(results, function(r)
   r$counts %>% mutate(status = r$status, reason = r$reason,
                       max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
                       key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
+                      longitudinal_rhat = if (is.null(r$longitudinal_rhat)) NA_real_ else r$longitudinal_rhat,
+                      association_rhat  = if (is.null(r$association_rhat))  NA_real_ else r$association_rhat,
+                      hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
                       worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,

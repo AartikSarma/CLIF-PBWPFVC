@@ -59,6 +59,18 @@ N_DRAWS <- 1000L
 set.seed(20260913)
 
 manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv")), show_col_types = FALSE)
+# the gate by block, from the estimates table (so fits made before the block
+# gates existed are gated the same way): longitudinal for the trajectory
+# contrasts and Q1, association for the death correction and Q2, hazard for Q3
+RHAT_GATE <- 1.1
+est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv")), show_col_types = FALSE)
+block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
+  summarise(longitudinal_rhat = suppressWarnings(max(rhat[block == "longitudinal"], na.rm = TRUE)),
+            association_rhat  = suppressWarnings(max(rhat[block == "association"],  na.rm = TRUE)),
+            hazard_rhat       = suppressWarnings(max(rhat[block == "survival"],     na.rm = TRUE)), .groups = "drop") %>%
+  mutate(across(ends_with("_rhat"), ~ if_else(is.finite(.), ., NA_real_)))
+manifest <- manifest %>% select(-any_of(c("longitudinal_rhat", "association_rhat", "hazard_rhat"))) %>%
+  left_join(block_gates, by = c("marker", "model", "adjustment"))
 usable <- manifest %>% filter(status %in% c("converged", "rhat_fail"))
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
 message("=== 13_biotrauma_report (", out_tag, "): ", nrow(usable), " fits, of which ",
@@ -105,7 +117,12 @@ for (i in seq_len(nrow(usable))) {
   binary <- isTRUE(b$binary)
   sd_log_y <- if (binary) 1 else sd(ld$log_y)   # binary outcome: report on the log-odds scale
   gate <- u$status == "converged"
-  message(sprintf("  %-40s %s", tag, if (gate) "" else "(R-hat gate failed; reported for plumbing only)"))
+  gate_long  <- isTRUE(is.finite(u$longitudinal_rhat) && u$longitudinal_rhat <= RHAT_GATE)
+  gate_assoc <- isTRUE(is.finite(u$association_rhat)  && u$association_rhat  <= RHAT_GATE)
+  message(sprintf("  %-40s longitudinal %s, association %s, hazard %s", tag,
+                  if (gate_long) "pass" else sprintf("FAIL (%.2f)", u$longitudinal_rhat),
+                  if (gate_assoc) "pass" else sprintf("FAIL (%.2f)", u$association_rhat),
+                  if (isTRUE(is.finite(u$hazard_rhat) && u$hazard_rhat <= RHAT_GATE)) "pass" else sprintf("FAIL (%.2f)", u$hazard_rhat)))
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
   for (term in c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c", "vtpbw_pt_mean",
@@ -118,7 +135,7 @@ for (i in seq_len(nrow(usable))) {
       estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
       per_sd_estimate = mean(v) / sd_log_y, per_sd_lo = quantile(v, 0.025) / sd_log_y,
       per_sd_hi = quantile(v, 0.975) / sd_log_y, sd_log_marker = sd_log_y,
-      n_patients = u$n_patients, rhat_gate = gate)
+      n_patients = u$n_patients, rhat_gate = gate_long, longitudinal_rhat = u$longitudinal_rhat)
   }
 
   # ---- PFVC-level question: marker difference per SD of log PFVC (or of log
@@ -145,7 +162,8 @@ for (i in seq_len(nrow(usable))) {
         unit = if (ex %in% CHANNELS) "per log unit of the piece" else "per SD of the exposure",
         p_equal = if (ex %in% CHANNELS) p_equal else NA_real_,
         scale = if (binary) "log-odds of any pressor" else "log marker",
-        n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
+        n_patients = u$n_patients, n_deaths = u$n_deaths,
+        rhat_gate = gate_long, longitudinal_rhat = u$longitudinal_rhat, association_rhat = u$association_rhat)
     }
   }
 
@@ -161,7 +179,7 @@ for (i in seq_len(nrow(usable))) {
       log_hr = mean(v), log_hr_lo = quantile(v, 0.025), log_hr_hi = quantile(v, 0.975),
       hr = exp(mean(v)), hr_lo = exp(quantile(v, 0.025)), hr_hi = exp(quantile(v, 0.975)),
       per = if (binary) "1 logit unit of P(any pressor)" else if (kind == "value") "1 SD of log marker" else "1 log-unit per day",
-      n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate)
+      n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate_assoc, association_rhat = u$association_rhat)
   }
 
   # ---- heterogeneity: strain slope at Ers x PFVC percentiles
@@ -173,7 +191,7 @@ for (i in seq_len(nrow(usable))) {
       hetero_rows[[length(hetero_rows) + 1L]] <- tibble(
         marker = u$marker, ers_pfvc_pct = c(10, 50, 90)[k], ers_pfvc_value = q[[k]],
         strain_slope = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
-        n_patients = u$n_patients, rhat_gate = gate)
+        n_patients = u$n_patients, rhat_gate = gate_long)
     }
   }
 
@@ -209,7 +227,7 @@ for (i in seq_len(nrow(usable))) {
       mutate(ldisc_c = disc_q[match(disc_pct, DISC_PCT)],
              mean = rowMeans(Yc), lo = apply(Yc, 1, quantile, 0.025), hi = apply(Yc, 1, quantile, 0.975),
              marker = u$marker, adjustment = u$adjustment, baseline_form = BASELINE_FORM,
-             n_patients = u$n_patients, rhat_gate = gate, site = site_name)
+             n_patients = u$n_patients, rhat_gate = gate_long, site = site_name)
     trajectory_rows[[length(trajectory_rows) + 1L]] <- tg
     if (u$adjustment == "adjusted") {
       traj_plots[[u$marker]] <- ggplot(tg %>% mutate(facet = factor(paste0("PBW/PFVC p", disc_pct), paste0("PBW/PFVC p", DISC_PCT))),

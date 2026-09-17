@@ -77,7 +77,7 @@ message("overnight_summary: ", nrow(summary_tbl), " rows from ", length(files), 
 if (length(manifests)) {
   st <- bind_rows(manifests) %>%
     select(any_of(c("panel_h", "form", "marker", "adjustment", "status", "n_patients", "n_deaths",
-                    "max_rhat", "key_terms_rhat", "worst_terms", "reason"))) %>%
+                    "longitudinal_rhat", "association_rhat", "hazard_rhat", "max_rhat", "worst_terms", "reason"))) %>%
     arrange(panel_h, form, marker)
   message("\n---- joint-model fits")
   print(as.data.frame(st %>% select(-any_of(c("worst_terms", "reason"))) %>%
@@ -90,6 +90,11 @@ if (length(manifests)) {
   }
   message("\n", sum(st$status == "converged"), " converged, ", sum(st$status == "rhat_fail"), " R-hat fail, ",
           sum(st$status == "failed"), " failed, ", sum(st$status == "skipped"), " skipped")
+  if ("longitudinal_rhat" %in% names(st))
+    message("by block (R-hat <= 1.1): longitudinal ", sum(st$longitudinal_rhat <= 1.1, na.rm = TRUE), " of ", sum(is.finite(st$longitudinal_rhat)),
+            ", association ", sum(st$association_rhat <= 1.1, na.rm = TRUE), " of ", sum(is.finite(st$association_rhat)),
+            ", hazard ", sum(st$hazard_rhat <= 1.1, na.rm = TRUE), " of ", sum(is.finite(st$hazard_rhat)),
+            "  (the trajectory figures need the longitudinal block; the hazard ratios need the hazard block)")
 }
 message("\n---- PFVC-level contrasts at 48 h (joint model, main, adjusted / channels; log units)")
 print(as.data.frame(summary_tbl %>% filter(family == "jm_level_contrast", horizon_h == 48, model %in% c("adjusted", "channels")) %>%
