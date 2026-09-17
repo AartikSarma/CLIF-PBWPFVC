@@ -43,8 +43,12 @@
 #       baseline VT/PFVC tercile, plus the drift in baseline covariates between
 #       the day-2 cohort and the day-7 survivors
 #   sevenday_shape_{marker}_{site}.csv     the contrast per day (free), the
-#       linear and spline fits, and the AIC comparison, in both samples
-#   sevenday_feasibility_{marker}_{site}.pdf
+#       linear and spline fitted curves, and the AIC comparison, in both samples
+#   sevenday_trajectory_{marker}_{site}.csv  the raw marker by day and baseline
+#       VT/PFVC tercile, in both samples: the crossover as the data show it,
+#       before any model
+#   sevenday_feasibility_{marker}_{site}.pdf  four pages: the cohort, the
+#       dropout, the raw trajectories, the shape of the contrast
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(here)
                                  library(splines); library(nlme); library(patchwork) })
@@ -200,6 +204,27 @@ fit_shape <- function(dd, sample_lab) {
              n_patients = n_d)
     }) %>% mutate(across(c(estimate, se, lo, hi), ~ if_else(n_patients >= MIN_CELL, ., NA_real_)))
   }
+  # the fitted contrast curve of the linear and spline forms, on a fine grid, by
+  # predicting the population trajectory one point of VT/PFVC apart: one code
+  # path for any form, and the curve to lay over the free contrast points
+  ref_row <- function(grid) tibble(vent_day = grid) %>%
+    mutate(day_f         = factor(levels(dd$day_f)[1], levels = levels(dd$day_f)),  # unused by these forms
+           log_y0        = median(dd$log_y0, na.rm = TRUE),
+           np_sofa       = median(dd$np_sofa, na.rm = TRUE),
+           l_log_sf      = median(dd$l_log_sf, na.rm = TRUE),
+           l_pressor     = median(dd$l_pressor, na.rm = TRUE),
+           bmi           = median(dd$bmi, na.rm = TRUE),
+           vtpbw_pt_mean = median(dd$vtpbw_pt_mean, na.rm = TRUE),
+           l_vtpbw_within = 0)
+  grid <- seq(min(dd$vent_day), max(dd$vent_day), length.out = 60)
+  curves <- map_dfr(c("linear", "spline"), function(nm) {
+    if (!ok[[nm]]) return(tibble())
+    nd <- ref_row(grid)
+    d1 <- predict(fits[[nm]], newdata = nd %>% mutate(vtpfvc_c = 1), level = 0)
+    d0 <- predict(fits[[nm]], newdata = nd %>% mutate(vtpfvc_c = 0), level = 0)
+    tibble(sample = sample_lab, form = nm, kind = "curve", day = grid,
+           estimate = as.numeric(d1 - d0), n_patients = n_distinct(dd$hospitalization_id))
+  })
   # the linear fit's level and divergence, for the record
   lin <- if (!ok[["linear"]]) tibble() else {
     b <- fixef(fits[["linear"]]); V <- vcov(fits[["linear"]])
@@ -211,7 +236,7 @@ fit_shape <- function(dd, sample_lab) {
       mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se,
              n_patients = n_distinct(dd$hospitalization_id))
   }
-  bind_rows(aic, contrasts, lin)
+  bind_rows(aic, contrasts, curves, lin)
 }
 
 shape <- bind_rows(
@@ -222,7 +247,24 @@ shape <- bind_rows(
 write_csv(shape, file.path(final_dir, paste0("sevenday_shape_", MARKER, "_", site_name, ".csv")))
 
 # =============================================================================
-# 4. the figure
+# 3b. the raw marker by day and baseline tercile, before any model
+# =============================================================================
+traj_of <- function(dd, sample_lab) dd %>%
+  filter(!is.na(tercile)) %>%
+  group_by(sample = sample_lab, tercile, day = round(vent_day / STEP) * STEP) %>%
+  summarise(n_patients = n_distinct(hospitalization_id),
+            q25 = quantile(.data[[y_col]], 0.25, na.rm = TRUE),
+            median = median(.data[[y_col]], na.rm = TRUE),
+            q75 = quantile(.data[[y_col]], 0.75, na.rm = TRUE), .groups = "drop") %>%
+  mutate(across(c(q25, median, q75), ~ if_else(n_patients >= MIN_CELL, ., NA_real_)))
+trajectory <- bind_rows(
+  traj_of(d_all, "all at risk"),
+  traj_of(d_all %>% filter(event_day >= JM_HORIZON), paste0("ventilated through day ", JM_HORIZON))) %>%
+  mutate(marker = MARKER, site = site_name)
+write_csv(trajectory, file.path(final_dir, paste0("sevenday_trajectory_", MARKER, "_", site_name, ".csv")))
+
+# =============================================================================
+# 4. the figures, four pages
 # =============================================================================
 p1 <- riskset %>%
   select(day, `still ventilated` = n_at_risk, extubated = n_extub_cum, died = n_deaths_cum) %>%
@@ -239,34 +281,105 @@ p2 <- riskset %>%
   labs(title = "Is the dose still in the band?", x = "ventilator day",
        y = "VT/PBW (mL/kg), median and IQR")
 
-p3 <- if (!nrow(dropout)) plot_spacer() else
+p3 <- riskset %>%
+  ggplot(aes(day, marker_coverage)) +
+  geom_col(fill = okabe[2], width = 0.6) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(title = paste0("Do the patients left still have a ", marker_lab, "?"),
+       subtitle = "share of the at-risk patients with an observation that day (day 0 is the index)",
+       x = "ventilator day", y = "coverage")
+
+p4 <- riskset %>%
+  ggplot(aes(day, vtpfvc_median)) +
+  geom_ribbon(aes(ymin = vtpfvc_q25, ymax = vtpfvc_q75), alpha = 0.18, fill = okabe[6]) +
+  geom_line(colour = okabe[6], linewidth = 1) +
+  geom_hline(yintercept = 11, linetype = 2, colour = "grey55") +
+  labs(title = "VT/PFVC over the window", subtitle = "dashed line: the 11% strain ceiling",
+       x = "ventilator day", y = "VT/PFVC (% of predicted FVC), median and IQR")
+
+# ---- page 2: the dropout that threatens a 7-day estimate
+p5 <- if (!nrow(dropout)) plot_spacer() else
   dropout %>% filter(!is.na(pct_extub)) %>%
   ggplot(aes(day, pct_extub, colour = tercile)) + geom_line(linewidth = 1) + geom_point() +
   scale_colour_manual(values = okabe[c(4, 6, 5)], name = NULL) +
-  labs(title = "Differential dropout: cumulative extubation by baseline VT/PFVC",
+  labs(title = "Cumulative extubation by baseline VT/PFVC tercile",
        subtitle = "terciles that separate here manufacture a crossover in any survivor-only estimate",
        x = "ventilator day", y = "% extubated")
 
-p4 <- {
-  cc <- shape %>% filter(kind == "contrast", !is.na(estimate))
-  if (!nrow(cc)) plot_spacer() else
-    ggplot(cc, aes(day, estimate, colour = sample, fill = sample)) +
-    geom_hline(yintercept = 0, colour = "grey55") +
-    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-    geom_line(linewidth = 1) + geom_point() +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+p6 <- if (!nrow(dropout)) plot_spacer() else
+  dropout %>% filter(!is.na(pct_death)) %>%
+  ggplot(aes(day, pct_death, colour = tercile)) + geom_line(linewidth = 1) + geom_point() +
+  scale_colour_manual(values = okabe[c(4, 6, 5)], name = NULL) +
+  labs(title = "Cumulative death by baseline VT/PFVC tercile",
+       subtitle = "the joint model corrects for this one; extubation is the larger threat",
+       x = "ventilator day", y = "% died")
+
+p7 <- if (!nrow(drift)) plot_spacer() else
+  drift %>% mutate(variable = fct_reorder(variable, abs(smd))) %>%
+  ggplot(aes(smd, variable)) +
+  geom_vline(xintercept = 0, colour = "grey55") +
+  geom_vline(xintercept = c(-0.1, 0.1), linetype = 2, colour = "grey70") +
+  geom_point(size = 2.6, colour = okabe[5]) +
+  labs(title = paste0("Is the day-", JM_HORIZON, " cohort the same cohort?"),
+       subtitle = "standardised difference, patients still ventilated at the horizon vs the day-2 cohort",
+       x = "standardised mean difference", y = NULL)
+
+# ---- page 3: the marker as the data show it, before any model
+p8 <- if (!nrow(trajectory)) plot_spacer() else
+  trajectory %>% filter(!is.na(median)) %>%
+  ggplot(aes(day, median, colour = tercile, fill = tercile)) +
+  geom_ribbon(aes(ymin = q25, ymax = q75), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 1) + geom_point() +
+  facet_wrap(~ sample) +
+  scale_colour_manual(values = okabe[c(4, 6, 5)], name = NULL) +
+  scale_fill_manual(values = okabe[c(4, 6, 5)], name = NULL) +
+  labs(title = paste0(marker_lab, " by baseline VT/PFVC tercile, unadjusted"),
+       subtitle = paste0("left: everyone still ventilated that day; right: the balanced cohort. ",
+                         "A crossover on the left but not the right is dropout."),
+       x = "ventilator day", y = paste0(marker_lab, ", median and IQR"))
+
+# ---- page 4: the shape of the contrast, free per day against the fitted forms
+cc <- shape %>% filter(kind == "contrast", !is.na(estimate))
+cv <- shape %>% filter(kind == "curve",    !is.na(estimate))
+p9 <- if (!nrow(cc)) plot_spacer() else
+  ggplot(cc, aes(day, estimate)) +
+  geom_hline(yintercept = 0, colour = "grey55") +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, fill = okabe[8]) +
+  geom_point(size = 2.2) +
+  { if (nrow(cv)) geom_line(data = cv, aes(day, estimate, colour = form), linewidth = 0.9) } +
+  facet_wrap(~ sample) +
+  scale_colour_manual(values = okabe[c(1, 3)], name = "fitted form") +
+  labs(title = paste0("Marker difference per point of VT/PFVC, free per day (", marker_lab, ")"),
+       subtitle = "points and band: one free contrast per day. Lines: the linear and spline fits. If the lines track the points, keep the linear joint model.",
+       x = "ventilator day", y = "log marker per point of VT/PFVC")
+
+p10 <- {
+  a <- shape %>% filter(kind == "aic", is.finite(aic)) %>%
+    group_by(sample) %>% mutate(d_aic = aic - min(aic)) %>% ungroup()
+  if (!nrow(a)) plot_spacer() else
+    ggplot(a, aes(d_aic, form, fill = sample)) +
+    geom_col(position = position_dodge(width = 0.7), width = 0.6) +
     scale_fill_manual(values = okabe[c(1, 2)], name = NULL) +
-    labs(title = paste0("Marker difference per point of VT/PFVC, free per day (", marker_lab, ")"),
-         subtitle = "a gap between the two samples is dropout, not physiology",
-         x = "ventilator day", y = "log marker per point")
+    labs(title = "Which functional form the data prefer",
+         subtitle = "AIC above the best form in each sample; a gap under about 10 means the simpler form is enough",
+         x = "AIC above best", y = NULL)
 }
 
 pdf_path <- file.path(final_dir, paste0("sevenday_feasibility_", MARKER, "_", site_name, ".pdf"))
-ggsave(pdf_path, (p1 + p2) / (p3 + p4) +
-         plot_annotation(title = paste0(site_name, ": can the window go to ", JM_HORIZON, " days, and with what shape?"),
-                         subtitle = paste0(marker_lab, "; groups under ", MIN_CELL, " patients suppressed")) &
-         theme(legend.position = "top"),
-       width = 12, height = 8)
+head_note <- paste0(marker_lab, "; groups under ", MIN_CELL, " patients suppressed")
+pdf(pdf_path, width = 12, height = 8, onefile = TRUE)
+print((p1 + p2) / (p3 + p4) +
+        plot_annotation(title = paste0(site_name, ": is there a cohort left at day ", JM_HORIZON, "?"),
+                        subtitle = head_note) & theme(legend.position = "top"))
+print((p5 + p6) / (p7 + plot_spacer()) +
+        plot_annotation(title = paste0(site_name, ": who leaves, and does it depend on the exposure?"),
+                        subtitle = head_note) & theme(legend.position = "top"))
+print(p8 + plot_annotation(title = paste0(site_name, ": the ", marker_lab, " trajectory, unadjusted"),
+                           subtitle = head_note) & theme(legend.position = "top"))
+print(p9 / p10 + plot_layout(heights = c(2, 1)) +
+        plot_annotation(title = paste0(site_name, ": what shape does the contrast need?"),
+                        subtitle = head_note) & theme(legend.position = "top"))
+invisible(dev.off())
 
 # =============================================================================
 message("\nRisk set by day:")
