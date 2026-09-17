@@ -124,7 +124,12 @@ CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cu
 # four horizon contrasts are equal: if lung size is the operative quantity they
 # are, and the form collapses to the pfvc form unadjusted.
 MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels"))
+# "vtpfvc" (2026-09-17): the pfvc form told the reader's way round. Log VT/PFVC
+# (the patient's mean over the window, per SD) enters beside the clinician's dose,
+# so the contrast is "patients at the same VT/PBW with a different VT/PFVC"; at a
+# given VT/PBW it equals the log PBW/PFVC contrast (disc_level). The hazard
+# carries the index VT/PFVC in place of log PFVC.
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc"))
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
@@ -151,6 +156,7 @@ N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
                "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd", "^ch_", "vent_day:ch_",
+               "^log_vtpfvc_sd", "vent_day:log_vtpfvc_sd", "log_vtpfvc_idx:strata\\(strata\\)death",
                "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
                "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
@@ -268,7 +274,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
-                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, all_of(CHANNELS), all_of(mk$y0)),
+                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, log_vtpfvc_sd, log_vtpfvc_idx,
+                                   all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within),
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
@@ -289,7 +296,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     and log PFVC (size), the paper's primary parameterization
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height)) %>%   # the hazard keeps BMI (paper's set)
+    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
+           if (MOD_FORM == "vtpfvc") is.finite(log_vtpfvc_idx) else TRUE) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
   lv <- sort(unique(ld$hospitalization_id))
@@ -314,6 +322,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
+                          if (MOD_FORM == "vtpfvc") "log_vtpfvc_sd",
                           "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
@@ -322,7 +331,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
-  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS),
+  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS,
+                    if (MOD_FORM == "vtpfvc") "log_vtpfvc_idx"),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
     stop("non-finite values in the survival design: ",
@@ -347,6 +357,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     none       = "l_vtpbw_within",
     pfvc       = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
     disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
+    vtpfvc     = c("l_vtpbw_within", "log_vtpfvc_sd", "log_vtpfvc_sd:vent_day"),
     channels   = c("l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid
@@ -391,7 +402,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
   # channels form: the size term of the hazard is the four pieces too, in place of log PFVC and the demographics
-  size_haz <- if (MOD_FORM == "channels") CHANNELS else if (HAZARD_INT) "vtpbw_idx * log_pfvc" else "log_pfvc"
+  size_haz <- if (MOD_FORM == "channels") CHANNELS else if (MOD_FORM == "vtpfvc") "log_vtpfvc_idx" else
+              if (HAZARD_INT) "vtpbw_idx * log_pfvc" else "log_pfvc"
   cox_rhs <- paste(c(if (!HAZARD_INT || MOD_FORM == "channels") "vtpbw_idx", size_haz,
                      "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
                      if (adjusted && MOD_FORM != "channels") DEMO_RHS_HAZARD()), collapse = " + ")
@@ -479,7 +491,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     log PFVC is the paper's primary size term (the absorption read); VT/PBW
   #     is the dose and is reported beside it.
   cox_tbl <- summary(cox_cr)$coefficients
-  absorption <- map_dfr(c("log_pfvc", "vtpbw_idx"), function(tm) {
+  absorption <- map_dfr(c("log_pfvc", "vtpbw_idx", "log_vtpfvc_idx"), function(tm) {
     cox_row <- grep(paste0("^", tm, ":strata\\(strata\\)death$"), rownames(cox_tbl))
     jm_row  <- est %>% filter(block == "survival", grepl(paste0("^", tm, ":"), term), grepl("death", term))
     tibble(marker = mk$name, model = model, adjustment = adj_lab, term = tm,

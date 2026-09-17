@@ -34,8 +34,10 @@ source("utils/config.R")
 site_name <- config$site_name
 source(here("code", "13_biotrauma_grid.R"))
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-SIZE_EX   <- if (MOD_FORM == "disc_level") "ldisc_sd" else "log_pfvc_sd"   # the form's size exposure column
-SIZE_LAB  <- if (MOD_FORM == "disc_level") "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)" else "per SD of log PFVC"
+SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "log_vtpfvc_sd", "log_pfvc_sd")   # the form's size exposure column
+SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)",
+                    vtpfvc = "per SD of log VT/PFVC at a given VT/PBW", "per SD of log PFVC")
+FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
 fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
 tag       <- paste0(if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
@@ -98,9 +100,10 @@ lc0 <- lc %>% filter(exposure == SIZE_EX, model == "main", marker %in% names(lab
          horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
          marker_lab = paste0(lab[marker], "\n(worse = ", worse[marker], "; n = ", n_patients, ", deaths = ", n_deaths, ")"),
          p_lab = sprintf("P(harm) %.2f", p_harm))
-unit_lower <- if (MOD_FORM == "disc_level") "per SD HIGHER log PBW/PFVC (a lung smaller than PBW predicts)" else "per SD lower log PFVC"
+unit_lower <- switch(MOD_FORM, disc_level = "per SD HIGHER log PBW/PFVC (a lung smaller than PBW predicts)",
+                     vtpfvc = "per SD HIGHER log VT/PFVC at the same VT/PBW", "per SD lower log PFVC")
 # for the discordance form a HIGHER discordance is the smaller lung: the injury direction flips
-if (MOD_FORM == "disc_level") lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
+if (FLIP_INJ) lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
                                                     p_lab = sprintf("P(harm) %.2f", p_harm)) %>% select(-i_lo)
 p0_cont <- lc0 %>% filter(!binary)
 p0_bin  <- lc0 %>% filter(binary)
@@ -190,7 +193,8 @@ p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_divergence_", tag, ".pdf")), p2, width = 8, height = 2.5 + 1.1 * n_distinct(div$marker))
 
 # ---- 3. predicted trajectory difference at PFVC -1 / 0 / +1 SD over the window
-TRAJ_LABELS <- c("-1 SD (smaller lung)", "median", "+1 SD (larger lung)")
+TRAJ_LABELS <- if (FLIP_INJ) c("-1 SD (larger lung for the dose)", "median", "+1 SD (smaller lung for the dose)") else
+                              c("-1 SD (smaller lung)", "median", "+1 SD (larger lung)")
 #         (level + divergence x t; the band is the interval of the sum at each t,
 #          taken from the posterior intervals of the two terms assuming independence,
 #          so it is approximate; the contrast table carries the exact intervals at 24/48/72 h)
@@ -208,8 +212,10 @@ p3 <- ggplot(traj %>% filter(pfvc_sd != 0), aes(t_day * 24, diff, colour = pfvc_
   geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
   geom_line(linewidth = 1) +
   facet_grid(marker_lab ~ adjustment, scales = "free_y") +
-  scale_colour_manual(values = okabe[c(4, 3)], name = "PFVC") + scale_fill_manual(values = okabe[c(4, 3)], name = "PFVC") +
-  labs(title = "Predicted marker difference from the median-PFVC patient over the window",
+  scale_colour_manual(values = if (FLIP_INJ) okabe[c(3, 4)] else okabe[c(4, 3)], name = if (MOD_FORM == "vtpfvc") "VT/PFVC" else if (MOD_FORM == "disc_level") "PBW/PFVC" else "PFVC") +
+  scale_fill_manual(values = if (FLIP_INJ) okabe[c(3, 4)] else okabe[c(4, 3)], name = if (MOD_FORM == "vtpfvc") "VT/PFVC" else if (MOD_FORM == "disc_level") "PBW/PFVC" else "PFVC") +
+  labs(title = paste0("Predicted marker difference from the median patient over the window (",
+                      switch(MOD_FORM, vtpfvc = "VT/PFVC at the same VT/PBW", disc_level = "PBW/PFVC", "PFVC"), ")"),
        subtitle = paste0(site_name, ": joint model, level + divergence x time; approximate band"),
        x = "Hours from the index", y = "difference in log marker (log-odds for any vasopressor)") +
   theme(legend.position = "top", strip.text.y = element_text(angle = 0))

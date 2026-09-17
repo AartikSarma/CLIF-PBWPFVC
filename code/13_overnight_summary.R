@@ -23,7 +23,7 @@ files <- files[keep]; fam <- fam[keep]
 if (!length(files)) stop("no biotrauma tables in ", final_dir)
 rd <- function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5)
 jm_tag <- function(f) {
-  m <- str_match(basename(f), "^jm_\\w+?_(?:(offset)_)?(?:(pfvc|channels|disc_level|saturated|none)_)?(\\d+[hd])_")
+  m <- str_match(basename(f), "^jm_\\w+?_(?:(offset)_)?(?:(pfvc|channels|disc_level|vtpfvc|saturated|none)_)?(\\d+[hd])_")
   list(form = replace_na(m[, 3], "disc"), panel = m[, 4], baseline = replace_na(m[, 2], "free"))
 }
 num <- function(x) if (is.null(x)) NA_real_ else as.numeric(x)

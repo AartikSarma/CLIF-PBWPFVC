@@ -27,7 +27,8 @@
 #   caffeinate -i nohup bash code/13_run_biotrauma.sh > biotrauma.out 2>&1 &
 #   bash code/13_run_biotrauma.sh --dry-run
 # Knobs (environment): HORIZONS ("48"; add 72 24 for the sensitivities), FORMS
-#   ("pfvc"; channels, disc_level available), MARKERS_INJ, MARKERS_JM, ITER,
+#   ("pfvc"; vtpfvc = the same contrast told as VT/PFVC at a given VT/PBW;
+#   channels, disc_level available), MARKERS_INJ, MARKERS_JM, ITER,
 #   BURNIN, CHAINS, THIN, PAR, HEARTBEAT, FRESH (1: ignore every cache),
 #   SKIP_JM (1: no joint models), plus PBWPFVC_SITE_NAME / PBWPFVC_TABLES_PATH.
 # Logs: output/{site}_output/logs/biotrauma_{stamp}/{stage}.log and status.tsv.
