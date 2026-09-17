@@ -64,12 +64,19 @@ manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv"
 # contrasts and Q1, association for the death correction and Q2, hazard for Q3
 RHAT_GATE <- 1.1
 est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv")), show_col_types = FALSE)
+# The exposure gate: the longitudinal block also carries nuisance terms (the
+# baseline marker, the age spline) whose chains mix worse than the exposure
+# terms; the trajectory contrasts need only the exposure terms and their
+# time interactions, so those are gated separately (`exposure_rhat`).
+SIZE_EXPOS <- c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS)
+EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_pt_mean", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"), paste0("vent_day:", SIZE_EXPOS))
 block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
   summarise(longitudinal_rhat = suppressWarnings(max(rhat[block == "longitudinal"], na.rm = TRUE)),
+            exposure_rhat     = suppressWarnings(max(rhat[block == "longitudinal" & term %in% EXPO_TERMS], na.rm = TRUE)),
             association_rhat  = suppressWarnings(max(rhat[block == "association"],  na.rm = TRUE)),
             hazard_rhat       = suppressWarnings(max(rhat[block == "survival"],     na.rm = TRUE)), .groups = "drop") %>%
   mutate(across(ends_with("_rhat"), ~ if_else(is.finite(.), ., NA_real_)))
-manifest <- manifest %>% select(-any_of(c("longitudinal_rhat", "association_rhat", "hazard_rhat"))) %>%
+manifest <- manifest %>% select(-any_of(c("longitudinal_rhat", "exposure_rhat", "association_rhat", "hazard_rhat"))) %>%
   left_join(block_gates, by = c("marker", "model", "adjustment"))
 usable <- manifest %>% filter(status %in% c("converged", "rhat_fail"))
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
@@ -119,8 +126,10 @@ for (i in seq_len(nrow(usable))) {
   gate <- u$status == "converged"
   gate_long  <- isTRUE(is.finite(u$longitudinal_rhat) && u$longitudinal_rhat <= RHAT_GATE)
   gate_assoc <- isTRUE(is.finite(u$association_rhat)  && u$association_rhat  <= RHAT_GATE)
-  message(sprintf("  %-40s longitudinal %s, association %s, hazard %s", tag,
+  gate_expo  <- isTRUE(is.finite(u$exposure_rhat)     && u$exposure_rhat     <= RHAT_GATE)
+  message(sprintf("  %-40s longitudinal %s (exposure terms %s), association %s, hazard %s", tag,
                   if (gate_long) "pass" else sprintf("FAIL (%.2f)", u$longitudinal_rhat),
+                  if (gate_expo) "pass" else sprintf("FAIL (%.2f)", u$exposure_rhat),
                   if (gate_assoc) "pass" else sprintf("FAIL (%.2f)", u$association_rhat),
                   if (isTRUE(is.finite(u$hazard_rhat) && u$hazard_rhat <= RHAT_GATE)) "pass" else sprintf("FAIL (%.2f)", u$hazard_rhat)))
 
@@ -135,7 +144,8 @@ for (i in seq_len(nrow(usable))) {
       estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
       per_sd_estimate = mean(v) / sd_log_y, per_sd_lo = quantile(v, 0.025) / sd_log_y,
       per_sd_hi = quantile(v, 0.975) / sd_log_y, sd_log_marker = sd_log_y,
-      n_patients = u$n_patients, rhat_gate = gate_long, longitudinal_rhat = u$longitudinal_rhat)
+      n_patients = u$n_patients, rhat_gate = gate_long, rhat_gate_exposure = gate_expo,
+      longitudinal_rhat = u$longitudinal_rhat, exposure_rhat = u$exposure_rhat)
   }
 
   # ---- PFVC-level question: marker difference per SD of log PFVC (or of log
@@ -159,11 +169,12 @@ for (i in seq_len(nrow(usable))) {
         marker = u$marker, model = u$model, adjustment = u$adjustment, exposure = ex, horizon_h = hh,
         estimate = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
         p_gt0 = mean(v > 0), per_sd_marker = if (binary) NA_real_ else mean(v) / sd_log_y,
-        unit = if (ex %in% CHANNELS) "per log unit of the piece" else "per SD of the exposure",
+        unit = if (ex %in% CHANNELS) "per log unit of the piece" else if (ex == "vtpfvc_c") "per point of VT/PFVC (% of predicted FVC)" else "per SD of the exposure",
         p_equal = if (ex %in% CHANNELS) p_equal else NA_real_,
         scale = if (binary) "log-odds of any pressor" else "log marker",
         n_patients = u$n_patients, n_deaths = u$n_deaths,
-        rhat_gate = gate_long, longitudinal_rhat = u$longitudinal_rhat, association_rhat = u$association_rhat)
+        rhat_gate = gate_long, rhat_gate_exposure = gate_expo, longitudinal_rhat = u$longitudinal_rhat,
+        exposure_rhat = u$exposure_rhat, association_rhat = u$association_rhat)
     }
   }
 

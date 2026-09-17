@@ -162,9 +162,10 @@ p1 <- ggplot(est, aes(estimate, estimator, colour = adjustment)) +
   geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6)) +
   facet_grid(marker_lab ~ horizon, scales = "free_x") +
   scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-  labs(title = "Marker difference per SD of log PFVC at a given VT/PBW",
-       subtitle = paste0(site_name, ": a LOWER PFVC is the negative of each estimate; log-odds for any vasopressor"),
-       x = "log units per SD of log PFVC (95% interval)", y = NULL) +
+  labs(title = paste0("Marker difference ", SIZE_LAB),
+       subtitle = paste0(site_name, if (FLIP_INJ) ": a larger lung for the dose is the negative of each estimate" else ": a LOWER PFVC is the negative of each estimate",
+                         "; log-odds for any vasopressor"),
+       x = paste0("log units ", SIZE_LAB, " (95% interval)"), y = NULL) +
   theme(legend.position = "top", strip.text.y = element_text(angle = 0))
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_estimators_", tag, ".pdf")), p1,
        width = 10, height = 2 + 1.6 * n_distinct(est$marker))
@@ -181,14 +182,14 @@ p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +
          geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
          geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
          scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-         labs(title = "Level: difference at the start", x = "log units per SD of log PFVC", y = NULL)) /
+         labs(title = "Level: difference at the start", x = paste0("log units ", SIZE_LAB), y = NULL)) /
       (ggplot(div, aes(estimate, marker_lab, colour = adjustment)) +
          geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
          geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
          scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-         labs(title = "Divergence: change per day", x = "log units per day per SD of log PFVC", y = NULL)) +
+         labs(title = "Divergence: change per day", x = paste0("log units per day ", SIZE_LAB), y = NULL)) +
   plot_layout(guides = "collect") +
-  plot_annotation(title = "The PFVC effect split into a level and a rate (joint model)",
+  plot_annotation(title = paste0("The ", switch(MOD_FORM, vtpfvc = "VT/PFVC", disc_level = "PBW/PFVC", "PFVC"), " effect split into a level and a rate (joint model)"),
                   subtitle = paste0(site_name, ": a rate that is the same adjusted and unadjusted is not the age channel")) &
   theme(legend.position = "top")
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_divergence_", tag, ".pdf")), p2, width = 8, height = 2.5 + 1.1 * n_distinct(div$marker))
@@ -232,9 +233,9 @@ if (nrow(ap)) {
     geom_pointrange(aes(xmin = or_lo, xmax = or_hi), position = position_dodge(width = 0.6)) +
     facet_wrap(~ horizon, nrow = 1) + scale_x_log10() +
     scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    labs(title = "Odds of a vasopressor running per SD LOWER PFVC, at a given VT/PBW",
+    labs(title = paste0("Odds of a vasopressor running ", unit_lower),
          subtitle = paste0(site_name, ": the joint model's odds ratio is subject-specific, the comparator's marginal"),
-         x = "odds ratio per SD lower PFVC (log scale)", y = NULL) +
+         x = paste0("odds ratio ", unit_lower, " (log scale)"), y = NULL) +
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_pressor_", tag, ".pdf")), p4, width = 9, height = 3.5)
 }
