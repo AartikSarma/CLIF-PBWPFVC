@@ -67,7 +67,7 @@ pool_one <- function(d) {
   if (k == 0) return(NULL)
   if (k == 1) return(tibble(k = 1L, pooled = d$estimate, se = d$se, lo = d$estimate - 1.96 * d$se,
                             hi = d$estimate + 1.96 * d$se, i2 = NA_real_, tau2 = NA_real_,
-                            sites = d$site, site_estimates = signif(d$estimate, 4)))
+                            sites = d$site, site_estimates = as.character(signif(d$estimate, 4))))
   fit <- tryCatch(rma(yi = d$estimate, sei = d$se, method = "REML"),
                   error = function(e) rma(yi = d$estimate, sei = d$se, method = "DL"))
   tibble(k = k, pooled = as.numeric(fit$b), se = fit$se, lo = fit$ci.lb, hi = fit$ci.ub,
