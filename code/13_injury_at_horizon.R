@@ -80,7 +80,7 @@ dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 HORIZON      <- 28L
 MAX_VENT_DAY <- 27L
-is_synthetic <- identical(site_name, "synthetic_clif")
+is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synthetic_clif, synthetic_clif_b, ...)
 PANEL_NORM   <- "pfvc"
 source(here("code", "10_panel_common.R"))
 source(here("code", "13_biotrauma_grid.R"))   # pfvc_channels(), channels_equal_p()

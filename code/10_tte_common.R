@@ -82,7 +82,7 @@ DAYW_CAP     <- 5       # day-weight truncation (IPCW clamped to [1/cap, cap]); 
 HORIZON      <- 28L     # days, primary outcome (28-d: bulk of ICU mortality, ~= adherence window)
 MAX_VENT_DAY <- 27L     # ventilation/adherence window
 WT_TRUNC     <- c(0.01, 0.99)
-is_synthetic <- identical(site_name, "synthetic_clif")
+is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synthetic_clif, synthetic_clif_b, ...)
 # Cluster bootstrap reps. Each rep refits the MSM on a resampled long panel, so this is the
 # dominant cost at real scale. DEFAULT IS 50, a PROTOTYPING value: it fixes the point estimates
 # and gives percentile intervals accurate enough to see whether an effect is there, but 50 reps

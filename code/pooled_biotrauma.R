@@ -148,6 +148,11 @@ for (fam in c("quick_dose_channels", "quick_sf_channels")) {
     pooled[[fam]] <- pool_by(x %>% filter(!is.na(estimate)), marker, exposure, model_horizon_h, model, term)
 }
 
+# --- 7. the practice-variation instrument (script 14): naive and 2SLS risk differences per site
+ivp <- read_family("^iv_preference_[A-Za-z0-9_]+\\.csv$")
+if (nrow(ivp)) ivp <- ivp %>% filter(!grepl("^iv_preference_(balance|cells)_", file))
+if (nrow(ivp)) pooled$iv_preference <- pool_by(ivp, instrument, estimator, exposure)
+
 # --- write
 for (nm in names(pooled)) {
   write_csv(pooled[[nm]], file.path(out_dir, paste0("pooled_biotrauma_", nm, ".csv")))
