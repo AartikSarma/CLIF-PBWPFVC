@@ -86,9 +86,35 @@ message("=== 13_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " da
 # The period panel: one row per patient-period, either the shared daily panel
 # (grid = daily) or a six-hour reduction of the same sources (grid = 6h)
 # =============================================================================
+# ---- oxygenation index, on whichever grid is in force
+# OI  = FiO2(%) x mean AIRWAY pressure / PaO2      (arterial gas; indication-driven, sparse)
+# OSI = FiO2(%) x mean airway pressure / SpO2      (the saturation analogue, dense)
+#     = 100 x mean airway pressure / SF, exactly, since SF = SpO2 / FiO2 as a fraction
+# Higher is worse for both. Mean airway pressure is never forward-filled, so both
+# indices exist only on periods with a RECORDED value, and that coverage is the
+# thing to read before trusting any OI result.
+#
+# CAUTION, and it is the reason OI was parked in the first place: mean airway
+# pressure is a ventilator setting that the exposure moves arithmetically. A
+# bigger tidal volume at the same PEEP and compliance raises mean airway
+# pressure, so OI can worsen with VT/PFVC through its own numerator, with
+# nothing happening in the lung. Read OI beside its components (this script
+# writes the mean airway pressure by day), and treat PEEP-per-PFVC as the
+# mediator it is, not as a nuisance.
+oi_from <- function(map_aw, fio2, pao2, sf) {
+  fio2_pct <- if_else(fio2 > 1.5, fio2, fio2 * 100)          # the panel carries both conventions
+  tibble(map_aw = map_aw,
+         oi  = if_else(is.finite(pao2) & pao2 > 0, fio2_pct * map_aw / pao2, NA_real_),
+         osi = if_else(is.finite(sf)   & sf   > 0, 100      * map_aw / sf,   NA_real_))
+}
 if (JM_GRID == "daily") {
   pf  <- panel_full %>% mutate(period = as.integer(vent_day))
   dpp <- dp_daily   %>% mutate(period = as.integer(vent_day))
+  oxy <- maw_daily %>%
+    left_join(pao2_daily, by = c("hospitalization_id", "vent_day")) %>%
+    left_join(pf %>% select(hospitalization_id, vent_day, fio2, sf), by = c("hospitalization_id", "vent_day")) %>%
+    bind_cols(., oi_from(.$map_aw, .$fio2, .$pao2, .$sf) %>% select(oi, osi)) %>%
+    transmute(hospitalization_id, period = as.integer(vent_day), map_aw, oi, osi)
   # the competing event: extubation (analytic cohort) or escalation to invasive ventilation (control)
   extub_time <- base %>% transmute(hospitalization_id,
                                    extub_time = if (config$cohort != "imv") escalation_time_days else as.numeric(imv_extub_day))
@@ -122,6 +148,24 @@ if (JM_GRID == "daily") {
     filter(is.finite(sf_pt)) %>% inner_join(t0_num, by = "hospitalization_id") %>%
     mutate(period = as.integer(floor((t - t0n) / 3600 / STEP_H))) %>% filter(period >= 0L, period <= MAXP) %>%
     group_by(hospitalization_id, period) %>% summarise(sf = min(sf_pt), .groups = "drop")
+  # oxygenation index on the fine grid: recorded mean airway pressure and the
+  # period's worst arterial PaO2, paired with the period's worst SF for OSI
+  maw_p <- wf %>% mutate(period = per(recorded_dttm, t0)) %>%
+    filter(period >= 0L, period <= MAXP, !is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
+    group_by(hospitalization_id, period) %>%
+    summarise(map_aw = median(mean_airway_pressure_obs, na.rm = TRUE), .groups = "drop")
+  pao2_p <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+    filter(lab_category == "po2_arterial", !is.na(lab_value_numeric)) %>%
+    inner_join(b0, by = "hospitalization_id") %>%
+    mutate(period = per(lab_result_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
+    group_by(hospitalization_id, period) %>%
+    summarise(pao2 = min(lab_value_numeric, na.rm = TRUE), .groups = "drop")
+  oxy <- maw_p %>%
+    left_join(pao2_p, by = c("hospitalization_id", "period")) %>%
+    left_join(sf_p, by = c("hospitalization_id", "period")) %>%
+    left_join(set_p %>% select(hospitalization_id, period, fio2), by = c("hospitalization_id", "period")) %>%
+    bind_cols(., oi_from(.$map_aw, .$fio2, .$pao2, .$sf) %>% select(oi, osi)) %>%
+    select(hospitalization_id, period, map_aw, oi, osi)
   med_p <- read_parquet(file.path(output_dir, "cohort_meds.parquet")) %>%
     filter(med_group == "vasoactives") %>% inner_join(b0, by = "hospitalization_id") %>%
     mutate(period = per(admin_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
@@ -181,7 +225,8 @@ death_time <- base %>%
 # or days are present and never runs at a real site. Requested 2026-09-13.
 if (is_synthetic) {
   message("*** SYNTHETIC SITE: adding a patient-level random intercept and slope to every marker (plumbing only). ***")
-  marker_sd <- c(creatinine = 0.6, platelets = 0.4, bilirubin = 0.6, sf = 0.2, dp = 0.15, ne_equiv_peak = 0.8)
+  marker_sd <- c(creatinine = 0.6, platelets = 0.4, bilirubin = 0.6, sf = 0.2, dp = 0.15,
+                 ne_equiv_peak = 0.8, oi = 0.3, osi = 0.3)
   set.seed(20260913)
   synth_re <- base %>% select(hospitalization_id) %>%
     bind_cols(map_dfc(names(marker_sd), function(m) {
@@ -194,8 +239,11 @@ if (is_synthetic) {
                                          v = all_of(paste0("v_", m))), by = "hospitalization_id") %>%
       mutate(!!m := .data[[m]] * exp(u + v * vent_day)) %>% select(-u, -v)
   }
-  for (m in setdiff(names(marker_sd), "dp")) pf <- perturb(pf, m)
+  for (m in setdiff(names(marker_sd), c("dp", "oi", "osi"))) pf <- perturb(pf, m)
   dpp <- perturb(dpp, "dp")
+  oxy <- oxy %>% mutate(vent_day = period * STEP)
+  for (m in c("oi", "osi")) oxy <- perturb(oxy, m)
+  oxy <- oxy %>% select(-vent_day)
 }
 
 # =============================================================================
@@ -207,14 +255,14 @@ if (is_synthetic) {
 # is -Inf on the log scale: nlme then fails with "NA/NaN/Inf in foreign function
 # call". Such values are set to missing here and counted per marker in the
 # summary table. NE-equivalent dose keeps its true zeros (the fit adds an offset).
-LOG_MARKERS <- c("creatinine", "platelets", "bilirubin", "sf", "dp")
+LOG_MARKERS <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "oi", "osi")
 nonpositive_counts <- setNames(integer(length(LOG_MARKERS)), LOG_MARKERS)
 for (m in LOG_MARKERS) {
-  df <- if (m == "dp") dpp else pf
+  df <- if (m == "dp") dpp else if (m %in% c("oi", "osi")) oxy else pf
   bad <- !is.na(df[[m]]) & df[[m]] <= 0
   nonpositive_counts[[m]] <- sum(bad)
   df[[m]][bad] <- NA_real_
-  if (m == "dp") dpp <- df else pf <- df
+  if (m == "dp") dpp <- df else if (m %in% c("oi", "osi")) oxy <- df else pf <- df
 }
 if (any(nonpositive_counts > 0))
   message("Non-positive marker values set to missing (patient-periods): ",
@@ -257,11 +305,12 @@ message("CRRT: ", nrow(rrt), " patients with any record; ",
 # cross-sectional table's index-timepoint labs are not used: they are matched
 # inside a narrow window, missing for most patients, and carry no bilirubin.
 marker_cols <- c(creatinine = "creatinine", platelets = "platelets", bilirubin = "bilirubin",
-                 sf = "sf", dp = "dp", ne_equiv_peak = "ne_equiv_peak")
+                 sf = "sf", dp = "dp", ne_equiv_peak = "ne_equiv_peak", oi = "oi", osi = "osi")
 baseline_names <- c(creatinine = "creatinine_0", platelets = "platelet_0", bilirubin = "bilirubin_0",
-                    sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")
+                    sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0", oi = "oi_0", osi = "osi_0")
 with_dp <- pf %>% filter(period <= N_PERIODS) %>%
-  left_join(dpp %>% select(hospitalization_id, period, dp), by = c("hospitalization_id", "period"))
+  left_join(dpp %>% select(hospitalization_id, period, dp), by = c("hospitalization_id", "period")) %>%
+  left_join(oxy %>% select(hospitalization_id, period, oi, osi), by = c("hospitalization_id", "period"))
 first_obs <- map(names(marker_cols), function(m) {
   with_dp %>% filter(!is.na(.data[[m]])) %>%
     group_by(hospitalization_id) %>% slice_min(period, n = 1, with_ties = FALSE) %>% ungroup() %>%
@@ -329,7 +378,7 @@ surv <- base %>%
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
          vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
-         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0,
+         ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0, oi_0, osi_0,
          ends_with("_0_day"))
 # channel pieces of log PFVC (13_biotrauma_grid.R): the size term of the "channels" joint-model form
 surv <- bind_cols(surv, pfvc_channels(surv, "log_pfvc"))
@@ -364,6 +413,7 @@ long <- pf %>%
   select(hospitalization_id, period, vent_day, vtpfvc, vt_ml, fio2, peep, rr, map, sf, on_pressor,
          ne_equiv_peak, creatinine, platelets, bilirubin) %>%
   left_join(dpp %>% select(hospitalization_id, period, dp), by = c("hospitalization_id", "period")) %>%
+  left_join(oxy %>% select(hospitalization_id, period, map_aw, oi, osi), by = c("hospitalization_id", "period")) %>%
   left_join(prev, by = c("hospitalization_id", "period")) %>%
   left_join(cum_above, by = c("hospitalization_id", "period")) %>%
   mutate(cum_days_above = if_else(period == 0L, 0, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA at period 0
@@ -379,6 +429,8 @@ long <- pf %>%
     sf            = if_else(!is.na(sf_0_day)         & period <= sf_0_day,         NA_real_, sf),
     dp            = if_else(!is.na(dp_0_day)         & period <= dp_0_day,         NA_real_, dp),
     ne_equiv_peak = if_else(!is.na(ne_equiv_0_day)   & period <= ne_equiv_0_day,   NA_real_, ne_equiv_peak),
+    oi            = if_else(!is.na(oi_0_day)         & period <= oi_0_day,         NA_real_, oi),
+    osi           = if_else(!is.na(osi_0_day)        & period <= osi_0_day,        NA_real_, osi),
     # within-patient strain: yesterday's VT/PFVC relative to the patient's own mean
     l_vtpfvc_within = l_vtpfvc - vtpfvc_pt_mean,
     l_vtpbw_within  = l_vtpbw  - vtpbw_pt_mean,    # the clinician's dose change (mL/kg PBW)
@@ -396,14 +448,13 @@ message("Longitudinal table: ", nrow(long), " patient-periods, ",
 # =============================================================================
 # 13d. Aggregate summary (deliverable) and persistence
 # =============================================================================
-markers <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "ne_equiv_peak")
+markers <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "ne_equiv_peak", "oi", "osi")
 per_marker <- map_dfr(markers, function(m) {
   obs <- long %>% filter(!is.na(.data[[m]]))
   per_pt <- obs %>% count(hospitalization_id)
   ids2 <- per_pt$hospitalization_id[per_pt$n >= 2L]
   ev <- surv %>% filter(hospitalization_id %in% ids2)
-  y0 <- c(creatinine = "creatinine_0", platelets = "platelet_0", bilirubin = "bilirubin_0",
-          sf = "sf_0", dp = "dp_0", ne_equiv_peak = "ne_equiv_0")[[m]]
+  y0 <- baseline_names[[m]]
   tibble(marker = m,
          patient_days = nrow(obs),
          nonpositive_set_missing = if (m %in% LOG_MARKERS) nonpositive_counts[[m]] else 0L,

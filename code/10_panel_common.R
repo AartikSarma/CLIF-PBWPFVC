@@ -171,11 +171,12 @@ base <- cs %>%
 wf <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
   estimate_fio2_nosupport() %>%
   select(hospitalization_id, recorded_dttm, device_category, tidal_volume_set, fio2_set, peep_set,
-         resp_rate_set, plateau_pressure_obs)
+         resp_rate_set, plateau_pressure_obs, mean_airway_pressure_obs)
 wf <- if (config$cohort != "imv") {
   spine_devices <- if (config$cohort == "niv") NIV_DEVICES else NOSUPPORT_DEVICES
   wf %>% filter(tolower(device_category) %in% spine_devices, !is.na(fio2_set)) %>%
-    mutate(tidal_volume_set = NA_real_, peep_set = NA_real_, resp_rate_set = NA_real_, plateau_pressure_obs = NA_real_)
+    mutate(tidal_volume_set = NA_real_, peep_set = NA_real_, resp_rate_set = NA_real_,
+           plateau_pressure_obs = NA_real_, mean_airway_pressure_obs = NA_real_)
 } else wf %>% filter(!is.na(tidal_volume_set), tidal_volume_set > 0)
 wf <- wf %>% select(-device_category) %>%
   inner_join(base %>% select(hospitalization_id, t0, pfvc), by = "hospitalization_id") %>%
@@ -204,6 +205,17 @@ dp_daily <- wf %>%
   summarise(dp = max(dp, na.rm = TRUE), .groups = "drop")
 message("DP panel: ", nrow(dp_daily), " patient-days with a recorded plateau, ",
         n_distinct(dp_daily$hospitalization_id), " patients")
+
+# Daily mean AIRWAY pressure, the numerator of the oxygenation index. Like the
+# plateau it is never forward-filled, so this is recorded values only, and its
+# coverage is the binding constraint on any OI analysis. Daily median (the
+# typical support that day), to pair with the day's worst oxygenation.
+maw_daily <- wf %>%
+  filter(!is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
+  group_by(hospitalization_id, vent_day) %>%
+  summarise(map_aw = median(mean_airway_pressure_obs, na.rm = TRUE), .groups = "drop")
+message("Mean airway pressure panel: ", nrow(maw_daily), " patient-days with a recorded value, ",
+        n_distinct(maw_daily$hospitalization_id), " patients")
 # MAP: daily median (typical) from vitals.
 vit <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet")) %>%
   filter(vital_category == "map") %>%

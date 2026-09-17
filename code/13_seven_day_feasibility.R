@@ -30,6 +30,19 @@
 #      ventilated at day 7 (dropout-free, but a selected and sicker cohort).
 #      Neither alone is the answer; the gap between them is the dropout signal.
 #
+# Markers: PBWPFVC_INJ_MARKER is sf, creatinine, platelets, ne_equiv, dp, or one
+# of the two oxygenation indices the panel now carries,
+#   oi  = FiO2(%) x mean airway pressure / PaO2   (arterial gas: sparse, MNAR)
+#   osi = FiO2(%) x mean airway pressure / SpO2   (the saturation analogue: dense)
+# both rising with worse oxygenation.  Mean airway pressure is never
+# forward-filled, so both exist only where it was recorded, and question 1 above
+# is the one that decides whether OI is usable at a site at all.  Note what OI
+# buys and what it costs against the SF ratio: it credits the support needed for
+# the oxygenation, which is the point, but its numerator is a ventilator setting
+# the exposure moves arithmetically, so a bigger tidal volume raises mean airway
+# pressure and worsens OI with nothing happening in the lung.  The risk-set page
+# plots mean airway pressure and PEEP by day for exactly this reason.
+#
 # Needs the 7-day daily-grid panel:
 #   PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 Rscript code/13_biotrauma_panel.R
 # Usage:
@@ -72,12 +85,16 @@ okabe    <- c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#CC79A7", 
 theme_set(theme_minimal(base_size = 10))
 
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
-            bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
+            bilirubin = "bilirubin", sf = "sf", dp = "dp", oi = "oi", osi = "osi")[[MARKER]]
 y0_col <- c(creatinine = "creatinine_0", ne_equiv = "ne_equiv_0", platelets = "platelet_0",
-            bilirubin = "bilirubin_0", sf = "sf_0", dp = "dp_0")[[MARKER]]
+            bilirubin = "bilirubin_0", sf = "sf_0", dp = "dp_0", oi = "oi_0", osi = "osi_0")[[MARKER]]
 offset <- if (MARKER == "ne_equiv") 0.01 else 0
 marker_lab <- c(creatinine = "creatinine", platelets = "platelets", sf = "SF ratio",
-                ne_equiv = "norepinephrine equivalent", bilirubin = "bilirubin", dp = "driving pressure")[[MARKER]]
+                ne_equiv = "norepinephrine equivalent", bilirubin = "bilirubin", dp = "driving pressure",
+                oi = "oxygenation index", osi = "oxygen saturation index")[[MARKER]]
+# which way is worse, for reading the contrast: SF and platelets fall with injury,
+# the oxygenation indices and creatinine rise with it
+WORSE_IS_HIGHER <- MARKER %in% c("creatinine", "bilirubin", "ne_equiv", "dp", "oi", "osi")
 
 panel_path <- file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet"))
 if (!file.exists(panel_path))
@@ -117,9 +134,15 @@ riskset <- map_dfr(days, function(dd) {
          frac_outside_band = mean(vtpbw < BAND[1] | vtpbw > BAND[2], na.rm = TRUE),
          vtpfvc_q25 = quantile(rows$vtpfvc, 0.25, na.rm = TRUE),
          vtpfvc_median = median(rows$vtpfvc, na.rm = TRUE),
-         vtpfvc_q75 = quantile(rows$vtpfvc, 0.75, na.rm = TRUE))
+         vtpfvc_q75 = quantile(rows$vtpfvc, 0.75, na.rm = TRUE),
+         # the oxygenation-index numerator, recorded values only: its coverage is
+         # the constraint on OI, and it is also the channel through which the
+         # exposure can move OI without anything happening in the lung
+         n_map_aw = if ("map_aw" %in% names(rows)) sum(is.finite(rows$map_aw)) else NA_integer_,
+         map_aw_median = if ("map_aw" %in% names(rows)) median(rows$map_aw, na.rm = TRUE) else NA_real_,
+         peep_median = median(rows$peep, na.rm = TRUE))
 }) %>%
-  mutate(across(c(vtpbw_q25:vtpfvc_q75), ~ if_else(n_marker_patients >= MIN_CELL, ., NA_real_)),
+  mutate(across(c(vtpbw_q25:peep_median), ~ if_else(n_marker_patients >= MIN_CELL, ., NA_real_)),
          marker = MARKER, site = site_name)
 write_csv(riskset, file.path(final_dir, paste0("sevenday_riskset_", MARKER, "_", site_name, ".csv")))
 
@@ -289,6 +312,15 @@ p3 <- riskset %>%
        subtitle = "share of the at-risk patients with an observation that day (day 0 is the index)",
        x = "ventilator day", y = "coverage")
 
+p11 <- if (all(is.na(riskset$map_aw_median))) plot_spacer() else
+  riskset %>% select(day, `mean airway pressure` = map_aw_median, PEEP = peep_median) %>%
+  pivot_longer(-day) %>%
+  ggplot(aes(day, value, colour = name)) + geom_line(linewidth = 1) + geom_point() +
+  scale_colour_manual(values = okabe[c(5, 4)], name = NULL) +
+  labs(title = "The oxygenation-index numerator",
+       subtitle = "recorded mean airway pressure rises with the tidal volume; OI can worsen through it alone",
+       x = "ventilator day", y = "cmH2O, median")
+
 p4 <- riskset %>%
   ggplot(aes(day, vtpfvc_median)) +
   geom_ribbon(aes(ymin = vtpfvc_q25, ymax = vtpfvc_q75), alpha = 0.18, fill = okabe[6]) +
@@ -368,7 +400,7 @@ p10 <- {
 pdf_path <- file.path(final_dir, paste0("sevenday_feasibility_", MARKER, "_", site_name, ".pdf"))
 head_note <- paste0(marker_lab, "; groups under ", MIN_CELL, " patients suppressed")
 pdf(pdf_path, width = 12, height = 8, onefile = TRUE)
-print((p1 + p2) / (p3 + p4) +
+print((p1 + p2) / (p3 + p4 + p11) +
         plot_annotation(title = paste0(site_name, ": is there a cohort left at day ", JM_HORIZON, "?"),
                         subtitle = head_note) & theme(legend.position = "top"))
 print((p5 + p6) / (p7 + plot_spacer()) +
@@ -384,7 +416,8 @@ invisible(dev.off())
 # =============================================================================
 message("\nRisk set by day:")
 print(as.data.frame(riskset %>% select(day, n_at_risk, n_deaths_cum, n_extub_cum, n_marker_patients,
-                                       marker_coverage, vtpbw_median, frac_outside_band, vtpfvc_median) %>%
+                                       marker_coverage, vtpbw_median, frac_outside_band, vtpfvc_median,
+                                       n_map_aw, map_aw_median) %>%
                       mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 if (nrow(drift)) {
   message("\nSelection drift, day-2 cohort vs patients still ventilated at day ", JM_HORIZON,
