@@ -226,7 +226,7 @@ death_time <- base %>%
 if (is_synthetic) {
   message("*** SYNTHETIC SITE: adding a patient-level random intercept and slope to every marker (plumbing only). ***")
   marker_sd <- c(creatinine = 0.6, platelets = 0.4, bilirubin = 0.6, sf = 0.2, dp = 0.15,
-                 ne_equiv_peak = 0.8, oi = 0.3, osi = 0.3)
+                 ne_equiv_peak = 0.8, map_aw = 0.15)
   set.seed(20260913)
   synth_re <- base %>% select(hospitalization_id) %>%
     bind_cols(map_dfc(names(marker_sd), function(m) {
@@ -239,11 +239,19 @@ if (is_synthetic) {
                                          v = all_of(paste0("v_", m))), by = "hospitalization_id") %>%
       mutate(!!m := .data[[m]] * exp(u + v * vent_day)) %>% select(-u, -v)
   }
-  for (m in setdiff(names(marker_sd), c("dp", "oi", "osi"))) pf <- perturb(pf, m)
+  for (m in setdiff(names(marker_sd), c("dp", "map_aw"))) pf <- perturb(pf, m)
   dpp <- perturb(dpp, "dp")
-  oxy <- oxy %>% mutate(vent_day = period * STEP)
-  for (m in c("oi", "osi")) oxy <- perturb(oxy, m)
-  oxy <- oxy %>% select(-vent_day)
+  # The oxygenation indices are built FROM the other columns, so perturbing them
+  # directly would break the identity log index = log 100 + log(numerator) -
+  # log(ratio) that 13_oi_diagnostics.R checks. Perturb the numerator instead and
+  # rebuild each index from its perturbed ingredients: OI's PaO2 is untouched, so
+  # it moves with the numerator alone, while OSI is rebuilt over the perturbed SF.
+  oxy <- oxy %>% mutate(vent_day = period * STEP, map_aw_raw = map_aw)
+  oxy <- perturb(oxy, "map_aw") %>%
+    left_join(pf %>% select(hospitalization_id, period, sf_pert = sf), by = c("hospitalization_id", "period")) %>%
+    mutate(oi  = oi * map_aw / map_aw_raw,
+           osi = if_else(is.finite(sf_pert) & sf_pert > 0, 100 * map_aw / sf_pert, NA_real_)) %>%
+    select(-vent_day, -map_aw_raw, -sf_pert)
 }
 
 # =============================================================================
