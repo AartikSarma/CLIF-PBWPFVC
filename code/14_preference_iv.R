@@ -31,6 +31,18 @@
 #                  ICU x period interaction: how far a unit's practice in that
 #                  season sat from its own average and from the other units'
 #
+# The DOSE instrument (the read at UCSF, 2026-09-17). Whether a patient is
+# strain-limited is decided by their lung size, not by their clinicians: within
+# 6-8 mL/kg PBW dosing, VT/PFVC <= 11% is the concordant-lung patient, and the
+# strain-limiting rate of a unit in neighbouring seasons predicted nothing about
+# the next patient (first stage 0, F 0.002). What clinicians do vary, between
+# units and seasons, is the dose itself. So the second block instruments the
+# continuous strain (mean VT/PFVC, D) with the unit's dose preference: the mean
+# VT/PBW among the OTHER patients (adjacent periods; the unit over all time; the
+# site x period), and reports the mortality change per point of VT/PFVC and the
+# implied effect of the strain-limiting policy = coefficient x the mean shift
+# needed to bring every patient under the ceiling (script 09's construction).
+#
 # Estimators: the naive adjusted risk difference (linear probability, HC1), the
 # 2SLS risk difference per switch to strain-limiting (the complier effect), the
 # reduced form, and the first stage with its F statistic. Instrument checks: the
@@ -87,7 +99,8 @@ open_clif <- function(tbl) {
 # ---- exposure: the early strategy from the daily panel
 strat <- panel %>% filter(vent_day > GRACE, vent_day <= K_DAYS, is.finite(vtpfvc)) %>%
   group_by(hospitalization_id) %>%
-  summarise(n_days = n(), max_vtpfvc = max(vtpfvc), mean_vtpfvc = mean(vtpfvc), .groups = "drop") %>%
+  summarise(n_days = n(), max_vtpfvc = max(vtpfvc), mean_vtpfvc = mean(vtpfvc),
+            mean_vtpbw = mean(vt_ml / pbw), .groups = "drop") %>%
   mutate(A = as.integer(max_vtpfvc <= C_LOW))
 
 # ---- outcome: 60-day all-cause mortality from the index (synthetic: the simulated survival)
@@ -148,6 +161,16 @@ d <- d %>% left_join(adj, by = c("icu", "period_idx")) %>%
   group_by(period) %>%
   mutate(n_period = n(), z_site = if_else(n_period - 1L >= MIN_CELL, (sum(A) - A) / (n_period - 1L), NA_real_)) %>%   # site x period
   ungroup()
+# the dose instruments: the unit's mean VT/PBW (mL/kg) among the other patients
+dose_sums <- d %>% group_by(icu, period_idx) %>% summarise(sd_ = sum(mean_vtpbw), n = n(), .groups = "drop")
+dose_adj <- dose_sums %>% mutate(period_idx = period_idx - 1L) %>% rename(s_next = sd_, n_next = n) %>%
+  full_join(dose_sums %>% mutate(period_idx = period_idx + 1L) %>% rename(s_prev = sd_, n_prev = n), by = c("icu", "period_idx")) %>%
+  transmute(icu, period_idx, sd_adj = coalesce(s_prev, 0) + coalesce(s_next, 0), nd_adj = coalesce(n_prev, 0L) + coalesce(n_next, 0L))
+d <- d %>% left_join(dose_adj, by = c("icu", "period_idx")) %>%
+  mutate(zd_adj = if_else(!is.na(nd_adj) & nd_adj >= MIN_CELL, sd_adj / nd_adj, NA_real_)) %>%
+  group_by(icu)    %>% mutate(nn = n(), zd_unit = if_else(nn - 1L >= MIN_CELL, (sum(mean_vtpbw) - mean_vtpbw) / (nn - 1L), NA_real_)) %>% ungroup() %>%
+  group_by(period) %>% mutate(nn = n(), zd_site = if_else(nn - 1L >= MIN_CELL, (sum(mean_vtpbw) - mean_vtpbw) / (nn - 1L), NA_real_)) %>% ungroup() %>%
+  select(-nn)
 cells <- d %>% group_by(icu, period) %>% summarise(n = n(), rate = mean(A), deaths = sum(Y), .groups = "drop") %>%
   filter(n >= 10) %>% mutate(site = site_name)
 write_csv(cells, file.path(final_dir, paste0("iv_preference_cells_", site_name, ".csv")))
@@ -200,16 +223,42 @@ run_iv <- function(z, label, with_period, unit_fe = TRUE) {
     mutate(instrument = label, n = nrow(dd), n_deaths = sum(dd$Y), n_strain_limited = sum(dd$A),
            n_icus = n_distinct(dd$icu), n_periods = n_distinct(dd$period), .before = 1)
 }
+# the dose block: D (mean VT/PFVC, per point) instrumented by the unit's dose preference;
+# the policy effect = coefficient x mean shift to the ceiling among those above it
+run_iv_dose <- function(z, label, with_period, unit_fe = TRUE) {
+  dd <- d %>% filter(is.finite(.data[[z]]), is.finite(mean_vtpfvc))
+  if (nrow(dd) < 100 || sd(dd[[z]]) == 0) { message("dose instrument '", label, "' unusable here (", nrow(dd), " patients)"); return(NULL) }
+  rhs <- paste(V_RHS, fe_terms(dd, with_period, unit_fe))
+  naive <- hc(lm(as.formula(paste("Y ~ mean_vtpfvc +", rhs)), data = dd), "mean_vtpfvc")
+  iv    <- tsls(dd, "Y", "mean_vtpfvc", z, rhs)
+  shift <- mean(pmax(dd$mean_vtpfvc - C_LOW, 0))          # mean points above the ceiling (0 for those under it)
+  bind_rows(
+    naive %>% mutate(estimator = "naive adjusted RD per point of VT/PFVC", exposure = "mean VT/PFVC (D)"),
+    iv$est %>% mutate(estimator = "2SLS RD per point of VT/PFVC (dose instrument)", exposure = "mean VT/PFVC (D)",
+                      first_stage_F = iv$F, first_stage_coef = iv$first_stage$estimate),
+    iv$first_stage %>% mutate(estimator = "first stage (D on unit dose preference)", exposure = "dose instrument", first_stage_F = iv$F),
+    iv$est %>% mutate(estimate = estimate * shift, se = se * shift, lo = lo * shift, hi = hi * shift,
+                      estimator = sprintf("2SLS policy RD: everyone to <= %g%% (mean shift %.2f points)", C_LOW, shift),
+                      exposure = "strain-limiting policy", first_stage_F = iv$F)) %>%
+    mutate(instrument = label, n = nrow(dd), n_deaths = sum(dd$Y), n_strain_limited = sum(dd$A),
+           n_icus = n_distinct(dd$icu), n_periods = n_distinct(dd$period), mean_shift_points = shift, .before = 1)
+}
 res <- bind_rows(
+  run_iv_dose("zd_adj",  "unit dose preference, adjacent periods (primary)", with_period = TRUE),
+  run_iv_dose("zd_unit", "unit dose preference, all periods (no unit fixed effect)", with_period = calendar_ok, unit_fe = FALSE),
+  run_iv_dose("zd_site", "site dose preference by period", with_period = FALSE),
   run_iv("z_adj",  "ICU rate in the adjacent periods (primary)", with_period = TRUE),
   run_iv("z_icu",  "ICU x period leave-one-out rate (mechanically biased in small cells)", with_period = TRUE),
   run_iv("z_unit", "ICU leave-one-out rate, all periods (no unit fixed effect)", with_period = calendar_ok, unit_fe = FALSE),
   run_iv("z_site", "site x period leave-one-out rate", with_period = FALSE)) %>%
   mutate(c_low = C_LOW, k_days = K_DAYS, period_months = PERIOD_M, calendar_reliable = calendar_ok, site = site_name)
 write_csv(res, file.path(final_dir, paste0("iv_preference_", site_name, ".csv")))
-message("\nEstimates (60-day mortality; RD in probability units):")
-print(as.data.frame(res %>% select(instrument, estimator, estimate, lo, hi, p, first_stage_F, n) %>%
-                      mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+message("\nDose instruments (60-day mortality per point of VT/PFVC; the policy row = per-point effect x the mean shift to the ceiling):")
+print(as.data.frame(res %>% filter(grepl("dose", instrument)) %>% select(instrument, estimator, estimate, lo, hi, p, first_stage_F, n) %>%
+                      mutate(instrument = substr(instrument, 1, 30), across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+message("\nStrategy instruments (RD per switch to strain-limiting):")
+print(as.data.frame(res %>% filter(!grepl("dose", instrument)) %>% select(instrument, estimator, estimate, lo, hi, p, first_stage_F, n) %>%
+                      mutate(instrument = substr(instrument, 1, 30), across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 
 # ---- instrument checks: Brookhart balance and falsification
 smd <- function(x, g) { m1 <- mean(x[g == 1], na.rm = TRUE); m0 <- mean(x[g == 0], na.rm = TRUE)
@@ -232,14 +281,16 @@ message("\nBrookhart balance (standardized differences) and falsification (covar
 print(as.data.frame(balance %>% mutate(across(where(is.numeric), ~ signif(., 2)))), row.names = FALSE)
 
 # ---- figure
-fr <- res %>% filter(estimator %in% c("naive adjusted RD", "2SLS RD per switch (complier)")) %>%
-  mutate(estimator = factor(estimator, c("naive adjusted RD", "2SLS RD per switch (complier)")),
+fr <- res %>% filter(estimator %in% c("naive adjusted RD", "2SLS RD per switch (complier)") | grepl("policy RD", estimator)) %>%
+  mutate(estimator = if_else(grepl("policy RD", estimator), "2SLS policy RD (dose instrument)", estimator),
+         estimator = factor(estimator, c("naive adjusted RD", "2SLS RD per switch (complier)", "2SLS policy RD (dose instrument)")),
          instrument = str_wrap(instrument, 28))
 p1 <- ggplot(fr, aes(100 * estimate, estimator, colour = instrument)) +
   geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
   geom_pointrange(aes(xmin = 100 * lo, xmax = 100 * hi), position = position_dodge(width = 0.5)) +
   scale_colour_manual(values = okabe, name = NULL) +
-  labs(title = "60-day mortality risk difference, strain-limiting vs not", x = "percentage points (95% CI)", y = NULL) +
+  coord_cartesian(xlim = c(-60, 60)) +
+  labs(title = "60-day mortality risk difference, strain-limiting vs not", x = "percentage points (95% CI; axis clipped at +/- 60)", y = NULL) +
   theme(legend.position = "bottom")
 p2 <- ggplot(cells, aes(rate, deaths / n, size = n)) +
   geom_point(alpha = 0.6, colour = okabe[1]) + geom_smooth(method = "lm", se = TRUE, colour = okabe[4], linewidth = 0.7) +
