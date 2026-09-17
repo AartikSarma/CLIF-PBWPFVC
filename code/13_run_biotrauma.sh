@@ -28,8 +28,9 @@
 #   bash code/13_run_biotrauma.sh --dry-run
 # Knobs (environment): HORIZONS ("48"; add 72 24 for the sensitivities), FORMS
 #   ("pfvc"; vtpfvc = the same contrast told as VT/PFVC at a given VT/PBW;
-#   channels, disc_level available), MARKERS_INJ, MARKERS_JM, ITER,
-#   BURNIN, CHAINS, THIN, PAR, HEARTBEAT, FRESH (1: ignore every cache),
+#   channels, disc_level available), MARKERS_INJ, MARKERS_JM, ITER (2000 while
+#   debugging; 6000 for site runs), BURNIN (500; 1500), CHAINS, THIN, PAR,
+#   HEARTBEAT, FRESH (1: ignore every cache),
 #   SKIP_JM (1: no joint models), plus PBWPFVC_SITE_NAME / PBWPFVC_TABLES_PATH.
 # Logs: output/{site}_output/logs/biotrauma_{stamp}/{stage}.log and status.tsv.
 # =============================================================================
@@ -40,7 +41,10 @@ MARKERS_INJ=${MARKERS_INJ:-creatinine,platelets,ne_equiv,sf}     # comparator / 
 MARKERS_JM=${MARKERS_JM:-creatinine,platelets,any_pressor,sf}     # fit-script names (any_pressor = the hurdle's binary part)
 HORIZONS=${HORIZONS:-48}
 FORMS=${FORMS:-pfvc}
-ITER=${ITER:-10000}; BURNIN=${BURNIN:-2000}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}
+# Debugging chains (2026-09-17): the hazard block fails at any length, and the
+# longitudinal exposure terms need only a few hundred effective draws. Raise to
+# ITER=6000 BURNIN=1500 for the site runs (10000/2000 for the final pressor fits).
+ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}
 PAR=${PAR:-1}                  # fits at a time; raise to 2 once one fit has been watched to fit in memory
 HEARTBEAT=${HEARTBEAT:-300}
 FRESH=${FRESH:-0}              # 1: ignore every cache and redo everything
