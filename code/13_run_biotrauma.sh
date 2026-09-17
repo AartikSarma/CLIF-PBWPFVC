@@ -104,15 +104,27 @@ run_stage() {
   echo "[$(date +%H:%M:%S)] END   $name (exit $rc)"
   return 0
 }
-# skip_if <name> <file>: a cached stage (its output exists and FRESH is off)
+# skip_if <name> <file> [dep ...]: a cached stage: its output exists, FRESH is off,
+# and the output is newer than every script it depends on (a panel built by an
+# older panel script lacks columns the fits now need, and was reused once)
 skip_if() {
-  local name=$1 f=$2
+  local name=$1 f=$2; shift 2
   if [[ $FRESH == 0 && $DRY == 0 && -f "$f" ]]; then
+    local dep
+    for dep in "$@"; do
+      if [[ "$dep" -nt "$f" ]]; then
+        echo "[$(date +%H:%M:%S)] STALE  $name ($(basename "$f") is older than $(basename "$dep")); redoing"
+        return 1
+      fi
+    done
     echo "[$(date +%H:%M:%S)] CACHED $name ($(basename "$f") exists)"
     set_rc "$name" 0; printf '%s\t%s\t%s\t%s\n' "$name" cached cached 0 >> "$STATUS"; return 0
   fi
   return 1
 }
+PANEL_DEPS="code/13_biotrauma_panel.R code/13_biotrauma_grid.R code/10_panel_common.R utils/config.R"
+INJ_DEPS="code/13_injury_at_horizon.R code/13_biotrauma_grid.R code/10_panel_common.R utils/config.R"
+QUICK_DEPS="code/13_quick_lme.R code/13_biotrauma_grid.R utils/config.R"
 # number of usable fits (converged or rhat_fail) in a manifest; 0 when absent
 usable_fits() {
   local f=$1
@@ -124,20 +136,20 @@ tag_of() { local form=$1 h=$2; echo "${form}_${h}h_${SITE}"; }
 # ---- 1. panels (the 72-hour one also serves the quick LMEs)
 PANELS="$HORIZONS"; [[ " $HORIZONS " == *" 72 "* ]] || PANELS="$HORIZONS 72"
 for H in $PANELS; do
-  skip_if "panel_${H}h" "$INTER/jm_long_${H}h.parquet" || \
+  skip_if "panel_${H}h" "$INTER/jm_long_${H}h.parquet" $PANEL_DEPS || \
     run_stage "panel_${H}h" PBWPFVC_JM_HORIZON_H=$H -- Rscript code/13_biotrauma_panel.R
 done
 
 # ---- 2. comparator (all horizons inside the script)
 for m in ${MARKERS_INJ//,/ }; do
-  skip_if "injury_${m}" "$FINAL/injury_negctrl_${m}_${SITE}.csv" || \
+  skip_if "injury_${m}" "$FINAL/injury_negctrl_${m}_${SITE}.csv" $INJ_DEPS || \
     run_stage "injury_${m}" PBWPFVC_INJ_MARKER=$m -- Rscript code/13_injury_at_horizon.R
 done
 
 # ---- 3. quick LME (72-hour panel; both exposures inside the script)
 if [[ $(rc_of panel_72h) -eq 0 ]]; then
   for m in ${MARKERS_INJ//,/ }; do
-    skip_if "quick_${m}" "$FINAL/quick_sf_channels_${m}_${SITE}.csv" || \
+    skip_if "quick_${m}" "$FINAL/quick_sf_channels_${m}_${SITE}.csv" $QUICK_DEPS $INTER/jm_long_72h.parquet || \
       run_stage "quick_${m}" PBWPFVC_INJ_MARKER=$m PBWPFVC_JM_HORIZON_H=72 -- Rscript code/13_quick_lme.R
   done
 else
