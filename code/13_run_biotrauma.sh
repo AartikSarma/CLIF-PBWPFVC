@@ -18,7 +18,7 @@
 # outputs exist, and the fit script reuses every finished fit from its result
 # file, so a crash costs only the fit that was running. FRESH=1 redoes all.
 #
-# Memory: fits run PAR at a time (default 2), each with CHAINS processes, and the
+# Memory: fits run PAR at a time (default 1), each with CHAINS processes, and the
 # stored draws are thinned; a 7,000-patient site needs roughly 15-25 GB per fit.
 # Time at 10,000 iterations: about 40-80 min per lab/SF fit, longer for the
 # vasopressor part; eight fits two at a time is roughly 5-7 hours.
@@ -40,7 +40,7 @@ MARKERS_JM=${MARKERS_JM:-creatinine,platelets,any_pressor,sf}     # fit-script n
 HORIZONS=${HORIZONS:-48}
 FORMS=${FORMS:-pfvc}
 ITER=${ITER:-10000}; BURNIN=${BURNIN:-2000}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}
-PAR=${PAR:-2}                  # fits at a time
+PAR=${PAR:-1}                  # fits at a time; raise to 2 once one fit has been watched to fit in memory
 HEARTBEAT=${HEARTBEAT:-300}
 FRESH=${FRESH:-0}              # 1: ignore every cache and redo everything
 SKIP_JM=${SKIP_JM:-0}          # 1: panels, comparators, quick LMEs and summary only

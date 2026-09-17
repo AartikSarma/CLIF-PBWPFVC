@@ -145,7 +145,7 @@ USE_FRESH  <- identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")
 # Memory: each fit runs its chains as separate processes, and a 7,000-patient
 # joint model is large, so fits at a time is capped (PBWPFVC_JM_PAR, default 2)
 # below the core budget, and the stored draws are thinned (PBWPFVC_JM_THIN).
-N_FITS_MAX <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_PAR", "2")))
+N_FITS_MAX <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_PAR", "1")))
 N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
