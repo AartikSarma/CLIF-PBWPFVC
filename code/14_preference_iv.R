@@ -15,8 +15,16 @@
 #   exposure   A = 1 if the patient's VT/PFVC stayed <= C_LOW on every panel day
 #                  after the grace day through K_DAYS (the early strategy); the
 #                  continuous companion D = mean VT/PFVC over those days
-#   instrument Z = leave-one-out strain-limiting rate of the patient's ICU x
-#                  half-year cell (cells with < MIN_CELL other patients: NA)
+#   instrument Z = the strain-limiting rate of the patient's ICU in the ADJACENT
+#                  half-years (the periods before and after the patient's own), a
+#                  rate the patient is not part of; companions: the leave-one-out
+#                  rate of the patient's own ICU x period cell (mechanically biased
+#                  toward zero and below in small cells once fixed effects absorb
+#                  the between-cell variation, kept for the record), the ICU's
+#                  leave-one-out rate over all time (for sites whose dates are
+#                  shifted per patient, as MIMIC's are, where calendar cells do not
+#                  group contemporaries), and the site x period rate (single-unit
+#                  sites). Cells need MIN_CELL patients.
 #   outcome    Y = 60-day all-cause mortality
 #   covariates V = ns(age, 4) + sex + race + SOFA + log index SF + log PBW/PFVC,
 #                  with ICU and period fixed effects, so the instrument is the
@@ -116,12 +124,29 @@ d <- base %>%
 message("Cohort with an early-strategy assessment: ", nrow(d), " patients; strain-limiting ", sum(d$A), " (",
         round(100 * mean(d$A)), "%); deaths ", sum(d$Y), "; ICUs ", n_distinct(d$icu), "; periods ", n_distinct(d$period))
 
-# ---- the instrument: leave-one-out strain-limiting rate of the ICU x period cell
-d <- d %>% group_by(cell) %>%
-  mutate(n_cell = n(), z_icu = if_else(n_cell - 1L >= MIN_CELL, (sum(A) - A) / (n_cell - 1L), NA_real_)) %>%
+# ---- the instruments
+# is the calendar real? per-patient date shifting (MIMIC) spreads admissions over a
+# century and makes calendar cells meaningless; flag it and prefer the unit instrument
+calendar_ok <- diff(range(year(d$t0), na.rm = TRUE)) <= 30 && n_distinct(d$period) <= 60
+if (!calendar_ok) message("NOTE: admission dates span ", diff(range(year(d$t0), na.rm = TRUE)), " years over ",
+                          n_distinct(d$period), " periods: per-patient date shifting; period-based instruments are not meaningful here")
+d <- d %>% mutate(period_idx = as.integer(factor(period, levels = sort(unique(period)))))
+cell_sums <- d %>% group_by(icu, period_idx) %>% summarise(s = sum(A), n = n(), .groups = "drop")
+adj <- cell_sums %>% select(icu, period_idx, s, n) %>%
+  mutate(period_idx = period_idx - 1L) %>% rename(s_next = s, n_next = n) %>%   # the next period, keyed to this one
+  full_join(cell_sums %>% mutate(period_idx = period_idx + 1L) %>% rename(s_prev = s, n_prev = n), by = c("icu", "period_idx")) %>%
+  mutate(s_adj = coalesce(s_prev, 0L) + coalesce(s_next, 0L), n_adj = coalesce(n_prev, 0L) + coalesce(n_next, 0L)) %>%
+  select(icu, period_idx, s_adj, n_adj)
+d <- d %>% left_join(adj, by = c("icu", "period_idx")) %>%
+  mutate(z_adj = if_else(!is.na(n_adj) & n_adj >= MIN_CELL, s_adj / n_adj, NA_real_)) %>%      # PRIMARY: the unit's neighbouring seasons
+  group_by(cell) %>%
+  mutate(n_cell = n(), z_icu = if_else(n_cell - 1L >= MIN_CELL, (sum(A) - A) / (n_cell - 1L), NA_real_)) %>%   # own cell, leave-one-out
   ungroup() %>%
-  group_by(period) %>%   # the site-wide companion (period only), for sites with one ICU or no unit names
-  mutate(n_period = n(), z_site = if_else(n_period - 1L >= MIN_CELL, (sum(A) - A) / (n_period - 1L), NA_real_)) %>%
+  group_by(icu) %>%
+  mutate(n_icu = n(), z_unit = if_else(n_icu - 1L >= MIN_CELL, (sum(A) - A) / (n_icu - 1L), NA_real_)) %>%     # the unit over all time
+  ungroup() %>%
+  group_by(period) %>%
+  mutate(n_period = n(), z_site = if_else(n_period - 1L >= MIN_CELL, (sum(A) - A) / (n_period - 1L), NA_real_)) %>%   # site x period
   ungroup()
 cells <- d %>% group_by(icu, period) %>% summarise(n = n(), rate = mean(A), deaths = sum(Y), .groups = "drop") %>%
   filter(n >= 10) %>% mutate(site = site_name)
@@ -151,16 +176,16 @@ tsls <- function(dd, y, x, z, rhs) {
 }
 # fixed effects that exist in the frame: ICU when more than one unit, period only
 # for the ICU x period instrument (a period effect would absorb the site-wide one)
-fe_terms <- function(dd, with_period) paste(c(if (n_distinct(dd$icu) > 1) "+ factor(icu)",
+fe_terms <- function(dd, with_period, unit_fe = TRUE) paste(c(if (unit_fe && n_distinct(dd$icu) > 1) "+ factor(icu)",
                                              if (with_period && n_distinct(dd$period) > 1) "+ factor(period)"), collapse = " ")
-run_iv <- function(z, label, with_period) {
+run_iv <- function(z, label, with_period, unit_fe = TRUE) {
   dd <- d %>% filter(is.finite(.data[[z]]))
   if (nrow(dd) < 100 || sd(dd[[z]]) == 0) {
     message("instrument '", label, "' unusable here: ", nrow(dd), " patients in cells with >= ", MIN_CELL,
             " others (a small site or too many units for the period; lower PBWPFVC_IV_MIN_CELL or lengthen PBWPFVC_IV_PERIOD_MONTHS)")
     return(NULL)
   }
-  rhs <- paste(V_RHS, fe_terms(dd, with_period))
+  rhs <- paste(V_RHS, fe_terms(dd, with_period, unit_fe))
   naive <- hc(lm(as.formula(paste("Y ~ A +", rhs)), data = dd), "A")
   rf    <- hc(lm(as.formula(paste("Y ~", z, "+", rhs)), data = dd), z)
   iv_a  <- tsls(dd, "Y", "A", z, rhs)
@@ -176,9 +201,11 @@ run_iv <- function(z, label, with_period) {
            n_icus = n_distinct(dd$icu), n_periods = n_distinct(dd$period), .before = 1)
 }
 res <- bind_rows(
-  run_iv("z_icu",  "ICU x period leave-one-out rate", with_period = TRUE),
+  run_iv("z_adj",  "ICU rate in the adjacent periods (primary)", with_period = TRUE),
+  run_iv("z_icu",  "ICU x period leave-one-out rate (mechanically biased in small cells)", with_period = TRUE),
+  run_iv("z_unit", "ICU leave-one-out rate, all periods (no unit fixed effect)", with_period = calendar_ok, unit_fe = FALSE),
   run_iv("z_site", "site x period leave-one-out rate", with_period = FALSE)) %>%
-  mutate(c_low = C_LOW, k_days = K_DAYS, period_months = PERIOD_M, site = site_name)
+  mutate(c_low = C_LOW, k_days = K_DAYS, period_months = PERIOD_M, calendar_reliable = calendar_ok, site = site_name)
 write_csv(res, file.path(final_dir, paste0("iv_preference_", site_name, ".csv")))
 message("\nEstimates (60-day mortality; RD in probability units):")
 print(as.data.frame(res %>% select(instrument, estimator, estimate, lo, hi, p, first_stage_F, n) %>%
@@ -187,11 +214,11 @@ print(as.data.frame(res %>% select(instrument, estimator, estimate, lo, hi, p, f
 # ---- instrument checks: Brookhart balance and falsification
 smd <- function(x, g) { m1 <- mean(x[g == 1], na.rm = TRUE); m0 <- mean(x[g == 0], na.rm = TRUE)
   s <- sqrt((var(x[g == 1], na.rm = TRUE) + var(x[g == 0], na.rm = TRUE)) / 2); (m1 - m0) / s }
-# on the instrument that was usable (the ICU x period one when it has the patients)
-z_use <- if (sum(is.finite(d$z_icu)) >= 100) "z_icu" else "z_site"
+# on the primary instrument when it has the patients, else the unit one, else the site one
+z_use <- if (calendar_ok && sum(is.finite(d$z_adj)) >= 100) "z_adj" else if (sum(is.finite(d$z_unit)) >= 100) "z_unit" else "z_site"
 dz <- d %>% filter(is.finite(.data[[z_use]])) %>% mutate(z = .data[[z_use]], z_hi = as.integer(z > median(z)),
                                                         female = as.integer(sex_category == "Female"))
-bal_fe <- fe_terms(dz, with_period = z_use == "z_icu")
+bal_fe <- fe_terms(dz, with_period = z_use == "z_adj" || (z_use == "z_unit" && calendar_ok), unit_fe = z_use != "z_unit")
 covs <- c(age10 = "age (decades)", female = "female", sofa_total = "SOFA", log_sf_0 = "log index SF",
           ldisc_c = "log PBW/PFVC", bmi = "BMI")
 balance <- imap_dfr(covs, function(lab, v) {
@@ -206,11 +233,12 @@ print(as.data.frame(balance %>% mutate(across(where(is.numeric), ~ signif(., 2))
 
 # ---- figure
 fr <- res %>% filter(estimator %in% c("naive adjusted RD", "2SLS RD per switch (complier)")) %>%
-  mutate(estimator = factor(estimator, c("naive adjusted RD", "2SLS RD per switch (complier)")))
+  mutate(estimator = factor(estimator, c("naive adjusted RD", "2SLS RD per switch (complier)")),
+         instrument = str_wrap(instrument, 28))
 p1 <- ggplot(fr, aes(100 * estimate, estimator, colour = instrument)) +
   geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
   geom_pointrange(aes(xmin = 100 * lo, xmax = 100 * hi), position = position_dodge(width = 0.5)) +
-  scale_colour_manual(values = okabe[1:2], name = NULL) +
+  scale_colour_manual(values = okabe, name = NULL) +
   labs(title = "60-day mortality risk difference, strain-limiting vs not", x = "percentage points (95% CI)", y = NULL) +
   theme(legend.position = "bottom")
 p2 <- ggplot(cells, aes(rate, deaths / n, size = n)) +
