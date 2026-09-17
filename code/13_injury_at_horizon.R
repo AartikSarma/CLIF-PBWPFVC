@@ -86,13 +86,17 @@ source(here("code", "10_panel_common.R"))
 source(here("code", "13_biotrauma_grid.R"))   # pfvc_channels(), channels_equal_p()
 
 MARKER   <- Sys.getenv("PBWPFVC_INJ_MARKER", "creatinine")
-stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp"))
+stopifnot(MARKER %in% c("creatinine", "ne_equiv", "platelets", "bilirubin", "sf", "dp", "oi", "osi"))
 # the never-intubated control has no ventilator dose: the dose term and the
 # dose x piece interaction are dropped, intubation before H excludes like death
 HAS_DOSE <- config$cohort == "imv"
 if (!HAS_DOSE && MARKER == "dp") stop("driving pressure does not exist outside the ventilated cohort")
 HORIZONS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_INJ_HORIZONS_H", "48,24,72"), ",")[[1]])
-BASE_WINDOW_H <- 12
+# The baseline window. Twelve hours suits a marker drawn on every patient; the
+# oxygenation index needs an arterial gas AND a recorded mean airway pressure in
+# it, which most patients do not have, so widen it there (at the cost of a
+# baseline that is less clearly pre-exposure).
+BASE_WINDOW_H <- as.numeric(Sys.getenv("PBWPFVC_INJ_BASE_WINDOW_H", "12"))
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
 message("=== 13_injury_at_horizon: marker ", MARKER, ", horizons ", paste(HORIZONS, collapse = "/"), " h, site ", site_name, " ===")
 
@@ -124,9 +128,42 @@ series <- switch(MARKER,
       transmute(hospitalization_id, h = (t - t0n) / 3600, value)
   },
   dp = wf %>% filter(!is.na(plateau_pressure_obs), !is.na(peep_set), plateau_pressure_obs - peep_set > 0) %>%
-    transmute(hospitalization_id, h = hrs(recorded_dttm, t0), value = plateau_pressure_obs - peep_set)
+    transmute(hospitalization_id, h = hrs(recorded_dttm, t0), value = plateau_pressure_obs - peep_set),
+  # The oxygenation indices, both of the form 100 x mean airway pressure / ratio:
+  # OSI over the SF ratio, OI over the P/F ratio (since FiO2% x MAP / PaO2 is
+  # 100 x MAP / (PaO2 / FiO2)). Each oxygenation point is paired with the most
+  # recent recorded mean airway pressure within four hours, the same window the
+  # SF ratio already uses to pair SpO2 with FiO2. Mean airway pressure is never
+  # forward-filled, so a point with no recorded value in the window has no index.
+  osi = , oi = {
+    t0n <- b0 %>% transmute(hospitalization_id, t0n = as.numeric(t0))
+    ratio_dt <- if (MARKER == "osi") {
+      fio2_dt[spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
+        filter(!is.na(fio2_set)) %>%
+        mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set),
+               ratio = spo2_clamped / fio2_frac)
+    } else {
+      fio2_dt[pao2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
+        filter(!is.na(fio2_set)) %>%
+        mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set),
+               ratio = pao2 / fio2_frac)
+    }
+    ratio_dt <- ratio_dt %>% filter(is.finite(ratio), ratio > 0) %>%
+      select(hospitalization_id, t, ratio) %>% as.data.table()
+    setkey(ratio_dt, hospitalization_id, t)
+    maw_dt[ratio_dt, roll = 4 * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
+      filter(!is.na(map_aw)) %>%
+      mutate(value = 100 * map_aw / ratio) %>% filter(is.finite(value), value > 0) %>%
+      inner_join(t0n, by = "hospitalization_id") %>%
+      transmute(hospitalization_id, h = (t - t0n) / 3600, value)
+  }
 )
 worse_is <- if (MARKER %in% c("sf")) "lower" else "higher"   # direction of injury on the marker scale
+# SF is a component of OSI and the numerator of OI's ratio, so the baseline SF
+# covariate and the severity-interaction block are dropped for both indices:
+# adjusting an outcome for a piece of itself attenuates the exposure it is there
+# to isolate. Baseline OI/OSI (log_y0) carries the same severity information.
+SF_IS_OUTCOME <- MARKER %in% c("sf", "oi", "osi")
 
 # baseline: the first value in the first BASE_WINDOW_H hours (NE: the peak dose in that window, zero if none)
 baseline <- if (MARKER == "ne_equiv") {
@@ -208,7 +245,7 @@ fit_horizon <- function(H) {
                   counts$n_no_outcome_value, nrow(cc)))
   if (nrow(cc) < 50) return(list(counts = counts, rows = NULL))
 
-  base_terms <- c(if (HAS_DOSE) "vtpbw_H", "np_sofa", "log_sf_0", if (MARKER == "dp") "bmi")
+  base_terms <- c(if (HAS_DOSE) "vtpbw_H", "np_sofa", if (!SF_IS_OUTCOME) "log_sf_0", if (MARKER == "dp") "bmi")
   base_rhs <- paste(base_terms, collapse = " + ")
   demo_rhs <- "ns(age10, 4) + sex_category + race_category"
   # expo: the coefficient reported; extra: further right-hand-side terms (the baseline)
@@ -351,7 +388,7 @@ fit_horizon <- function(H) {
   }
   dose_ch <- if (HAS_DOSE) interactions("vtpbw_H_c", "vtpbw_H", "mean VT/PBW over [0, H), mL/kg, centred") else
     tibble(horizon_h = H, marker = MARKER, note = "skipped: no ventilator dose outside the ventilated cohort")
-  sf_ch   <- if (MARKER == "sf") tibble(horizon_h = H, marker = MARKER, note = "skipped: SF is this marker's own baseline") else
+  sf_ch   <- if (SF_IS_OUTCOME) tibble(horizon_h = H, marker = MARKER, note = "skipped: SF is this marker's own baseline or a component of it") else
     interactions("log_sf_0_c", "log_sf_0", "log baseline SF, centred")
 
   # baseline negative control, once: the pieces on the baseline marker, on everyone
@@ -361,7 +398,7 @@ fit_horizon <- function(H) {
     nc <- d %>% filter(!is.na(y0), !is.na(np_sofa), !is.na(sf_0), !is.na(age10), !is.na(sex_category),
                        !is.na(race_category), !is.na(height_cm), if (MARKER == "dp") !is.na(bmi) else TRUE)
     nc <- bind_cols(nc, pfvc_channels(nc, "log_pfvc"))
-    nc_rhs <- paste(c("np_sofa", if (MARKER != "sf") "log_sf_0", if (MARKER == "dp") "bmi"), collapse = " + ")
+    nc_rhs <- paste(c("np_sofa", if (!SF_IS_OUTCOME) "log_sf_0", if (MARKER == "dp") "bmi"), collapse = " + ")
     if (MARKER == "ne_equiv") {
       nc$any_0 <- as.integer(nc$y0 > 0); nc_lhs <- "any_0"; nc_fam <- "binomial"; nc_out <- "any pressor at baseline"
     } else { nc$log_y0 <- log(nc$y0); nc_lhs <- "log_y0"; nc_fam <- "gaussian"; nc_out <- "log baseline marker" }

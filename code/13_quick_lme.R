@@ -55,11 +55,15 @@ EXPOS  <- c(log_pfvc_sd = "log_pfvc", ldisc_sd = "ldisc")   # exposure column ->
 # mean over the window, centred, per point) at a given VT/PBW, the reader's form
 SIZE_EXPOS <- c(names(EXPOS), if (HAS_DOSE) "vtpfvc_c")
 y_col  <- c(creatinine = "creatinine", ne_equiv = "ne_equiv_peak", platelets = "platelets",
-            bilirubin = "bilirubin", sf = "sf", dp = "dp")[[MARKER]]
+            bilirubin = "bilirubin", sf = "sf", dp = "dp", oi = "oi", osi = "osi")[[MARKER]]
 y0_col <- c(creatinine = "creatinine_0", ne_equiv = "ne_equiv_0", platelets = "platelet_0",
-            bilirubin = "bilirubin_0", sf = "sf_0", dp = "dp_0")[[MARKER]]
+            bilirubin = "bilirubin_0", sf = "sf_0", dp = "dp_0", oi = "oi_0", osi = "osi_0")[[MARKER]]
 offset <- if (MARKER == "ne_equiv") 0.01 else 0
-own_lag <- c(sf = "l_log_sf", ne_equiv = "l_pressor")[MARKER]
+# SF is a component of OSI and of OI's ratio, so the lagged SF covariate is
+# dropped for the oxygenation indices as it is for SF itself: adjusting an
+# outcome for a piece of itself attenuates the exposure it is there to isolate.
+own_lag <- c(sf = "l_log_sf", ne_equiv = "l_pressor", oi = "l_log_sf", osi = "l_log_sf")[MARKER]
+SF_IS_OUTCOME <- MARKER %in% c("sf", "oi", "osi")
 expo_label <- c(log_pfvc = "log PFVC", ldisc = "log PBW/PFVC (VT/PFVC at a given VT/PBW)")
 
 panel_path <- file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet"))
@@ -191,7 +195,7 @@ for (EXPO in names(EXPOS)) {
                modifier = label, n_patients = n_distinct(d$id))
     }
     if (HAS_DOSE) dose_rows[[length(dose_rows) + 1]] <- interactions("vtpbw_c", "patient-mean VT/PBW, mL/kg, centred", dose_mean = "vtpbw_c")
-    if (MARKER != "sf") sf_rows[[length(sf_rows) + 1]] <- interactions("log_sf_0_c", "log index-day worst SF, centred")
+    if (!SF_IS_OUTCOME) sf_rows[[length(sf_rows) + 1]] <- interactions("log_sf_0_c", "log index-day worst SF, centred")
   }
 }
 chan   <- bind_rows(chan_rows);   nested <- bind_rows(nested_rows)

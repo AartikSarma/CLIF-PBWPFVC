@@ -238,6 +238,21 @@ fio2_dt <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parq
   transmute(hospitalization_id, fio2_set, t = as.numeric(recorded_dttm)) %>%
   as.data.table()
 setkey(fio2_dt, hospitalization_id, t)
+# Mean AIRWAY pressure and arterial PaO2 as keyed tables, for rolling either one
+# onto a measurement time (the oxygenation indices, 13_injury_at_horizon.R).
+# Mean airway pressure is never forward-filled, so these are recorded values only.
+maw_dt <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
+  filter(!is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
+  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  transmute(hospitalization_id, map_aw = mean_airway_pressure_obs, t = as.numeric(recorded_dttm)) %>%
+  as.data.table()
+setkey(maw_dt, hospitalization_id, t)
+pao2_dt <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+  filter(lab_category == "po2_arterial", !is.na(lab_value_numeric), lab_value_numeric > 0) %>%
+  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  transmute(hospitalization_id, pao2 = lab_value_numeric, t = as.numeric(lab_result_dttm)) %>%
+  as.data.table()
+setkey(pao2_dt, hospitalization_id, t)
 spo2_dt <- read_parquet(file.path(output_dir, "cohort_vitals_clean.parquet")) %>%
   filter(vital_category == "spo2", !is.na(vital_value)) %>%
   inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
