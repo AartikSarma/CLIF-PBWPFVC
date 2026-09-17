@@ -134,10 +134,19 @@ HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
 # death R-hat 3.2 with 472 deaths). The longitudinal submodel keeps the spline.
 HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
 stopifnot(HAZARD_AGE %in% c("linear", "spline"))
-# Resume: PBWPFVC_JM_RESUME=1 rebuilds every table from the fit bundles already on
-# disk (jm_fit_*.rds) without running the MCMC, for a stage whose fits finished
-# but whose collection failed; fits without a bundle are fitted as usual.
+# Every finished fit leaves a small result file (jm_result_*.rds) and a slim
+# bundle (jm_fit_*.rds: the posterior draws the report needs, not the model
+# object). A fit whose result file exists with the same chain settings is
+# reused, so a rerun after a crash costs only the fits that had not finished.
+#   PBWPFVC_JM_FRESH=1   ignore the cache and refit everything
+#   PBWPFVC_JM_RESUME=1  reuse a result file even if its chain settings differ
 USE_RESUME <- identical(Sys.getenv("PBWPFVC_JM_RESUME", "0"), "1")
+USE_FRESH  <- identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")
+# Memory: each fit runs its chains as separate processes, and a 7,000-patient
+# joint model is large, so fits at a time is capped (PBWPFVC_JM_PAR, default 2)
+# below the core budget, and the stored draws are thinned (PBWPFVC_JM_THIN).
+N_FITS_MAX <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_PAR", "2")))
+N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
 # Terms whose convergence the paper depends on; the manifest reports their R-hat
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
@@ -242,18 +251,16 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   stamp("start")
   bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
-  resumed <- USE_RESUME && file.exists(bundle_file)
-  if (resumed) {
-    # everything the summary below needs, from the bundle the worker saved
-    b <- readRDS(bundle_file)
-    stopifnot(identical(b$mod_form, MOD_FORM), identical(b$baseline_form, BASELINE_FORM), isTRUE(all.equal(b$horizon, JM_HORIZON)))
-    ld <- b$long_data; surv_cr <- b$surv_cr; counts <- b$counts
-    lme_fit <- b$lme; cox_cr <- b$cox; jm_fit <- b$jm; lme_formula <- b$lme_formula; mf_terms <- b$mf_terms
-    n_pts <- counts$n_patients; n_deaths <- counts$n_deaths
-    within_sd <- counts$dose_within_sd; frac_moved <- counts$frac_days_dose_moved_gt_0.5
-    acc_b <- mean(jm_fit$acc_rates$b, na.rm = TRUE)
-    stamp("resumed from ", basename(bundle_file), " (", n_pts, " patients, ", n_deaths, " deaths); no MCMC")
-  } else {
+  rf <- result_file(mk$name, model, adj_lab)
+  if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
+    r <- readRDS(rf)
+    same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
+    if (same || USE_RESUME) {
+      stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
+      return(r)
+    }
+    stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
+  }
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
     filter(period >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
@@ -402,7 +409,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # skips the pilot.
   fit_jm <- function(n_iter, n_burnin, n_chains, cores)
     jm(cox_cr, lme_fit, time_var = "vent_day", data_Surv = surv_cr, id_var = "id",
-       functional_forms = ff, n_iter = n_iter, n_burnin = n_burnin, n_thin = 1L,
+       functional_forms = ff, n_iter = n_iter, n_burnin = n_burnin, n_thin = N_THIN,
        n_chains = n_chains, cores = cores, control = list(MALA = USE_MALA))
   eta_txt <- ""
   if (USE_PILOT) {
@@ -424,7 +431,6 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   stamp(sprintf("JM done (%.1f min); random-effects acceptance %.3f, fixed-effects acceptance %.3f",
                 as.numeric(difftime(Sys.time(), t_jm, units = "mins")), acc_b,
                 mean(unlist(jm_fit$acc_rates$betas), na.rm = TRUE)))
-  }   # end of the fitting branch (skipped on resume)
 
   # --- estimates: every block of summary(jm) that carries a coefficient table
   s <- summary(jm_fit)
@@ -489,20 +495,24 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # terms with predvars: carries the ns() knots so the report can rebuild the
   # fixed-effects design on a prediction grid without re-deriving the basis
-  if (!resumed) {
-    mf_terms <- terms(model.frame(lme_formula, data = ld))
-    saveRDS(list(jm = jm_fit, lme = lme_fit, cox = cox_cr, marker = mk, model = model, binary = isTRUE(mk$binary),
-                 adjusted = adjusted, counts = counts, long_data = ld, surv_cr = surv_cr,
-                 lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
-                 mod_form = MOD_FORM,
-                 baseline_form = BASELINE_FORM, horizon = JM_HORIZON),
-            bundle_file)
-  }
+  # slim bundle: the posterior draws the report uses (fixed effects, association),
+  # the LME (for the coefficient names), the long data and the terms object; not
+  # the joint-model object, whose design matrices and quadrature arrays are what
+  # made the full bundle gigabytes
+  mf_terms <- terms(model.frame(lme_formula, data = ld))
+  saveRDS(list(jm = list(mcmc = jm_fit$mcmc[c("betas1", "alphas")], acc_rates = jm_fit$acc_rates),
+               lme = lme_fit, marker = mk, model = model, binary = isTRUE(mk$binary),
+               adjusted = adjusted, counts = counts, long_data = ld,
+               lme_formula = lme_formula, mf_terms = mf_terms, assoc_form = ASSOC_FORM,
+               mod_form = MOD_FORM, baseline_form = BASELINE_FORM, horizon = JM_HORIZON,
+               n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN),
+          bundle_file)
+  rm(jm_fit, surv_cr, cox_cr); invisible(gc())
   result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
                  counts = counts, estimates = est, absorption = absorption, scaling = scaling,
                  max_rhat = max_rhat, key_rhat = key_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
-                 acc_b = acc_b)
+                 acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN)
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
   saveRDS(result, result_file(mk$name, model, adj_lab))
@@ -533,7 +543,7 @@ run_job <- function(marker, model, adjusted) {
 # as many fits at once as the core budget allows (N_CORES / N_CHAINS). Worker
 # output is forwarded to this console (outfile = ""), so stamps and heartbeats
 # from concurrent fits interleave, each prefixed by its fit tag.
-N_FITS_PAR <- max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS))
+N_FITS_PAR <- max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS, N_FITS_MAX))
 if (N_FITS_PAR > 1L) {
   message("Running ", nrow(jobs), " fits, ", N_FITS_PAR, " at a time (", N_CHAINS, " chains each)")
   cl <- makeCluster(N_FITS_PAR, type = "PSOCK", outfile = "")
@@ -550,8 +560,8 @@ if (N_FITS_PAR > 1L) {
   try(stopCluster(cl), silent = TRUE)
   if (is.null(results)) results <- pmap(jobs, function(marker, model, adjusted) {
     f <- result_file(markers[[marker]]$name, model, adj_label(adjusted))
-    if (file.exists(f) && file.mtime(f) >= RUN_START) readRDS(f) else
-      list(status = "failed", reason = "cluster failed before this fit's result was written; rerun with PBWPFVC_JM_RESUME=1",
+    if (file.exists(f)) readRDS(f) else
+      list(status = "failed", reason = "cluster failed before this fit's result was written; rerun (finished fits are cached)",
            counts = tibble(marker = markers[[marker]]$name, model = model, adjustment = adj_label(adjusted)))
   })
 } else {
@@ -566,7 +576,7 @@ manifest <- map_dfr(results, function(r)
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
-         n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, site = site_name)
+         n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")
@@ -589,7 +599,10 @@ merge_write <- function(new, name) {
     old <- read_csv(path, show_col_types = FALSE)
     keys <- new %>% distinct(marker, model, adjustment)
     old  <- old %>% anti_join(keys, by = c("marker", "model", "adjustment"))
-    new  <- bind_rows(old, new %>% mutate(across(any_of(names(old)), ~ .)))
+    # both as text: the CSV holds text, and a column that is all NA reads back as
+    # logical, which bind_rows refuses to combine with the new table's type
+    as_text <- function(d) d %>% mutate(across(everything(), as.character))
+    new  <- bind_rows(as_text(old), as_text(new))
     message("  ", name, ": kept ", nrow(old), " rows from other markers")
   }
   if (nrow(new)) write_csv(new, path)
