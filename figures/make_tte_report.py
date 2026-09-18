@@ -1,5 +1,5 @@
 """Build a self-contained, teaching-oriented HTML report for the longitudinal
-target-trial emulation (script 10).  Reads the R source verbatim (sliced by
+target-trial emulation (the TTE (30_tte_common)).  Reads the R source verbatim (sliced by
 section) and pulls every number from the MIMIC/UCSF `final/` result CSVs --
 no new analysis is run, nothing is transcribed by hand.
 
@@ -21,7 +21,7 @@ def finalp(site, stub):
 
 # ---- load every result CSV for both sites -----------------------------------
 # Tolerate either the legacy 'stress_limiting' identifier or the renamed
-# 'strain_limiting' one: script 10's column rename lands on the next re-run, so a
+# 'strain_limiting' one: the TTE (30_tte_common)'s column rename lands on the next re-run, so a
 # report generated before that re-run still reads the old-named CSVs correctly.
 def _norm(df):
     df = df.rename(columns=lambda c: c.replace("stress_limiting", "strain_limiting"))
@@ -58,7 +58,7 @@ for s in SITES:
         "pf":       L_opt("tte_ccw_sens_pf"),
         "mtp":      L_opt("tte_ccw_sens_mtp"),
         "balance":  L_opt("tte_ccw_balance"),
-        # 11.X discordance-HTE (the primary heterogeneity analysis) + its sensitivities
+        # 37_tte_discordance_benefit discordance-HTE (the primary heterogeneity analysis) + its sensitivities
         "disc_hte":   L_opt("tte_ccw_disc_hte"),
         "disc_grad":  L_opt("tte_ccw_disc_gradient"),
         "disc_curve": L_opt("tte_ccw_disc_cate_curve"),
@@ -72,8 +72,8 @@ for s in SITES:
 
 # ---- R source, sliced by MARKER across the SPLIT scripts ---------------------
 # The 1121-line monolith code/10_longitudinal_tte.R was refactored (verified
-# byte-identical in behavior) into a shared engine, 10_tte_common.R, plus one leaf
-# per analysis (11.A..11.N) and a driver (11_run_all.R). This report reads those
+# byte-identical in behavior) into a shared engine, 30_tte_common.R, plus one leaf
+# per analysis (35_tte_primary..11.N) and a driver (32_tte_run_all.R). This report reads those
 # split files -- never the retired monolith. Each named file is read into its own
 # line list (FILES[name] -> lines); leaves are shown whole, while the long engine
 # file is shown by marker-bounded sub-slice.
@@ -81,8 +81,8 @@ import re as _re
 
 # The files the walkthrough quotes from, each loaded once into a line list.
 _FILE_NAMES = [
-    "10_tte_common.R", "11.A_primary.R", "11.B_diagnostics.R",
-    "11.L_sens_trim.R", "11.N_refit_boot.R", "11_run_all.R",
+    "30_tte_common.R", "35_tte_primary.R", "36_tte_diagnostics.R",
+    "11.L_sens_trim.R", "11.N_refit_boot.R", "32_tte_run_all.R",
 ]
 FILES = {}
 for _nm in _FILE_NAMES:
@@ -94,7 +94,7 @@ for _nm in _FILE_NAMES:
     with open(_path) as _f:
         FILES[_nm] = _f.readlines()
 
-# Engine banner markers in 10_tte_common.R look like a `# ====` rule line, then
+# Engine banner markers in 30_tte_common.R look like a `# ====` rule line, then
 # `# 10b. Title`, then another `# ====` rule. Within a file we locate the `# 10<key>.`
 # header and slice to the line BEFORE the next top-level (different-letter) section,
 # so a request for e.g. 10d bundles any numbered sub-sections up to the next letter.
@@ -270,7 +270,7 @@ def subgroup_table():
 
 def wcap_table():
     if any(R[s]["wcap"] is None for s in SITES):
-        return "<p class='muted'>Weight-cap sensitivity not run at every site (11_sens_censoring covers it).</p>"
+        return "<p class='muted'>Weight-cap sensitivity not run at every site (tte_sens_censoring covers it).</p>"
     rows = ""
     caps = sorted({float(c) for s in SITES for c in R[s]["wcap"].weight_cap})
     for cp in caps:
@@ -1089,7 +1089,7 @@ def fig_cuminc(site):
                 f"open the PDF at <code>{rel}</code>.]</i></p>")
 
 # =============================================================================
-# 11.X discordance-HTE (the primary heterogeneity analysis) -- tables + figure
+# 37_tte_discordance_benefit discordance-HTE (the primary heterogeneity analysis) -- tables + figure
 # =============================================================================
 DISC_ORDER = ["Concordant", "Mid", "Discordant"]
 
@@ -1128,7 +1128,7 @@ def disc_hte_table():
 def disc_dose_table():
     """Dose-correction decomposition by discordance tertile."""
     if any(R[s]["disc_dose"] is None for s in SITES):
-        return "<p class='muted'>[Dose-correction table computes on the next 11.X re-run.]</p>"
+        return "<p class='muted'>[Dose-correction table computes on the next 37_tte_discordance_benefit re-run.]</p>"
     head = ("<table class='sg'><thead><tr><th>Discordance</th>"
             + "".join(f"<th colspan=3>{s}</th>" for s in SITES) + "</tr>"
             + "<tr><th></th>" + "".join("<th>VT/PBW</th><th>VT/PFVC %</th><th>cut, mL/kg</th>" for s in SITES)
@@ -1203,17 +1203,17 @@ def fig_cate_curve():
         return _skip(name, f"{type(e).__name__}: {e}")
 
 def disc_section():
-    """The whole discordance-HTE subsection, or a graceful note if 11.X CSVs are absent."""
+    """The whole discordance-HTE subsection, or a graceful note if 37_tte_discordance_benefit CSVs are absent."""
     if not disc_have():
         return ("<h3>Heterogeneity — who benefits most (PBW/PFVC discordance)</h3>"
-                "<p class='muted'>[The discordance-HTE (script 11.X) tables and figure populate on the next "
-                "11.X re-run; the result CSVs are not yet present for both sites.]</p>")
+                "<p class='muted'>[The discordance-HTE (script 37_tte_discordance_benefit) tables and figure populate on the next "
+                "37_tte_discordance_benefit re-run; the result CSVs are not yet present for both sites.]</p>")
     g_uc = R["UCSF"]["disc_grad"].iloc[0]; g_mi = R["MIMIC"]["disc_grad"].iloc[0]
     robust = disc_robust_summary().replace("<p>", "").replace("</p>", "")
     return f"""
 <h3>Heterogeneity — the benefit concentrates in the misdosed</h3>
 <p>The age/sex subgroup gradient above is the discrete shadow of a continuous effect modifier: <b>how badly PBW
-over-estimates the lung</b>, measured by the PBW/PFVC discordance. Script 11.X re-estimates the strain-limiting
+over-estimates the lung</b>, measured by the PBW/PFVC discordance. Script 37_tte_discordance_benefit re-estimates the strain-limiting
 effect as a function of discordance, from one pooled, SOFA-adjusted, IPC-weighted standardized marginal
 structural model. The benefit is present across the range but <b>concentrates in the misdosed</b> — the patients
 a fixed VT/PBW dose strains most.</p>
@@ -1510,16 +1510,16 @@ parts.append('<h2 id="walk">3 · Methods III — implementation</h2>'
    "called the <b>strain-limiting</b> arm throughout — in the text, figures, tables, and in the code and output "
    "files (as <code>strain_limiting</code>)."))
 
-# 3.1 the shared engine -- code/10_tte_common.R
+# 3.1 the shared engine -- code/30_tte_common.R
 parts.append(f"""
 <h3 id="s-common">3.1 · The shared analysis engine</h3>
 <p>A single file holds everything the downstream scripts depend on: the setup and design parameters, the cohort
 and outcome, the daily confounder panel, the cloning-and-weighting builder, the marginal-structural-model engine,
 and the one-time build of the primary design. The sub-sections below follow it in source order.</p>
 
-<h4>Setup &amp; design knobs {linetag('10_tte_common.R', 'header')}</h4>
+<h4>Setup &amp; design knobs {linetag('30_tte_common.R', 'header')}</h4>
 <p>Before any library loads, the script pins every BLAS backend to a single thread. This matters because the
-primary bootstrap (in <code>11.A</code>) spawns many worker <i>processes</i>; if each also launched multithreaded
+primary bootstrap (in <code>35_tte_primary</code>) spawns many worker <i>processes</i>; if each also launched multithreaded
 linear algebra you would oversubscribe the CPU and the run can destabilize on macOS. The knobs that define the
 trial are gathered here so the sensitivity leaves downstream are one-line changes:</p>
 <ul>
@@ -1533,10 +1533,10 @@ dominating (revisited in the weight-cap sensitivity, <code>11.C</code>).</li>
 <li><code>HORIZON=28</code> days (primary outcome window — the bulk of ICU mortality, ≈ the adherence window); <code>MAX_VENT_DAY=27</code> — the adherence/ventilation window. <code>TRIM_ALPHA=0.02</code> sets the common-support trim; <code>DEESC_FRAC=0.05</code> the de-escalation MTP shift.</li>
 </ul>
 <p>The L'Ecuyer-CMRG RNG kind is chosen because it gives independent, reproducible streams across the parallel
-bootstrap workers (<code>clusterSetRNGStream</code> in <code>11.A</code> relies on it).</p>
-{code_slice('10_tte_common.R', 'header')}
+bootstrap workers (<code>clusterSetRNGStream</code> in <code>35_tte_primary</code> relies on it).</p>
+{code_slice('30_tte_common.R', 'header')}
 
-<h4>Cohort, baseline covariates, and outcome {linetag('10_tte_common.R', '10a')}</h4>
+<h4>Cohort, baseline covariates, and outcome {linetag('30_tte_common.R', '10a')}</h4>
 <p>This reads the cross-sectional analysis file (one row per hospitalization from script 03) and defines the
 <b>outcome</b> and the <b>baseline covariates</b>. The outcome is the day of death within 28 days, computed
 from <code>death_dttm − recorded_dttm</code>. Patients with no death in the window are right-censored at 28 days.
@@ -1550,9 +1550,9 @@ numerator/denominator weight models as fixed terms.</p>
  "On the synthetic CLIF dataset (and <i>only</i> there) the script simulates a long-tailed survival outcome, "
  "because synthetic CLIF's mortality fields are known to be malformed. On any real site this branch is skipped "
  "and real <code>death_dttm</code> is used; the MIMIC and UCSF numbers in this report use real deaths.")}
-{code_slice('10_tte_common.R', '10a')}
+{code_slice('30_tte_common.R', '10a')}
 
-<h4>The daily exposure and confounder panel {linetag('10_tte_common.R', '10b')}</h4>
+<h4>The daily exposure and confounder panel {linetag('30_tte_common.R', '10b')}</h4>
 <p>This is the heart of the time-varying design. It assembles one row per <b>patient-day on the ventilator</b>,
 carrying (a) the day's exposure — median VT/PFVC from the respiratory-support waterfall — and (b) the day's
 confounders. The confounders are exactly the variables a clinician watches when deciding whether to push or relax
@@ -1568,10 +1568,10 @@ within a 4-hour window by a <code>data.table</code> rolling join (<code>roll = 4
 <p>These are the <b>treatment-confounder feedback</b> variables: they are caused by past exposure <i>and</i>
 predict both future exposure and the outcome — precisely what ordinary regression adjustment mishandles and what
 the MSM is built to handle. The block also computes the panel-drop diagnostic (<code>panel_drop_summary</code>,
-how much of the daily panel is list-deleted for incompleteness), surfaced as a CSV by <code>11.B</code>.</p>
-{code_slice('10_tte_common.R', '10b')}
+how much of the daily panel is list-deleted for incompleteness), surfaced as a CSV by <code>36_tte_diagnostics</code>.</p>
+{code_slice('30_tte_common.R', '10b')}
 
-<h4>Cloning, censoring, and the weights (<code>arm_build</code>) {linetag('10_tte_common.R', '10c')}</h4>
+<h4>Cloning, censoring, and the weights (<code>arm_build</code>) {linetag('30_tte_common.R', '10c')}</h4>
 <p><code>arm_build()</code> is the cloning engine. Called once per ceiling, it produces, for that arm, each clone's
 deviation day and a daily cumulative weight. Three design choices inside it are worth dwelling on:</p>
 <h5>The weight model uses <i>lagged</i> confounders only</h5>
@@ -1592,9 +1592,9 @@ weight <code>cumw</code>, and clamped to [1/cap, cap].</p>
 exceedance as a permanent deviation; <code>"corrected"</code> forgives a transient excursion if the clinician
 brings VT/PFVC back under the ceiling by the next day. The deviation-rule sensitivity (<code>11.E</code>) reports
 both.</p>
-{code_slice('10_tte_common.R', '10c')}
+{code_slice('30_tte_common.R', '10c')}
 
-<h4>The marginal structural model and the liberation endpoint {linetag('10_tte_common.R', '10d')}</h4>
+<h4>The marginal structural model and the liberation endpoint {linetag('30_tte_common.R', '10d')}</h4>
 <p><code>make_long()</code> expands each clone into person-day rows up to its event or censoring day, attaching
 the carried-forward IPC weight as <code>ipcw</code>. <code>build_design()</code> assembles both arms and the
 competing-risk liberation table; <code>ci_curve()</code> then fits the MSM: a <b>weighted pooled logistic
@@ -1611,20 +1611,20 @@ day-28 cumulative incidence in each arm is reconstructed from the fitted daily h
  "censoring events are deviation, the overlap restriction, and the administrative 28-day horizon. Liberation is instead reported as a "
  "<b>competing-risk</b> secondary: an Aalen-Johansen cumulative-incidence function (<code>cif_lib</code>) with "
  "death as the competing event, IPC-weighted, differenced between arms.")}
-{code_slice('10_tte_common.R', '10d')}
+{code_slice('30_tte_common.R', '10d')}
 
-<h4>Building the primary design {linetag('10_tte_common.R', '10e')}</h4>
+<h4>Building the primary design {linetag('30_tte_common.R', '10e')}</h4>
 <p>The tail of the engine runs the primary design once — <code>build_design(C_LOW, C_HIGH, …)</code> — and
 exposes <code>long_all</code>, <code>lib_all</code>, the point estimates <code>point</code> / <code>lib_pt</code>,
 the subgroup point estimates <code>sg_point</code>, and the patient id list <code>ids</code>. The bootstrap
-itself lives in <code>11.A</code>; everything here is the expensive shared build that <code>11_run_all.R</code>
+itself lives in <code>35_tte_primary</code>; everything here is the expensive shared build that <code>32_tte_run_all.R</code>
 pays for exactly once.</p>
-{code_slice('10_tte_common.R', '10e')}
+{code_slice('30_tte_common.R', '10e')}
 """)
 
-# 3.2 primary -- code/11.A_primary.R
+# 3.2 primary -- code/35_tte_primary.R
 parts.append(f"""
-<h3 id="s-primary">3.2 · Primary estimate &amp; bootstrap — <code>code/11.A_primary.R</code> {linetag('11.A_primary.R')}</h3>
+<h3 id="s-primary">3.2 · Primary estimate &amp; bootstrap — <code>code/35_tte_primary.R</code> {linetag('35_tte_primary.R')}</h3>
 <p>The first leaf carries the <b>primary result</b>: the cluster bootstrap, the overall RD, the E-value, the
 subgroup CIs, and the cumulative-incidence figure. Confidence intervals come from a <b>cluster bootstrap
 that resamples patients</b> (not patient-days) with replacement — the unit of independence is the patient, and
@@ -1644,12 +1644,12 @@ non-reproducible CIs. It also writes <code>tte_ccw_overall</code>, <code>tte_ccw
  "of true uncertainty (it ignores the variance of estimating the weights). The point estimates are unaffected, "
  "and given how far the CIs sit from zero (below), a fully-nested bootstrap would not change any conclusion — "
  "but it is the honest caveat to state, and a refit-per-resample calibration quantifies it.")}
-{code_file('11.A_primary.R')}
+{code_file('35_tte_primary.R')}
 """)
 
-# 3.3 diagnostics -- code/11.B_diagnostics.R
+# 3.3 diagnostics -- code/36_tte_diagnostics.R
 parts.append(f"""
-<h3 id="s-diag">3.3 · Diagnostics — <code>code/11.B_diagnostics.R</code> {linetag('11.B_diagnostics.R')}</h3>
+<h3 id="s-diag">3.3 · Diagnostics — <code>code/36_tte_diagnostics.R</code> {linetag('36_tte_diagnostics.R')}</h3>
 <p>These are the numbers to inspect <i>before</i> trusting any arm's estimate. This script runs the full set of
 positivity and balance diagnostics: the per-arm weight summary (<code>tte_ccw_diagnostics</code>), the
 <b>structural</b> and <b>empirical positivity scans by age tertile</b>
@@ -1662,10 +1662,10 @@ cumulative weight, and the <b>effective sample-size fraction</b> — the share o
 the weighting. As §4 shows, the strain-limiting arm retains ESS ≈ 0.54 overall at both sites — but the by-age
 scan is where the real story is: overlap is healthy in the young/middle cells and collapses in the oldest tertile
 of the strain arm.</p>
-{code_file('11.B_diagnostics.R')}
+{code_file('36_tte_diagnostics.R')}
 """)
 
-# 3.4 sensitivities -- code/11.C - 11.M
+# 3.4 sensitivities -- code/11.C - 33_tte_ceiling
 SENS_ROWS = [
     ("11.C_sens_weightcap.R",     "Per-day IPCW truncation cap {3, 5, 10, ∞}",                       "tte_ccw_sens_weightcap"),
     ("11.D_sens_ceiling_grace.R", "Ceiling/grace grid (strain {10,11,12} × permissive {14,16} × grace {1,2,3})", "tte_ccw_sens_ceiling_grace"),
@@ -1684,7 +1684,7 @@ sens_table = ("<table><thead><tr><th>Script</th><th>What it varies</th><th>Outpu
                         for nm, what, csv in SENS_ROWS)
               + "</tbody></table>")
 parts.append(f"""
-<h3 id="s-sens">3.4 · Sensitivity analyses — <code>code/11.C</code>–<code>11.M</code></h3>
+<h3 id="s-sens">3.4 · Sensitivity analyses — <code>code/11.C</code>–<code>33_tte_ceiling</code></h3>
 <p>Each sensitivity is its own leaf: it sources the engine (or short-circuits if already loaded), re-runs the
 design with <b>one knob changed</b>, and writes a single CSV. Each is tabulated in §4. The eleven leaves:</p>
 {sens_table}
@@ -1695,23 +1695,23 @@ below so the source-common pattern is visible, and the rest follow the same temp
 {code_file('11.L_sens_trim.R')}
 """)
 
-# 3.5 reproducibility & orchestration -- 11.N + 11_run_all.R
+# 3.5 reproducibility & orchestration -- 11.N + 32_tte_run_all.R
 parts.append(f"""
-<h3 id="s-repro">3.5 · Reproducibility &amp; orchestration — <code>11.N_refit_boot.R</code> + <code>11_run_all.R</code></h3>
+<h3 id="s-repro">3.5 · Reproducibility &amp; orchestration — <code>11.N_refit_boot.R</code> + <code>32_tte_run_all.R</code></h3>
 <p><code>11.N_refit_boot.R</code> {linetag('11.N_refit_boot.R')} is the env-gated refit-bootstrap calibration: the
-primary bootstrap (<code>11.A</code>) holds the IPCW model fixed, so it omits weight-estimation uncertainty; this
+primary bootstrap (<code>35_tte_primary</code>) holds the IPCW model fixed, so it omits weight-estimation uncertainty; this
 optional leaf <i>refits the weight models per replicate</i> (overall RD only, reduced N) to measure how much the
 fixed-weight CI understates. It is OFF by default — enable with <code>PBWPFVC_REFIT_BOOT=1</code>, size with
-<code>PBWPFVC_REFIT_N</code> — and reuses the <code>overall</code> object written by <code>11.A</code> for the
-width ratio (sourcing <code>11.A</code> first when run standalone).</p>
-<p><code>11_run_all.R</code> {linetag('11_run_all.R')} is the driver: it builds the engine once and then runs each
+<code>PBWPFVC_REFIT_N</code> — and reuses the <code>overall</code> object written by <code>35_tte_primary</code> for the
+width ratio (sourcing <code>35_tte_primary</code> first when run standalone).</p>
+<p><code>32_tte_run_all.R</code> {linetag('32_tte_run_all.R')} is the driver: it builds the engine once and then runs each
 analysis script in order. Every script loads the engine through a small loader that builds it on first use,
 caches the result to disk keyed by site and cohort definition, and restores it (in well under a second) on later
 runs — so the expensive cohort/panel/weight build is paid once per site and re-checked automatically whenever the
 inputs change. The only sources of randomness are a synthetic-data survival simulation (used only on the synthetic
 test dataset, never on real sites) and the bootstrap, which runs on fixed reproducible random-number streams, so
 the order in which the scripts run does not change any result.</p>
-{code_file('11_run_all.R')}
+{code_file('32_tte_run_all.R')}
 """)
 
 # --- 4. results --------------------------------------------------------------
@@ -2093,7 +2093,7 @@ parts.append(f"""
 <div class="foot">
 Generated by <code>figures/make_tte_report.py</code> from the result CSVs in
 <code>output/&lt;site&gt;_output/final/</code> and the verbatim source of the analysis scripts
-(<code>code/10_tte_common.R</code> + <code>code/11.*_*.R</code>). No analysis was re-run to build this report.
+(<code>code/30_tte_common.R</code> + <code>code/11.*_*.R</code>). No analysis was re-run to build this report.
 Cohorts: MIMIC (n={int(O['MIMIC']['n_patients']):,}), UCSF (n={int(O['UCSF']['n_patients']):,}).
 </div>
 </body></html>

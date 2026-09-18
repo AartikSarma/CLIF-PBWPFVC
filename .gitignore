@@ -58,8 +58,8 @@ code/explore_*.R
 
 # cross-cohort pooling: run centrally by the coordinator, kept local (not a
 # per-site deliverable)
-code/pooled_estimates.R
-code/pooled_tte.R
+code/pooling/pooled_estimates.R
+code/pooling/pooled_tte.R
 
 # session-local data exports at repo root -- never commit patient-derived data
 arma_pfvc_data*.csv

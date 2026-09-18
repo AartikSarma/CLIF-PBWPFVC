@@ -1154,11 +1154,11 @@ message("All bias diagnostic plots saved")
 
 # NOTE: the federated per-percentile conditional-bias export that drives the POOLED
 # cross-cohort bias plots lives in a SEPARATE, deferred script — code/
-# cbias_federated_export.R — not this pipeline. After stratification some
+# xsec_cbias_federated_export.R — not this pipeline. After stratification some
 # (stratum x percentile) cells fall below n = 10, so those aggregates must be run
 # through the consortium's deterministic additive-masking pipeline before they can
 # leave a site, which is held until all sites confirm participation. The pooled
-# plots are likewise deferred in code/cbias_pooled_plots.R.
+# plots are likewise deferred in code/pooling/cbias_pooled_plots.R.
 
 # =============================================================================
 # 4i. Inclusion CONSORT diagram + PBW:PFVC-by-demographics figure (site QC)

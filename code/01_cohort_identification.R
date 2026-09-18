@@ -65,7 +65,7 @@ open_clif <- function(tbl) {
 # Category whitelists for the big event tables. Defined once and used BOTH for the
 # load-time predicate pushdown here AND the downstream extraction filters below.
 # Pre-filtering at load is safe: each big table is consumed only within its
-# whitelist. ph_arterial/ph_venous feed the script-10 [T5b] pH sensitivity.
+# whitelist. ph_arterial/ph_venous feed the the TTE (30_tte_common) [T5b] pH sensitivity.
 vitals_categories_needed     <- c("height_cm", "weight_kg", "spo2", "map")
 med_categories_needed        <- c("norepinephrine", "epinephrine", "vasopressin",
                                   "dopamine", "phenylephrine", "dobutamine")
@@ -312,9 +312,9 @@ cohort_spo2 <- clif_vitals %>%
   rename(spo2_value = vital_value)
   # SpO2 is NO LONGER capped at <= 97 here. The SF-validity bounds (80-97) live where the
   # SF ratio is actually formed -- script 03 (filter >= 80 & <= 97 for the cross-sectional
-  # index SF) and script 10 (SpO2 clamped to [80,97] for the daily worst SF). Capping here
+  # index SF) and the TTE (30_tte_common) (SpO2 clamped to [80,97] for the daily worst SF). Capping here
   # poisoned the SHARED cohort_vitals intermediate: well-oxygenated patient-days (SpO2
-  # always >= 98) lost ALL their SpO2 rows, so script 10's longitudinal panel read them as
+  # always >= 98) lost ALL their SpO2 rows, so the TTE (30_tte_common)'s longitudinal panel read them as
   # "no SpO2 charted" and dropped them. The QC outlier threshold (spo2 50-100) now governs
   # the upper bound in cohort_vitals_clean; downstream SF filtering is unchanged.
 
@@ -339,7 +339,7 @@ cohort_vitals <- bind_rows(
 # Extract labs (PaO2, creatinine, bilirubin_total, platelets)
 # =============================================================================
 
-# lab_categories_needed (incl. ph_arterial/ph_venous for the script-10 [T5b]
+# lab_categories_needed (incl. ph_arterial/ph_venous for the the TTE (30_tte_common) [T5b]
 # sensitivity) is defined at load above and already pushed down at read time;
 # this filter is now a no-op safeguard on the in-memory frame.
 cohort_labs <- clif_labs %>%

@@ -96,7 +96,7 @@ pbw_pfvc_data <- cohort_demographics %>%
     # VT/FVC_age25 vs VT/PFVC isolates whether PFVC's age slope earns its keep; the
     # triple is read as a BRACKET, not a truth -- the strain denominator's age behaviour
     # in the old/critically ill is unidentified (statistically, physiologically,
-    # mechanically), so the analyses sweep the correction rather than pick one. See 05c.
+    # mechanically), so the analyses sweep the correction rather than pick one. See xsec_age_correction_bracket.
     pfvc_age25 = pred_GLI(
       age       = rep(25, n()),
       height    = height_cm / 100,

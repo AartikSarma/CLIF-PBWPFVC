@@ -124,7 +124,7 @@ severity retained).
 ### Cross-cohort pooling (run centrally)
 
 Pooling across cohorts is **not** part of the per-site pipeline. The study
-coordinator runs `code/pooled_estimates.R` after every site has returned its
+coordinator runs `code/pooling/pooled_estimates.R` after every site has returned its
 results. It is site-agnostic: it discovers each cohort's
 `regression_results_long_*.csv` and `norm_*.csv` and pools them into cross-cohort
 forest plots and summaries (adjusted estimate primary, plus an

@@ -14,7 +14,7 @@ cell-suppressed results (n >= 10) designed to be pooled across the consortium.
 
 The per-site pipeline is five R scripts run in order by `code/00_run_pipeline.R`,
 which first restores the `renv` environment, then runs 01 -> 05 each as a clean
-subprocess. Cross-cohort pooling (`code/pooled_estimates.R`) is a separate step run
+subprocess. Cross-cohort pooling (`code/pooling/pooled_estimates.R`) is a separate step run
 centrally by the coordinator after every site returns its results — it is not part
 of the per-site runner.
 
@@ -60,7 +60,7 @@ of the per-site runner.
   misses, and age/lung-size **interaction ladders**. Every model is reported
   demographic-adjusted and unadjusted; a `dp <= 0` QC filter and centered
   predictors control collinearity. Writes per-site `norm_*` outputs.
-- **Cross-cohort aggregation (`code/pooled_estimates.R`, run centrally).**
+- **Cross-cohort aggregation (`code/pooling/pooled_estimates.R`, run centrally).**
   Site-agnostic and run by the coordinator after every site returns its `final/`
   folder — not part of the per-site runner, and kept out of the repository. It
   discovers every site's `regression_results_long_*.csv` (script 04) and
@@ -76,7 +76,7 @@ of the per-site runner.
 
 Per-site output lands under `output/<site_name>_output/`. The whole `output/` tree
 is gitignored — only aggregated, n >= 10-suppressed results are written. Pooled
-cross-cohort output is written by `code/pooled_estimates.R` to an `All sites/`
+cross-cohort output is written by `code/pooling/pooled_estimates.R` to an `All sites/`
 subfolder of the central results root (by default the local, gitignored `results/`
 folder into which each site's results are copied).
 

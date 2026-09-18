@@ -1,17 +1,17 @@
 # =============================================================================
-# Script 10 (panel): the shared daily patient-day panel
+# the TTE (30_tte_common) (panel): the shared daily patient-day panel
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
 #
 # Builds the baseline table and the day-level panel that both the longitudinal
-# target trial emulation (10_tte_common.R and its 11.* leaves) and the biotrauma
-# joint models (13_biotrauma_*.R) run on. Factored out of 10_tte_common.R on
+# target trial emulation (30_tte_common.R and its 11.* leaves) and the biotrauma
+# joint models (2x_biotrauma_*.R) run on. Factored out of 30_tte_common.R on
 # 2026-09-13 so the two analyses share one exposure grid, one set of daily
 # confounders, and one pair of event definitions (death day, extubation day).
 #
 # This file performs NO file writes and applies NO analysis-specific exclusion.
 # In particular the TTE's structural-positivity restriction (patients who cannot
-# reach the strain ceiling even at the VT floor) stays in 10_tte_common.R: it is
+# reach the strain ceiling even at the VT floor) stays in 30_tte_common.R: it is
 # right for a ceiling emulation and wrong for a mechanism analysis, where those
 # patients carry the dose-response.
 #
@@ -150,7 +150,7 @@ base <- cs %>%
             # the respiratory component is computed from that same SF ratio, so the
             # two are collinear in the hazard (MIMIC: log SF x death R-hat 4.3)
             np_sofa = sofa_total - sofa_resp,
-            # SOFA components for the per-marker severity anchor (13_biotrauma_grid.R)
+            # SOFA components for the per-marker severity anchor (20_biotrauma_grid.R)
             sofa_cv_97, sofa_coag, sofa_liver, sofa_renal,
             age_grp = cut(age_at_admission, c(-Inf, age_breaks, Inf),
                           labels = c("Young", "Middle", "Old")),
@@ -241,7 +241,7 @@ fio2_dt <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parq
   as.data.table()
 setkey(fio2_dt, hospitalization_id, t)
 # Mean AIRWAY pressure and arterial PaO2 as keyed tables, for rolling either one
-# onto a measurement time (the oxygenation indices, 13_injury_at_horizon.R).
+# onto a measurement time (the oxygenation indices, 25_injury_at_horizon.R).
 # Mean airway pressure is never forward-filled, so these are recorded values only.
 maw_dt <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet")) %>%
   filter(!is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
@@ -363,7 +363,7 @@ message("Panel: ", nrow(panel), " patient-days, ", n_distinct(panel$hospitalizat
 # duration and the liberation competing-risk endpoint. Report the magnitude so it is
 # auditable; a non-trivial share here is a signal to LOCF-fill rather than list-delete.
 # A function, because the TTE recomputes it after its structural restriction; the
-# CSV write is performed by 11.B_diagnostics.R.
+# CSV write is performed by 36_tte_diagnostics.R.
 panel_drop_stats <- function(pf) {
   drop_diag <- pf %>% group_by(hospitalization_id) %>%
     summarise(days_total = n(), days_kept = sum(keep),

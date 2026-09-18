@@ -1,4 +1,4 @@
-"""Robustness figures for the longitudinal CCW target-trial emulation (script 10).
+"""Robustness figures for the longitudinal CCW target-trial emulation (the TTE (30_tte_common)).
 Reads aggregated result CSVs only (no raw data, no R). Two panels:
   A. Subgroup forest of 60-day mortality RD (+ bootstrap CI), ordered to show
      the age/height equity gradient.
@@ -27,7 +27,7 @@ OK = dict(orange="#E69F00", sky="#56B4E9", green="#009E73", blue="#0072B2",
           verm="#D55E00", purple="#CC79A7", yellow="#F0E442", grey="#999999")
 plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
 
-# Primary specification (matches script 10 knobs: C_LOW=11, C_HIGH=16, GRACE=2,
+# Primary specification (matches the TTE (30_tte_common) knobs: C_LOW=11, C_HIGH=16, GRACE=2,
 # DAYW_CAP=5, rule="simple"). RD<0 = strain-limiting protective.
 C_LOW, C_HIGH, GRACE, CAP = 11, 16, 2, 5
 PROTECT = OK["green"]   # RD < 0  (strain-limiting reduces mortality)

@@ -7,7 +7,7 @@
 #   1. Restores the project environment from renv.lock.
 #   2. Runs scripts 01-05 in order, each as a clean R subprocess.
 #
-# Cross-cohort pooling is a separate, centrally-run step (code/pooled_estimates.R)
+# Cross-cohort pooling is a separate, centrally-run step (code/pooling/pooled_estimates.R)
 # and is intentionally not invoked here.
 #
 # Usage (from the project root, or anywhere — the script locates the repo):
@@ -141,7 +141,7 @@ if (analysis_only) {
     stop("--analysis_only needs the script-03 outputs, which are missing:\n  ",
          paste(missing, collapse = "\n  "), "\nRun the full pipeline first.")
 }
-# NOTE: cross-cohort pooling (code/pooled_estimates.R) is NOT part of the per-site
+# NOTE: cross-cohort pooling (code/pooling/pooled_estimates.R) is NOT part of the per-site
 # pipeline. It is run centrally by the study coordinator after every site returns
 # its `final/` outputs, and is kept local (not in the repository).
 
