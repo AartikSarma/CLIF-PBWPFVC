@@ -144,6 +144,50 @@ p0 <- wrap_plots(p0_list, ncol = 1, heights = c(if (nrow(p0_cont)) n_distinct(p0
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")), p0,
        width = 10, height = 2.5 + 1.5 * n_distinct(lc0$marker))
 
+# ---- 0b. the trend across the window (three or more horizons only)
+#      The level contrast is a level plus a rate times time, so on a long window
+#      it is a curve rather than a set of points, and the curve is the result:
+#      across three markers at MIMIC the contrast starts on the wrong side of
+#      zero, crosses, and accumulates. The two panels separate the two halves.
+#      Left, the contrast at each horizon, with the exact intervals from the
+#      posterior (not the approximate band the trajectory figure uses). Right,
+#      the rate term alone, adjusted beside unadjusted: a rate that does not move
+#      when age, sex and race enter the model is not the age channel, and that
+#      invariance is the argument, so it is drawn rather than described.
+if (n_distinct(lc0$horizon_h) >= 3) {
+  inj_sign <- function(m) if_else(worse[m] == "higher", -1, 1) * if_else(FLIP_INJ, -1, 1)
+  trend <- lc0 %>% mutate(day = horizon_h / 24)
+  pt_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
+    geom_hline(yintercept = 0, colour = "grey55") +
+    geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
+    geom_line(linewidth = 1) + geom_point(size = 1.8) +
+    facet_wrap(~ marker_lab, scales = "free_y", ncol = 1) +
+    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+    scale_fill_manual(values = okabe[c(1, 2)], name = NULL) +
+    labs(title = "The contrast as it accumulates",
+         subtitle = "above zero is more injury; log units, log-odds for any vasopressor",
+         x = "days from the index", y = NULL)
+  rate <- es %>%
+    filter(block == "longitudinal", model == "main", marker %in% names(lab),
+           term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
+    transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
+              s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
+              marker_lab = marker_label(marker))
+  pt_b <- ggplot(rate, aes(e, marker_lab, colour = adjustment)) +
+    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
+    geom_pointrange(aes(xmin = l, xmax = h), position = position_dodge(width = 0.6)) +
+    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+    labs(title = "The rate alone, per day",
+         subtitle = "a rate unchanged by demographic adjustment is not the age channel",
+         x = paste0("change per day toward injury, ", unit_lower), y = NULL) +
+    theme(strip.text.y = element_text(angle = 0))
+  pt <- pt_a + pt_b + plot_layout(widths = c(1.15, 1), guides = "collect") +
+    plot_annotation(title = paste0("Marker trends over ", JM_HORIZON, " days (joint model, ", unit_lower, ")"),
+                    subtitle = site_name) & theme(legend.position = "top")
+  ggsave(file.path(fig_dir, paste0("biotrauma_fig_trend_", tag, ".pdf")), pt,
+         width = 12, height = 2.5 + 1.9 * n_distinct(trend$marker))
+}
+
 # ---- 1. estimator comparison
 est <- bind_rows(
   lc %>% filter(exposure == SIZE_EX, model == "main") %>%
