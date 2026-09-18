@@ -1,3 +1,24 @@
+# Supplements
+
+Tracked analyses that no runner calls. They are run by hand at the lead site, from
+the repository root (`Rscript code/supplement/<name>.R`), after the stage they
+depend on. Names carry the block they belong to and are not numbered, because they
+have no order. Their output file names are unchanged from before the 2026-09-18
+renumbering.
+
+| Script | Needs | Question |
+|---|---|---|
+| `xsec_age_correction_bracket.R` | `prep` | Does PFVC's age correction add mortality discrimination beyond PBW? Brackets PBW, FVC at age 25, and PFVC (`norm_bracket_*`) |
+| `xsec_subgroup_harm_exposure.R` | `prep` | Does PBW dosing concentrate harmful mechanical-stress exposure in the bias-prone subgroups? (`harm_*`, `pos_*`) |
+| `xsec_dose_heterogeneity.R` | `prep` | How much dose heterogeneity hides inside the 6–8 mL/kg PBW band? (`dose_*`; read by `figures/make_strain_figures.py`) |
+| `xsec_cbias_federated_export.R` | `prep` | DEFERRED, do not run or share yet: federated conditional-bias export (`cbias_export_*`) |
+| `iv_height_policy.R` | `prep` | Height-instrumented PFVC-anchoring policy (`ivpolicy_*`; read by `figures/make_strain_figures.py`) |
+| `injury_seven_day_feasibility.R` | 7-day panel | Can the joint-model window extend to 7 days, and with what time shape? (`sevenday_*`) |
+| `injury_oi_diagnostics.R` | panel | Is an oxygenation-index signal the lung, or the ventilator setting in its own numerator? (`oi_*`) |
+| `injury_dp_by_vtpbw.R`, `injury_dp_vs_vtpfvc.R` | `prep` | Driving pressure against VT/PFVC within and across VT/PBW bins (`dp_*`) |
+| `injury_vtpbw_band_scan.R` | `prep` | Who enters the cohort if the VT/PBW gate is widened? (`vtpbw_band_scan_*`) |
+| `tte_*.R` | `causal` | The target-trial sensitivity suite and two supplementary effect-modification analyses, inventoried below |
+
 # TTE sensitivity / exploratory inventory (removed from the federated bundle)
 
 The federated per-site deliverable is the PRIMARY analysis only:

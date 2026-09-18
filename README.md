@@ -50,7 +50,10 @@ guidance on constructing these tables.
 Adult (age >= 18) ICU encounters receiving invasive mechanical ventilation, with
 the height and ventilator data needed to compute PBW, PFVC, and delivered tidal
 volume. Detailed inclusion/exclusion criteria and attrition are produced by
-`01_cohort_identification.R` and logged to the cohort attrition table.
+`01_cohort_identification.R` and logged to the cohort attrition table. Two control
+cohorts are built the same way for figure 4: patients who never received advanced
+respiratory support (`nosupport`) and patients whose first advanced support was
+high-flow oxygen or noninvasive ventilation (`niv`).
 
 ## Key derived variables
 
@@ -64,17 +67,37 @@ volume. Detailed inclusion/exclusion criteria and attrition are produced by
 
 Lung-protective ventilation is defined as VT/PBW between 6–8 mL/kg.
 
-## Expected results
+## The manuscript, and the scripts behind each figure
 
-Outputs are written to `output/<site_name>_output/`:
+| Figure | Claim | Stage | Scripts |
+|---|---|---|---|
+| 1 | PBW overestimates lung size in older, shorter, female and non-white patients (replicating PMC12313249 in modern cohorts) | `cross_sectional` | `04_analysis.R` |
+| 2 | That bias tracks otherwise unexplained differences in respiratory mechanics | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
+| 3 | The bias is associated with mortality | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
+| 4 | The bias is associated with rising markers of organ injury over time, in ventilated patients and not in the control cohorts | `injury`, `controls` | `20`–`29` |
+| 5 | Causal inference: target trial emulation and a practice-preference instrument | `causal` | `30`–`38` |
 
-- `intermediate/` — filtered CLIF tables and the derived analysis datasets (Parquet).
-- `final/` — Table 1, regression result tables (`regression_results_long_<site>.csv`),
-  survival/Kaplan–Meier figures, conditional-bias diagnostic plots, and the
-  federated PBW:PFVC distribution exports.
+[`code/README.md`](code/README.md) lists every script, what it reads and writes, and
+the old script names.
 
-All exports honor a minimum cell size of n >= 10. No patient-level data leaves
-the site; only aggregated results are written.
+## Outputs
+
+Each site has one output folder, `output/<site_name>_output/`:
+
+- `intermediate/` holds patient-level data and never leaves the site. The control
+  cohorts' patient-level data sits under `intermediate/controls/<cohort>/`.
+- `final/` holds aggregates only and is the folder a site returns. The control
+  cohorts' aggregates all sit in `final/controls/`, and their file names carry
+  `<site>_<cohort>`.
+
+Re-running a stage updates `final/` in place, so a site can return the folder again
+after any stage. All exports honor a minimum cell size of n >= 10. No patient-level
+data leaves the site.
+
+**Output file names are an interface. Do not rename them.** Sites have already
+returned `final/` folders, and every pooling and figure script finds its inputs by
+file-name prefix (`regression_results_long_`, `norm_`, `jm_`, `injury_`, `tte_`, ...).
+Renaming a script is safe. Renaming what it writes orphans a site's results.
 
 ## Running the project
 
@@ -93,54 +116,62 @@ the file format. See [config/README.md](config/README.md).
 
 ### 2. Run the pipeline
 
-A single entry point restores the project environment and runs every script in
-order. From the repository root:
+One entry point restores the environment from `renv.lock` and runs the stages you
+ask for, each script as a clean subprocess. From the repository root:
 
 ```bash
-Rscript code/00_run_pipeline.R
+Rscript code/00_run_pipeline.R                          # prep + cross_sectional (figures 1-3)
+Rscript code/00_run_pipeline.R --stages injury,controls # figure 4 and its control cohorts
+Rscript code/00_run_pipeline.R --stages causal          # figure 5
+Rscript code/00_run_pipeline.R --stages all
 ```
 
-This restores packages from `renv.lock`, then runs scripts 01–05 sequentially,
-each as a clean subprocess. If any step fails, the runner stops and reports which
-script errored.
+| Stage | Runs | Rough cost |
+|---|---|---|
+| `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
+| `cross_sectional` | `04`, `05` | minutes |
+| `injury` | `29_run_biotrauma.sh`: panels, fixed-horizon comparators, joint models, figures | hours |
+| `controls` | `29_run_controls.sh build` then `anchors`: builds the no-support and noninvasive cohorts together and writes the severity-anchor distributions | under an hour |
+| `causal` | `32_tte_run_all.R`, `38_iv_preference.R` | hours |
 
-To run a single step (e.g. while debugging), run it directly from the repo root:
+If a step fails the runner stops and names it. The default, with no `--stages`, is
+what this runner has always done, so existing site instructions still work.
+
+The control cohorts need one decision that cannot be automated. The matched
+no-support control is restricted to patients above a severity floor, and the floor
+is chosen from the ventilated cohort's distribution, which the `controls` stage
+writes to `final/jm_severity_anchor_*`. Then:
 
 ```bash
-Rscript code/01_cohort_identification.R    # Filter CLIF tables to the eligible cohort
-Rscript code/02_quality_checks.R           # Apply outlier thresholds, QC stats
-Rscript code/03_variable_derivation.R      # PBW, PFVC, SOFA, SF/PF, VT metrics
-Rscript code/04_analysis.R                 # Outcome analyses: regressions, survival, bias
-Rscript code/05_normalization_analysis.R   # PBW vs PFVC normalization discordance + prognostics
+SEV_MIN="platelets=2,bilirubin=1" bash code/29_run_controls.sh fits
 ```
 
-Scripts must be run in order — each reads the outputs of the previous step. Each
-site runs 01–05 and returns its `output/<site>_output/final/` folder.
+To run a single script while debugging, run it from the repository root, for
+example `Rscript code/04_analysis.R`. Scripts read the previous step's outputs, so
+they run in number order. Set `PBWPFVC_COHORT=nosupport` (or `niv`) to run a script
+on a control cohort.
 
-Scripts 04 and 05 report every exposure→outcome estimate both **demographic-
-adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped, illness
-severity retained).
+Scripts 04 and 05 report every exposure-to-outcome estimate both
+**demographic-adjusted** (+ age/sex/race) and **unadjusted** (demographics dropped,
+illness severity retained).
 
-### Cross-cohort pooling (run centrally)
+### Cross-site pooling (run centrally)
 
-Pooling across cohorts is **not** part of the per-site pipeline. The study
-coordinator runs `code/pooling/pooled_estimates.R` after every site has returned its
-results. It is site-agnostic: it discovers each cohort's
-`regression_results_long_*.csv` and `norm_*.csv` and pools them into cross-cohort
-forest plots and summaries (adjusted estimate primary, plus an
-adjusted-vs-unadjusted comparison forest). It expects a results root containing
-one subfolder per site (each site's `final/` folder renamed to the site name) —
-by default the local `results/` folder, into which each site's results are copied —
-and writes pooled outputs to an `All sites/` subfolder there. Override the root via
-the `PBWPFVC_RESULTS_ROOT` environment variable. Both this script and the local
-`results/` folder are gitignored and not part of the repository.
+Pooling is **not** part of the per-site pipeline. The study coordinator runs the
+scripts in `code/pooling/` after every site has returned its `final/` folder. They
+expect a results root with one subfolder per site (each site's `final/` renamed to
+the site name), by default the local `results/` folder, and write to an `All sites/`
+subfolder there. Override the root with `PBWPFVC_RESULTS_ROOT`. They list each site
+folder without recursing, so a site's `controls/` subfolder is never pooled with the
+ventilated cohort by accident. `pooled_biotrauma.R` is in the repository;
+`pooled_estimates.R` and `pooled_tte.R` are kept local and gitignored.
 
-### Exploratory analyses (archived)
+### Supplements and archive
 
-Standalone exploratory scratch scripts (`explore_*.R`) that read the script 03
-dataset and refit their own models have been archived under `code/archive/` and
-are gitignored — they are kept locally for reference but are not part of the
-consortium deliverable or the runner.
+`code/supplement/` holds tracked lead-site analyses that no runner calls:
+sensitivity analyses, diagnostics and earlier lines of inquiry. Its
+[README](code/supplement/README.md) is the inventory. `code/archive/` is gitignored
+local scratch.
 
 ## Data safety
 

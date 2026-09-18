@@ -46,6 +46,7 @@ library(tidyverse)
 library(arrow)
 library(here)
 library(splines)
+library(patchwork)   # the figure stacks panels with `/`
 
 source("utils/config.R")
 site_name <- config$site_name
