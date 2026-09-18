@@ -186,7 +186,7 @@ boot_ci <- function(col) {
 # --- outputs -----------------------------------------------------------------------------------
 gr <- boot_ci("raw"); gd <- boot_ci("resid"); gpr <- boot_ci("pfvc_raw"); gpd <- boot_ci("pfvc_resid")
 global_tbl <- tibble(
-  modifier = c("discordance, raw (= 11.X reproduction)", "discordance, residualized vs age/sex/race",
+  modifier = c("discordance, raw (reproduces 37_tte_discordance_benefit)", "discordance, residualized vs age/sex/race",
                "PFVC, raw", "PFVC, residualized vs age/sex/race"),
   base_variable = c("log PBW/PFVC", "log PBW/PFVC", "log PFVC", "log PFVC"),
   residualized = c(FALSE, TRUE, FALSE, TRUE),
@@ -233,7 +233,7 @@ curve_panel <- function(cv, xlab, ttl, colour, exp_x = FALSE) {
              length = unit(0.02, "npc")) +
     labs(x = xlab, y = "CATE: strain-limiting RD (pp)", title = ttl) + theme_minimal(base_size = 11)
 }
-p_raw  <- curve_panel(curve_raw,  "PBW/PFVC discordance (raw)", "Discordance, raw (= 11.X)", OKABE[1], TRUE)
+p_raw  <- curve_panel(curve_raw,  "PBW/PFVC discordance (raw)", "Discordance, raw (as in 37_tte_discordance_benefit)", OKABE[1], TRUE)
 p_res  <- curve_panel(curve_res,  "residualized discordance (height-driven)",
                       sprintf("Discordance, residualized (demographics R2=%.2f)", demo_r2), OKABE[5])
 p_praw <- curve_panel(curve_praw, "PFVC (L, raw)", "PFVC, raw", OKABE[4], TRUE)

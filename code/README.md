@@ -5,9 +5,10 @@ Scripts are numbered by the manuscript block they serve and run in number order.
 how to run it. Everything here reads `config/config.json` through `utils/config.R`,
 which also decides where files are written.
 
-**Script names may change. Output file names may not.** Sites have returned
-`final/` folders under the current names, and the pooling and figure scripts find
-their inputs by file-name prefix.
+**Output file names are an interface between scripts.** The pooling and figure
+scripts find their inputs by file-name prefix, so a prefix changes together with
+its readers, in one commit. No other site has the code yet, so names are still free
+to change; that stops once sites have returned `final/` folders.
 
 ## Pipeline
 

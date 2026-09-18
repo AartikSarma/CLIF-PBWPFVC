@@ -94,10 +94,13 @@ Re-running a stage updates `final/` in place, so a site can return the folder ag
 after any stage. All exports honor a minimum cell size of n >= 10. No patient-level
 data leaves the site.
 
-**Output file names are an interface. Do not rename them.** Sites have already
-returned `final/` folders, and every pooling and figure script finds its inputs by
-file-name prefix (`regression_results_long_`, `norm_`, `jm_`, `injury_`, `tte_`, ...).
-Renaming a script is safe. Renaming what it writes orphans a site's results.
+**Output file names are an interface between scripts.** Every pooling and figure
+script finds its inputs by file-name prefix (`regression_results_long_`, `norm_`,
+`jm_`, `injury_`, `tte_`, ...). A prefix may change until the code is distributed to
+other sites, but change it together with its readers, in one commit: the pooling
+scripts in `code/pooling/`, `24_biotrauma_figures.R`, `27_control_comparison.R`,
+`28_biotrauma_summary.R` and `figures/*.py`. Once sites have returned `final/`
+folders, a renamed prefix orphans their results.
 
 ## Running the project
 
