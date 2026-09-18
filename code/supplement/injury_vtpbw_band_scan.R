@@ -24,8 +24,8 @@ suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(her
 rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 LOWERS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_BAND_LOWER", "4,4.5,5,5.5,6"), ",")[[1]])
 UPPERS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_BAND_UPPER", "8"), ",")[[1]])   # 8: the lung-protective ceiling stays; above it is another population
 SF_HYPOXEMIA_THRESHOLD <- 315

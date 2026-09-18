@@ -20,8 +20,8 @@ source("utils/config.R")
 source("utils/consort_diagram.R")
 site_name <- config$site_name
 
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir <- config$final_dir
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 
@@ -1460,7 +1460,8 @@ message("Negative-control models: ", nrow(nc_results), " estimates across ",
 print(as.data.frame(nc_counts %>% transmute(cohort, n, deaths_inhosp, deaths_60d, n_with_vt,
         vtpbw = ifelse(is.na(median_vtpbw), NA, sprintf("%.1f [%.1f-%.1f]", median_vtpbw, q25_vtpbw, q75_vtpbw)),
         pct_over_8 = round(100 * pct_vtpbw_over_8), vtpfvc = round(median_vtpfvc, 1))), row.names = FALSE)
-print(as.data.frame(nc_results %>% filter(age_form == "linear") %>%
+# no cohort reached NC_MIN_EVENTS deaths (a small site, or the synthetic subset): nothing to print
+if (nrow(nc_results)) print(as.data.frame(nc_results %>% filter(age_form == "linear") %>%
         transmute(cohort, exposure, outcome, n, events,
                   est = sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high))), row.names = FALSE)
 # =============================================================================

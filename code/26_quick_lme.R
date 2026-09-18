@@ -39,8 +39,8 @@ suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(her
 rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 if (!nzchar(Sys.getenv("PBWPFVC_JM_HORIZON_H"))) Sys.setenv(PBWPFVC_JM_HORIZON_H = "72")
 source(here("code", "20_biotrauma_grid.R"))
 QUICK_HOURS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_QUICK_HORIZONS_H", "24,48,72"), ",")[[1]])

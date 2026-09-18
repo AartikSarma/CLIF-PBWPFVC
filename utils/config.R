@@ -45,12 +45,30 @@ load_config <- function() {
   #                advanced support before the index nor in the 24 h after it, so
   #                strain per lung size cannot act; escalation to any support
   #                later is a competing event
-  # Each control runs under its own site name (PBWPFVC_SITE_NAME={site}_{cohort})
-  # so its outputs sit beside, not over, the site's.
   config$cohort <- Sys.getenv("PBWPFVC_COHORT", "imv")
   if (!config$cohort %in% c("imv", "niv", "nosupport"))
     stop("PBWPFVC_COHORT must be imv, niv or nosupport; got '", config$cohort, "'")
-  if (config$cohort != "imv") message("  cohort: ", config$cohort, " (PBWPFVC_COHORT)")
+  # Where a cohort's files live. One site has ONE output folder, output/{site}_output/:
+  #   intermediate/                      patient-level, never shared
+  #   intermediate/controls/{cohort}/    the same for a control cohort
+  #   final/                             aggregates only: the folder a site returns
+  #   final/controls/                    the control cohorts' aggregates, all in one folder
+  # A control's FILE NAMES carry {site}_{cohort} (e.g. jm_estimates_pfvc_7d_MIMIC_nosupport.csv),
+  # so config$site_name is that tag and config$base_site is the site itself. Setting
+  # PBWPFVC_COHORT is enough; a PBWPFVC_SITE_NAME that already ends in _{cohort} (the
+  # older convention) is read the same way. The pooling scripts list final/ without
+  # recursing, so final/controls/ never leaks into a cross-site pool of the main cohort.
+  config$base_site <- config$site_name
+  if (config$cohort != "imv") {
+    config$base_site <- sub(paste0("_", config$cohort, "$"), "", config$site_name)
+    config$site_name <- paste0(config$base_site, "_", config$cohort)
+    message("  cohort: ", config$cohort, " (PBWPFVC_COHORT); files tagged ", config$site_name)
+  }
+  site_root <- file.path(getwd(), "output", paste0(config$base_site, "_output"))
+  config$output_dir <- if (config$cohort == "imv") file.path(site_root, "intermediate") else
+    file.path(site_root, "intermediate", "controls", config$cohort)
+  config$final_dir  <- if (config$cohort == "imv") file.path(site_root, "final") else
+    file.path(site_root, "final", "controls")
   return(config)
 }
 # device categories (CLIF mCIDE, lower case): the middle arm's, the control's, and

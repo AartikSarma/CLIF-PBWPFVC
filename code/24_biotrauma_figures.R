@@ -39,7 +39,7 @@ SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a
                     vtpfvc = "per point of VT/PFVC (% of predicted FVC) at a given VT/PBW", "per SD of log PFVC")
 TRAJ_STEP <- if (MOD_FORM == "vtpfvc") 2 else 1   # the trajectory figure's contrast: +/- 2 points of VT/PFVC, else +/- 1 SD
 FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
-fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
+fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", config$final_dir)
 tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))

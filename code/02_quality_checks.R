@@ -12,7 +12,7 @@ library(collapse)
 source("utils/config.R")
 
 site_name <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
+output_dir <- config$output_dir
 
 # Utility functions from outlier_handler.R (sourced inline to avoid side effects)
 replace_outliers_with_na_long <- function(df, df_outlier_thresholds,

@@ -71,8 +71,8 @@ rm(list = ls())
 source("utils/config.R")
 
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
@@ -730,7 +730,8 @@ manifest <- map_dfr(results, function(r)
          cohort = config$cohort,
          sev_floor = vapply(marker, sev_floor_for, numeric(1)),
          sev_anchor = if_else(is.na(sev_floor), NA_character_, vapply(marker, anchor_label, character(1))),
-         sf_band = if (nzchar(SF_BAND)) SF_BAND else NA_character_, site = site_name)
+         # "115 to 235", not "115,235": a CSV reader takes the comma for a thousands separator
+         sf_band = if (nzchar(SF_BAND)) paste(sf_band_limits, collapse = " to ") else NA_character_, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")

@@ -33,7 +33,7 @@ source("utils/config.R")   # re-read config.json EVERY time, so a site switch is
 
 .tte_mt      <- function(f) if (file.exists(f)) format(file.info(f)$mtime, "%Y-%m-%d %H:%M:%OS6") else NA_character_
 .tte_site    <- config$site_name
-.tte_out     <- here("output", paste0(.tte_site, "_output"), "intermediate")
+.tte_out     <- config$output_dir
 .tte_vtpfvc  <- Sys.getenv("PBWPFVC_TTE_VTPBW", "")
 # Sensitivity knobs that change the BUILT engine (base/design) MUST key the cache AND the
 # snapshot filename -- else a pfvc_age25 / tighter-ceiling run silently reloads the pfvc /

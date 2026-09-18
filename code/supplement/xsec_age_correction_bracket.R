@@ -30,8 +30,8 @@
 library(tidyverse); library(arrow); library(here); library(splines)
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
 
 auc_fn <- function(y, p) {                       # Mann-Whitney AUC (= C-statistic), as in 05

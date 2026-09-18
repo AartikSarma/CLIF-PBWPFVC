@@ -68,8 +68,8 @@ suppressPackageStartupMessages({
 rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#000000")   # the full Okabe-Ito set: up to eight instruments
 

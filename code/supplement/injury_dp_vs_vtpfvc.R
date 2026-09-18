@@ -38,8 +38,8 @@ suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(her
 rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00")
 SF_HYPOXEMIA_THRESHOLD <- 315
 STRATA <- list("6-8 (analytic)" = c(6, 8), "5-8 (widened)" = c(5, 8), "< 5 (titrated)" = c(0, 5))

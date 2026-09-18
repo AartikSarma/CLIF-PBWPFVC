@@ -25,8 +25,8 @@ suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(her
 rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 BIN_BREAKS <- c(-Inf, 5, 6, 7, 8, Inf)
 BIN_LABELS <- c("< 5", "5-6", "6-7", "7-8", "> 8")

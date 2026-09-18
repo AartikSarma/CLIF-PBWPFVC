@@ -55,8 +55,8 @@ library(patchwork)
 source("utils/config.R")
 site_name <- config$site_name
 
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Okabe-Ito (discrete); viridis for any continuous fill.

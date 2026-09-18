@@ -55,15 +55,19 @@ DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 # site name from config.json by sed: Rscript's stdout carries renv's start-up notices
 SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
 [[ -n "$SITE" ]] || { echo "could not read site_name from config/config.json"; exit 1; }
+# One output folder per site (utils/config.R): the control cohorts live inside it,
+# under intermediate/controls/{cohort}/ and final/controls/, and their FILE NAMES
+# carry {site}_{cohort}. SITE below is that file tag; BASE_SITE names the folder.
+SITE="${SITE%_niv}"; SITE="${SITE%_nosupport}"; BASE_SITE=$SITE
+ROOT="output/${BASE_SITE}_output"
 case $COHORT in
-  imv) ;;
-  niv|nosupport) SITE="${SITE%_niv}"; SITE="${SITE%_nosupport}_${COHORT}"; export PBWPFVC_SITE_NAME=$SITE PBWPFVC_COHORT=$COHORT; SKIP_JM=1 ;;
+  imv) FINAL="$ROOT/final"; INTER="$ROOT/intermediate"; COHORT_LOGS="$ROOT/logs" ;;
+  niv|nosupport) SITE="${BASE_SITE}_${COHORT}"; export PBWPFVC_SITE_NAME=$BASE_SITE PBWPFVC_COHORT=$COHORT; SKIP_JM=1
+       FINAL="$ROOT/final/controls"; INTER="$ROOT/intermediate/controls/$COHORT"; COHORT_LOGS="$ROOT/logs/$COHORT" ;;
   *) echo "COHORT must be imv, niv or nosupport"; exit 1 ;;
 esac
-FINAL="output/${SITE}_output/final"
-INTER="output/${SITE}_output/intermediate"
 STAMP=$(date +%Y%m%d_%H%M%S)
-LOGDIR="output/${SITE}_output/logs/biotrauma_${STAMP}"
+LOGDIR="$COHORT_LOGS/biotrauma_${STAMP}"
 STATUS="$LOGDIR/status.tsv"
 set_rc() { eval "RC_${1//[^A-Za-z0-9]/_}=$2"; }
 rc_of()  { eval "echo \${RC_${1//[^A-Za-z0-9]/_}:-1}"; }
@@ -75,9 +79,9 @@ need="$INTER/ne_equiv_admin.parquet"
 if [[ $DRY == 0 && ! -f "$need" ]]; then
   if [[ $COHORT != imv ]]; then
     echo "[$(date +%T)] building the $COHORT cohort for $SITE: scripts 01-03"
-    mkdir -p "output/${SITE}_output"
+    mkdir -p "$COHORT_LOGS"
     for s in 01_cohort_identification 02_quality_checks 03_variable_derivation; do
-      Rscript "code/$s.R" > "output/${SITE}_output/${s}.log" 2>&1 || { echo "ABORT: $s failed (output/${SITE}_output/${s}.log)"; exit 1; }
+      Rscript "code/$s.R" > "$COHORT_LOGS/${s}.log" 2>&1 || { echo "ABORT: $s failed ($COHORT_LOGS/${s}.log)"; exit 1; }
       echo "[$(date +%T)] $s done"
     done
   else

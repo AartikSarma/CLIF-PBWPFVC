@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# the biotrauma suite (2x) (sites): the biotrauma analysis for several sites, one after another
+# 29_run_sites: the biotrauma analysis for several sites, one after another
 # =============================================================================
 # For each site given as NAME=TABLES_PATH[=FILE_TYPE]: sets the config overrides
 # utils/config.R reads (PBWPFVC_SITE_NAME, _TABLES_PATH, _FILE_TYPE; the config
@@ -14,8 +14,8 @@
 #       UCSF=/path/to/ucsf_clif MIMIC=/path/to/mimic_clif > sites.out 2>&1 &
 # CONTROL (default "nosupport niv") names the control arms run after each site:
 # nosupport = room air / cannula only (the negative control), niv = HFNC/NIV first
-# (the middle arm of the strain gradient); each built and analysed under
-# output/{site}_{arm}_output/. CONTROL="" skips them.
+# (the middle arm of the strain gradient); each built and analysed inside the
+# site's own folder (final/controls/). CONTROL="" skips them.
 #   bash code/29_run_sites.sh --dry-run UCSF=/path/to/ucsf_clif
 # Each site's own log is output/{site}_output/biotrauma.out; the per-stage logs
 # are under output/{site}_output/logs/biotrauma_{stamp}/.
@@ -51,10 +51,10 @@ for spec in "$@"; do
   echo "[$(date +%FT%T)] $name done; $(grep -c 'exit [1-9]' "$out/biotrauma.out") failed stages; log $out/biotrauma.out"
   tail -n 4 "$out/biotrauma.out"
   for arm in $CONTROL; do
-    mkdir -p "output/${name}_${arm}_output"
-    COHORT=$arm bash code/29_run_biotrauma.sh > "output/${name}_${arm}_output/biotrauma.out" 2>&1
-    echo "[$(date +%FT%T)] ${name}_${arm} done; $(grep -c 'exit [1-9]' "output/${name}_${arm}_output/biotrauma.out") failed stages"
-    tail -n 3 "output/${name}_${arm}_output/biotrauma.out"
+    mkdir -p "$out/logs/$arm"
+    COHORT=$arm bash code/29_run_biotrauma.sh > "$out/logs/$arm/biotrauma.out" 2>&1
+    echo "[$(date +%FT%T)] ${name} ${arm} done; $(grep -c 'exit [1-9]' "$out/logs/$arm/biotrauma.out") failed stages"
+    tail -n 3 "$out/logs/$arm/biotrauma.out"
   done
 done
 unset PBWPFVC_SITE_NAME PBWPFVC_TABLES_PATH PBWPFVC_FILE_TYPE

@@ -13,7 +13,7 @@ suppressPackageStartupMessages({ library(tidyverse); library(here) })
 rm(list = ls())
 source("utils/config.R")
 site_name <- config$site_name
-final_dir <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
+final_dir <- Sys.getenv("PBWPFVC_FIG_DIR", config$final_dir)
 
 files <- list.files(final_dir, "\\.csv$", full.names = TRUE)
 fam_of <- function(f) str_match(basename(f), "^(jm_manifest|jm_level_contrast|injury_at_horizon_counts|injury_at_horizon|injury_channels|injury_nested|injury_dose_channels|injury_sf_channels|injury_negctrl|quick_lme|quick_channels|quick_nested|quick_dose_channels|quick_sf_channels)_")[, 2]
@@ -35,7 +35,8 @@ for (i in seq_along(files)) {
   if (!nrow(d)) next
   base <- tibble(source_file = basename(f), family = fm)
   r <- switch(fm,
-    jm_manifest = { t <- jm_tag(f); manifests[[length(manifests) + 1]] <- d %>% mutate(form = t$form, panel_h = t$panel); NULL },
+    jm_manifest = { t <- jm_tag(f); manifests[[length(manifests) + 1]] <- d %>% mutate(form = t$form, panel_h = t$panel,
+                                                        across(any_of(c("sf_band", "sev_anchor", "reason", "worst_terms")), as.character)); NULL },
     jm_level_contrast = { t <- jm_tag(f)
       tibble(marker = d$marker, form = t$form, panel_h = t$panel, horizon_h = num(d$horizon_h), model = chr(d$adjustment),
              exposure_or_term = d$exposure, estimate = d$estimate, lo = d$lo, hi = d$hi, p = num(d$p_equal), p_gt0 = num(d$p_gt0),

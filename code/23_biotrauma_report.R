@@ -42,8 +42,8 @@ rm(list = ls())
 source("utils/config.R")
 
 site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+output_dir <- config$output_dir
+final_dir  <- config$final_dir
 source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")

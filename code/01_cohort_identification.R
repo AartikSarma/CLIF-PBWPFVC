@@ -537,7 +537,7 @@ message("Negative-control frame: ", nrow(nc_cohort), " adult ICU patients with S
 # Save intermediates
 # =============================================================================
 
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
+output_dir <- config$output_dir
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 write_parquet(nc_cohort, file.path(output_dir, "nc_cohort.parquet"))
 
