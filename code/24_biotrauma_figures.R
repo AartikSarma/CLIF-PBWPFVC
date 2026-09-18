@@ -2,7 +2,13 @@
 # Script 24 (figures): the PFVC-level question, drawn from the aggregate tables
 # =============================================================================
 # Reads only the site's final/ CSVs (no patient rows), so it runs on any site's
-# outputs and, with PBWPFVC_FIG_DIR, on a pooled folder. Five figures:
+# outputs and, with PBWPFVC_FIG_DIR, on a pooled folder.
+#
+#   biotrauma_fig_main_{tag}.pdf   THE figure, for a window with three or more
+#       horizons (the 7-day run): one row per marker, the contrast toward injury
+#       from hour 0 to the end of the window, the rate per day adjusted beside
+#       unadjusted, and the posterior probability of harm by day. The others are
+#       its supporting detail:
 #
 #   biotrauma_fig_level_contrast_{tag}.pdf   THE question: the joint model's marker
 #       difference at 24/48/72 h per SD LOWER log PFVC at a given VT/PBW, oriented
@@ -169,67 +175,97 @@ ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")),
        # one row per marker x horizon, so a 7-day run needs the height a 48-hour one did not
        width = 10, height = 2.5 + 0.42 * nrow(distinct(lc0, marker, horizon_h)))
 
-# ---- 0b. the trend across the window (three or more horizons only)
-#      The level contrast is a level plus a rate times time, so on a long window
-#      it is a curve rather than a set of points, and the curve is the result:
-#      across three markers at MIMIC the contrast starts on the wrong side of
-#      zero, crosses, and accumulates. The two panels separate the two halves.
-#      Left, the contrast at each horizon, with the exact intervals from the
-#      posterior (not the approximate band the trajectory figure uses). Right,
-#      the rate term alone, adjusted beside unadjusted: a rate that does not move
-#      when age, sex and race enter the model is not the age channel, and that
-#      invariance is the argument, so it is drawn rather than described.
+# ---- 0b. THE figure: one row per marker, three panels (three or more horizons only)
+#      A  the contrast as it accumulates: the joint model's marker difference toward
+#         injury per unit lower PFVC at each horizon, hour 0 through the end of the
+#         window, with its exact posterior interval. On a long window this is a line
+#         (a level plus a rate times time), and the line is the result: the level at
+#         hour 0 moves with adjustment, the slope does not.
+#      B  the rate alone, per day, adjusted beside unadjusted: a rate that does not
+#         move when age, sex and race enter the model is not the age channel.
+#      C  the posterior probability that the contrast lies in the injury direction,
+#         by horizon: where the evidence starts and where it ends up.
+#      Rows carry the patient and death counts. A marker whose exposure terms did not
+#      converge is drawn hollow and dashed, placed last, and says so in its label:
+#      the any-vasopressor rate at MIMIC came back with an R-hat of 2.5 beside labs at
+#      1.01, and without the flag they looked the same.
 if (n_distinct(lc0$horizon_h) >= 3) {
   RHAT_GATE <- 1.1
   inj_sign <- function(m) if_else(worse[m] == "higher", -1, 1) * if_else(FLIP_INJ, -1, 1)
-  # A marker whose exposure terms did not converge must not be drawn like one
-  # that did: the any-vasopressor rate at MIMIC came back with an R-hat of 2.5
-  # beside two labs at 1.01, and on the page they looked the same. Non-converged
-  # estimates are drawn hollow with a dashed line and their R-hat in the strip.
   rate <- es %>%
     filter(block == "longitudinal", model == "main", marker %in% names(lab),
            term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
     transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
               s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
               rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
-  worst <- rate %>% group_by(marker) %>% summarise(mx = max(rhat, na.rm = TRUE), .groups = "drop")
-  strip <- function(m) {
-    w <- worst$mx[match(m, worst$marker)]
-    paste0(marker_label(m), if_else(is.finite(w) & w > RHAT_GATE, sprintf("\nR-hat %.2f: DID NOT CONVERGE", w), ""))
+  failed <- rate %>% filter(!ok) %>% group_by(marker) %>%
+    summarise(note = paste0("\n", paste(sprintf("%s R-hat %.2f", adjustment, rhat), collapse = "; "), ": not converged"),
+              .groups = "drop")
+  counts <- lc0 %>% distinct(marker, n_patients, n_deaths) %>% group_by(marker) %>% slice(1) %>% ungroup()
+  row_label <- function(m) {
+    paste0(marker_label(m),
+           sprintf("\nn = %s, deaths = %s", format(counts$n_patients[match(m, counts$marker)], big.mark = ","),
+                   format(counts$n_deaths[match(m, counts$marker)], big.mark = ",")),
+           coalesce(failed$note[match(m, failed$marker)], ""))
   }
-  lvl <- sort(unique(strip(unique(rate$marker))))   # one order for both panels
-  rate  <- rate  %>% mutate(marker_lab = factor(strip(marker), lvl))
-  trend <- lc0 %>% mutate(day = horizon_h / 24,
-                          ok = marker %in% rate$marker[rate$ok],
-                          marker_lab = factor(strip(marker), lvl))
-  pt_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
+  # Row order: PBWPFVC_FIG_ORDER if set (comma list), else the markers where the rate
+  # carries the finding first; the rest in the order of `lab`; unconverged markers last.
+  fig_order <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_ORDER", "platelets,bilirubin,creatinine"), ",")[[1]])
+  present   <- intersect(unique(c(fig_order, names(lab))), unique(rate$marker))
+  converged <- setdiff(present, failed$marker)
+  row_order <- row_label(c(converged, setdiff(present, converged)))
+  rate  <- rate %>% mutate(marker_lab = factor(row_label(marker), row_order))
+  trend <- lc0 %>% filter(marker %in% present) %>%
+    left_join(rate %>% select(marker, adjustment, ok), by = c("marker", "adjustment")) %>%
+    mutate(day = horizon_h / 24, ok = coalesce(ok, FALSE),
+           marker_lab = factor(row_label(marker), row_order))
+  adj_colours <- okabe[c(1, 2)]
+  shared <- list(scale_colour_manual(values = adj_colours, name = NULL),
+                 scale_fill_manual(values = adj_colours, guide = "none"),
+                 scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "22"), guide = "none"),
+                 scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none"),
+                 theme(strip.text.y = element_blank(), plot.title = element_text(face = "bold")))
+  day_breaks <- sort(unique(trend$day))
+  pm_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
     geom_hline(yintercept = 0, colour = "grey55") +
     geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
-    geom_line(aes(linetype = ok), linewidth = 1) +
-    geom_point(aes(shape = ok), size = 1.8) +
-    facet_wrap(~ marker_lab, scales = "free_y", ncol = 1) +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    scale_fill_manual(values = okabe[c(1, 2)], guide = "none") +
-    scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "22"), guide = "none") +
-    scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none") +
-    labs(title = "The contrast as it accumulates", subtitle = "above zero is more injury",
-         x = "days from the index", y = "log units (log-odds for any vasopressor)")
-  pt_b <- ggplot(rate, aes(e, adjustment, colour = adjustment)) +
-    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-    geom_pointrange(aes(xmin = l, xmax = h, shape = ok)) +
-    facet_wrap(~ marker_lab, scales = "free_x", ncol = 1) +
-    scale_colour_manual(values = okabe[c(1, 2)], guide = "none") +
-    scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none") +
-    labs(title = "The rate alone, per day",
-         subtitle = "a rate that adjustment does not move is not the age channel",
-         x = paste0("change per day toward injury, ", unit_lower), y = NULL)
-  pt <- pt_a + pt_b + plot_layout(widths = c(1.15, 1), guides = "collect") +
-    plot_annotation(title = paste0("Marker trends over ", JM_HORIZON, " days (joint model, ", unit_lower, ")"),
-                    subtitle = paste0(site_name, ": hollow points and dashed lines did not converge",
-                                      if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its OWN anchor (the SOFA components minus its own), so the markers are different patient subsets" else "")) &
+    geom_line(aes(linetype = ok), linewidth = 0.9) +
+    geom_point(aes(shape = ok), size = 1.6) +
+    facet_grid(marker_lab ~ ., scales = "free_y") +
+    scale_x_continuous(breaks = day_breaks) + shared +
+    labs(title = "Difference toward injury", subtitle = "above zero = more injury with a smaller lung",
+         x = "days from the index", y = "log marker (log-odds for any vasopressor)")
+  pm_b <- ggplot(rate, aes(adjustment, e, colour = adjustment)) +
+    geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+    geom_linerange(aes(ymin = l, ymax = h), linewidth = 0.8) +
+    geom_point(aes(shape = ok), size = 2.2, fill = "white") +
+    facet_grid(marker_lab ~ ., scales = "free_y") + shared +
+    guides(colour = "none") +
+    labs(title = "Rate per day", subtitle = "adjusted vs unadjusted",
+         x = NULL, y = "change per day toward injury")
+  pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
+    geom_hline(yintercept = 0.5, colour = "grey55") +
+    geom_hline(yintercept = c(0.025, 0.975), linetype = 3, colour = "grey70") +
+    geom_line(aes(linetype = ok), linewidth = 0.9) +
+    geom_point(aes(shape = ok), size = 1.6) +
+    facet_grid(marker_lab ~ .) +
+    scale_x_continuous(breaks = day_breaks) +
+    scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) + shared +
+    theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
+    labs(title = "Probability of more injury", subtitle = "posterior; dotted lines at 0.025 and 0.975",
+         x = "days from the index", y = "P(contrast in the injury direction)")
+  pm <- pm_a + pm_b + pm_c + plot_layout(widths = c(1.35, 0.6, 1), guides = "collect") +
+    plot_annotation(
+      tag_levels = "A",
+      title = paste0("A smaller predicted lung, at the same VT/PBW, and organ-injury markers over ", JM_HORIZON,
+                     " days of ventilation"),
+      subtitle = paste0(site_name, ": joint model, death and extubation modelled; ", unit_lower,
+                        ".\nA rate unmoved by adjustment for age, sex and race is not the age channel. ",
+                        "Hollow points and dashed lines did not converge.",
+                        if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its own anchor, so the rows are different patient subsets." else "")) &
     theme(legend.position = "top")
-  ggsave(file.path(fig_dir, paste0("biotrauma_fig_trend_", tag, ".pdf")), pt,
-         width = 13, height = 2.5 + 2.1 * n_distinct(trend$marker))
+  ggsave(file.path(fig_dir, paste0("biotrauma_fig_main_", tag, ".pdf")), pm,
+         width = 13, height = 2 + 2.2 * n_distinct(trend$marker))
 }
 
 # ---- 1. estimator comparison
