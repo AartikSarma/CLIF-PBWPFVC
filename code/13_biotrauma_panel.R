@@ -404,7 +404,7 @@ surv <- base %>%
          event_rrt, event_day_rrt, event_time_rrt, event_factor_rrt,
          death_day, imv_extub_day, death_time, extub_time, rrt_day, rrt_period, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
-         age10, sex_category, race_category, sofa_total, np_sofa, sev_anchor, bmi, height_cm,
+         age10, sex_category, race_category, sofa_total, np_sofa, sofa_cv_97, sofa_coag, sofa_liver, sofa_renal, bmi, height_cm,
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
          vtpfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0, oi_0, osi_0,

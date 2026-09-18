@@ -51,7 +51,7 @@ MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
 # bundles, so the two-cause primary is never overwritten by the sensitivity
 RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
 stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
-out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "", sev_tag,
+out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                    if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                    h_suffix, "_", site_name)
@@ -67,6 +67,9 @@ manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv"
 # gates existed are gated the same way): longitudinal for the trajectory
 # contrasts and Q1, association for the death correction and Q2, hazard for Q3
 RHAT_GATE <- 1.1
+if (!any(manifest$status %in% c("converged", "rhat_fail")))
+  stop("nothing to report for ", out_tag, ": no fit ran (", paste(unique(paste0(manifest$marker, " ", manifest$status,
+       ifelse(is.na(manifest$reason), "", paste0(": ", manifest$reason)))), collapse = "; "), ")")
 est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv")), show_col_types = FALSE)
 # The exposure gate: the longitudinal block also carries nuisance terms (the
 # baseline marker, the age spline) whose chains mix worse than the exposure
@@ -145,7 +148,7 @@ population_row <- function(ld) {
 }
 
 trajectory_rows <- list(); strain_rows <- list(); assoc_rows <- list(); hetero_rows <- list()
-level_rows <- list()
+level_rows <- list(); movement_rows <- list()
 # Horizons for the level contrast: one per day out to the run's own endpoint,
 # plus the endpoint itself when the horizon is not a whole number of days. Even
 # spacing, because the contrast is a level plus a rate times time and a reader
@@ -164,13 +167,28 @@ for (i in seq_len(nrow(usable))) {
   f <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                     if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                     if (RRT_EVENT && u$marker == "creatinine") "_rrtcause" else "",
-                                    sev_sfx, "_", h_suffix, ".rds"))
+                                    restrict_sfx_for(u$marker), "_", h_suffix, ".rds"))
   if (!file.exists(f)) stop("fit bundle missing: ", f)
   b <- readRDS(f); jm <- b$jm; ld <- b$long_data
   draws <- beta_draws(jm, b$lme)
   keep <- sample.int(nrow(draws), min(N_DRAWS, nrow(draws)))
   draws <- draws[keep, , drop = FALSE]
   binary <- isTRUE(b$binary)
+  # How much the marker moves at all, by day: the observed change from baseline among
+  # patients still observed (descriptive, survivor-selected, not a model quantity). A
+  # control cohort whose marker does not move cannot show a divergence by lung size,
+  # so this is read BEFORE its divergence term. Days with under 10 patients are dropped.
+  movement_rows[[length(movement_rows) + 1L]] <- ld %>%
+    mutate(change = if (binary) NA_real_ else if (BASELINE_FORM == "offset") log_y else log_y - log_y0,
+           day = floor(vent_day + 1e-9)) %>%
+    filter(day >= 1) %>%
+    group_by(hospitalization_id, day) %>%
+    summarise(change = mean(change), level = mean(log_y), .groups = "drop") %>%
+    group_by(day) %>%
+    summarise(n_patients = n(), mean_change = mean(change), sd_change = sd(change),
+              mean_abs_change = mean(abs(change)), mean_level = mean(level), .groups = "drop") %>%
+    filter(n_patients >= 10L) %>%
+    mutate(marker = u$marker, model = u$model, adjustment = u$adjustment, binary = binary, .before = 1)
   sd_log_y <- if (binary) 1 else sd(ld$log_y)   # binary outcome: report on the log-odds scale
   gate <- u$status == "converged"
   gate_long  <- isTRUE(is.finite(u$longitudinal_rhat) && u$longitudinal_rhat <= RHAT_GATE)
@@ -312,6 +330,7 @@ trajectory_grid <- bind_rows(trajectory_rows)
 strain_effects  <- bind_rows(strain_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 association_hr  <- bind_rows(assoc_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
+movement        <- bind_rows(movement_rows) %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 level_contrast  <- bind_rows(level_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 if (nrow(level_contrast)) {
   report_write(level_contrast, "level_contrast")
@@ -321,6 +340,7 @@ if (nrow(level_contrast)) {
                         mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 }
 report_write(trajectory_grid, "trajectory_grid")
+if (nrow(movement)) report_write(movement, "movement")
 report_write(strain_effects,  "strain_effects")
 report_write(association_hr,  "association_hr")
 if (nrow(heterogeneity)) report_write(heterogeneity, "heterogeneity")

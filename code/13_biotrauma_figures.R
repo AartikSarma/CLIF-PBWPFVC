@@ -40,7 +40,7 @@ SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a
 TRAJ_STEP <- if (MOD_FORM == "vtpfvc") 2 else 1   # the trajectory figure's contrast: +/- 2 points of VT/PFVC, else +/- 1 SD
 FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
 fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", here("output", paste0(site_name, "_output"), "final"))
-tag       <- paste0(sev_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
+tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))
 worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
@@ -225,7 +225,8 @@ if (n_distinct(lc0$horizon_h) >= 3) {
          x = paste0("change per day toward injury, ", unit_lower), y = NULL)
   pt <- pt_a + pt_b + plot_layout(widths = c(1.15, 1), guides = "collect") +
     plot_annotation(title = paste0("Marker trends over ", JM_HORIZON, " days (joint model, ", unit_lower, ")"),
-                    subtitle = paste0(site_name, ": hollow points and dashed lines did not converge")) &
+                    subtitle = paste0(site_name, ": hollow points and dashed lines did not converge",
+                                      if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its OWN anchor (the SOFA components minus its own), so the markers are different patient subsets" else "")) &
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_trend_", tag, ".pdf")), pt,
          width = 13, height = 2.5 + 2.1 * n_distinct(trend$marker))

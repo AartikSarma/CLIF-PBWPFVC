@@ -83,14 +83,54 @@ channels_equal_p <- function(est, V) {
   as.numeric(pchisq(t(d) %*% solve(L %*% V %*% t(L)) %*% d, df = 3, lower.tail = FALSE))
 }
 
+# ---- Cohort restrictions shared by the fit, the report and the figures ----------
 # Severity floor (PBWPFVC_JM_SEV_MIN): keep patients whose baseline severity anchor
-# is at or above this value. The anchor is cardiovascular + neurological + renal SOFA
-# on the index day. It leaves out the respiratory component (collinear with SF) and
-# the coagulation and liver components, which ARE platelets and bilirubin: a floor on
-# a score that contains the outcome selects extreme baselines and manufactures
-# regression to the mean. Used to severity-match the no-support control to the
-# ventilated cohort; run BOTH cohorts under the same floor. The floor enters every
-# cache name and output tag, so a restricted run never reuses an unrestricted fit.
-SEV_MIN <- suppressWarnings(as.numeric(Sys.getenv("PBWPFVC_JM_SEV_MIN", unset = NA)))
-sev_sfx <- if (is.na(SEV_MIN)) "" else paste0("_sev", SEV_MIN)
-sev_tag <- if (is.na(SEV_MIN)) "" else paste0("sev", SEV_MIN, "_")
+# is at or above a value, to severity-match the no-support control to the ventilated
+# cohort. The anchor is PER MARKER: the sum of the index-day cardiovascular,
+# coagulation, liver and renal SOFA components, leaving out the marker's OWN
+# component. A floor on a score containing the outcome selects extreme baselines,
+# which bends the average time trend through regression to the mean. Two components
+# are never in an anchor: respiratory (collinear with SF) and neurological (on the
+# day of intubation the worst GCS is sedation, so matching on it matches on the
+# treatment). The oxygenation and mechanics markers have no component to drop.
+ANCHOR_POOL <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal")
+ANCHOR_DROP <- c(creatinine = "sofa_renal", platelets = "sofa_coag", bilirubin = "sofa_liver",
+                 ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97")
+anchor_components <- function(marker) setdiff(ANCHOR_POOL, unname(ANCHOR_DROP[marker]))
+anchor_label <- function(marker)
+  paste(sub("_97", "", sub("sofa_", "", anchor_components(marker))), collapse = " + ")
+# The knob is one number (each marker's own anchor gets the same floor) or a list,
+# "platelets=2,bilirubin=1". The floor enters every cache name and the output tag, so
+# a restricted run never reuses an unrestricted fit.
+SEV_SPEC <- trimws(Sys.getenv("PBWPFVC_JM_SEV_MIN", ""))
+SEV_BY_MARKER <- grepl("=", SEV_SPEC)
+sev_floors <- if (SEV_BY_MARKER) {
+  pairs <- strsplit(trimws(strsplit(SEV_SPEC, ",")[[1]]), "=")
+  floors <- setNames(suppressWarnings(as.numeric(vapply(pairs, `[`, "", 2))), trimws(vapply(pairs, `[`, "", 1)))
+  if (anyNA(floors) || any(!nzchar(names(floors)))) stop("PBWPFVC_JM_SEV_MIN must be a number or 'marker=number,...'; got '", SEV_SPEC, "'")
+  floors[order(names(floors))]          # sorted, so the same floors always give the same tag
+} else numeric()
+sev_floor_for <- function(marker) {
+  if (!nzchar(SEV_SPEC)) return(NA_real_)
+  if (!SEV_BY_MARKER) return(as.numeric(SEV_SPEC))
+  if (!marker %in% names(sev_floors)) stop("PBWPFVC_JM_SEV_MIN lists floors by marker but has none for ", marker)
+  sev_floors[[marker]]
+}
+sev_sfx_for <- function(marker) { v <- sev_floor_for(marker); if (is.na(v)) "" else paste0("_sev", v) }
+# The output tag carries the floors themselves ("sev2_", or "sev_bilirubin1_platelets2_"):
+# a second choice of floor writes its own tables instead of replacing the first's.
+sev_tag <- if (!nzchar(SEV_SPEC)) "" else if (SEV_BY_MARKER)
+  paste0("sev_", paste0(names(sev_floors), sev_floors, collapse = "_"), "_") else paste0("sev", SEV_SPEC, "_")
+
+# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo < SF <= hi on
+# the index day. The strata in use are "235,315", "115,235" and "0,115" (user-specified,
+# 2026-09-18; 315 and 235 are the Rice 2007 SF equivalents of P/F 300 and 200).
+SF_BAND <- trimws(Sys.getenv("PBWPFVC_JM_SF_BAND", ""))
+sf_band_limits <- if (nzchar(SF_BAND)) suppressWarnings(as.numeric(strsplit(SF_BAND, ",")[[1]])) else c(NA_real_, NA_real_)
+if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) || sf_band_limits[1] >= sf_band_limits[2]))
+  stop("PBWPFVC_JM_SF_BAND must be 'lo,hi' with lo < hi; got '", SF_BAND, "'")
+sf_sfx <- if (nzchar(SF_BAND)) paste0("_sf", sf_band_limits[1], "to", sf_band_limits[2]) else ""
+sf_tag <- if (nzchar(SF_BAND)) paste0("sf", sf_band_limits[1], "to", sf_band_limits[2], "_") else ""
+# both restrictions, in the order every script uses
+restrict_tag <- paste0(sev_tag, sf_tag)
+restrict_sfx_for <- function(marker) paste0(sev_sfx_for(marker), sf_sfx)

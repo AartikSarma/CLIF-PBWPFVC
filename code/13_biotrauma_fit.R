@@ -208,39 +208,6 @@ surv_all <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".pa
 meta     <- readRDS(file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
 message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients")
 
-# Severity anchor distribution, written for every run so the floor for a matched
-# control can be chosen from the ventilated cohort's aggregate (cells under 10 masked).
-if (!"sev_anchor" %in% names(surv_all))
-  stop("jm_surv has no sev_anchor column: rebuild the panel (13_biotrauma_panel.R) with the current code")
-# Adjacent values are MERGED until every band holds 10 or more patients. Masking a
-# small cell would not protect it, because the cumulative column gives it back.
-anchor_counts <- surv_all %>% filter(!is.na(sev_anchor)) %>% count(sev_anchor, name = "n_patients") %>% arrange(sev_anchor)
-band_id <- integer(nrow(anchor_counts)); running_n <- 0L; current_band <- 1L
-for (row_i in seq_len(nrow(anchor_counts))) {
-  band_id[row_i] <- current_band
-  running_n <- running_n + anchor_counts$n_patients[row_i]
-  if (running_n >= 10L) { current_band <- current_band + 1L; running_n <- 0L }
-}
-if (running_n > 0L && current_band > 1L) band_id[band_id == current_band] <- current_band - 1L   # short tail joins the band below
-severity_anchor <- anchor_counts %>% mutate(band = band_id) %>%
-  group_by(band) %>%
-  summarise(sev_anchor_from = min(sev_anchor), sev_anchor_to = max(sev_anchor), n_patients = sum(n_patients), .groups = "drop") %>%
-  mutate(pct = round(100 * n_patients / sum(n_patients), 1),
-         pct_at_or_above_from = round(100 * rev(cumsum(rev(n_patients))) / sum(n_patients), 1),
-         cohort = config$cohort, site = site_name) %>%
-  select(-band)
-stopifnot(nrow(severity_anchor) == 1L || all(severity_anchor$n_patients >= 10L))
-write_csv(severity_anchor, file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv")))
-message("Severity anchor (CV + CNS + renal SOFA, index day), adjacent values merged to bands of 10 or more:")
-print(as.data.frame(severity_anchor %>% select(sev_anchor_from, sev_anchor_to, n_patients, pct, pct_at_or_above_from)), row.names = FALSE)
-if (!is.na(SEV_MIN)) {
-  n_before <- nrow(surv_all)
-  surv_all <- surv_all %>% filter(!is.na(sev_anchor), sev_anchor >= SEV_MIN)
-  long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
-  message("*** severity floor: sev_anchor >= ", SEV_MIN, " keeps ", nrow(surv_all), " of ", n_before,
-          " patients. log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the unrestricted fit ***")
-}
-
 # =============================================================================
 # 13e. Marker specification
 # =============================================================================
@@ -286,6 +253,70 @@ if (nzchar(want_markers)) {
 want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main,hetero"), ",")[[1]])
 stopifnot(all(want_models %in% c("main", "hetero")))
 
+# =============================================================================
+# 13e2. Cohort restrictions: per-marker severity anchor and the baseline SF band
+# =============================================================================
+# (13_biotrauma_grid.R defines the anchors and the knobs.) The anchor distribution
+# of every marker in this run is written on every run, among patients with that
+# marker's baseline, so a floor can be chosen from the ventilated cohort's
+# aggregate. Adjacent values are MERGED until every band holds 10 or more patients:
+# masking a small cell would not protect it, because the cumulative column gives it
+# back. PBWPFVC_JM_ANCHOR_ONLY=1 writes the table and stops before any fit.
+if (!all(ANCHOR_POOL %in% names(surv_all)))
+  stop("jm_surv lacks the SOFA components (", paste(setdiff(ANCHOR_POOL, names(surv_all)), collapse = ", "),
+       "): rebuild the panel (13_biotrauma_panel.R) with the current code")
+anchor_of <- function(patient_table, marker) rowSums(as.matrix(patient_table[, anchor_components(marker)]))
+merge_to_bands <- function(anchor_values) {
+  anchor_counts <- tibble(sev_anchor = anchor_values) %>% filter(!is.na(sev_anchor)) %>%
+    count(sev_anchor, name = "n_patients") %>% arrange(sev_anchor)
+  band_id <- integer(nrow(anchor_counts)); running_n <- 0L; current_band <- 1L
+  for (row_i in seq_len(nrow(anchor_counts))) {
+    band_id[row_i] <- current_band
+    running_n <- running_n + anchor_counts$n_patients[row_i]
+    if (running_n >= 10L) { current_band <- current_band + 1L; running_n <- 0L }
+  }
+  if (running_n > 0L && current_band > 1L) band_id[band_id == current_band] <- current_band - 1L   # short tail joins the band below
+  anchor_counts %>% mutate(band = band_id) %>% group_by(band) %>%
+    summarise(sev_anchor_from = min(sev_anchor), sev_anchor_to = max(sev_anchor),
+              n_patients = sum(n_patients), .groups = "drop") %>%
+    mutate(pct = round(100 * n_patients / sum(n_patients), 1),
+           pct_at_or_above_from = round(100 * rev(cumsum(rev(n_patients))) / sum(n_patients), 1)) %>%
+    select(-band)
+}
+severity_anchor <- map_dfr(markers, function(mk) {
+  with_baseline <- surv_all %>% filter(!is.na(.data[[mk$y0]]))
+  if (nrow(with_baseline) < 10L) return(NULL)
+  merge_to_bands(anchor_of(with_baseline, mk$name)) %>%
+    mutate(marker = mk$name, anchor = anchor_label(mk$name), .before = 1)
+}) %>% mutate(cohort = config$cohort, site = site_name)
+if (nrow(severity_anchor)) {
+  stopifnot(all(severity_anchor$n_patients >= 10L | ave(severity_anchor$n_patients, severity_anchor$marker, FUN = length) == 1L))
+  anchor_path <- file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv"))
+  if (file.exists(anchor_path)) {   # merge on write: keep other markers' rows from earlier runs
+    anchor_on_disk <- read_csv(anchor_path, show_col_types = FALSE)
+    # a file without a marker column is the retired single-anchor layout: replace it
+    if ("marker" %in% names(anchor_on_disk))
+      severity_anchor <- bind_rows(anchor_on_disk %>% filter(!marker %in% severity_anchor$marker), severity_anchor)
+  }
+  write_csv(severity_anchor, anchor_path)
+  message("Severity anchor by marker (index-day SOFA components, own component left out; bands of 10 or more):")
+  print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
+                        select(marker, anchor, sev_anchor_from, sev_anchor_to, n_patients, pct, pct_at_or_above_from)), row.names = FALSE)
+}
+if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
+  message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
+  quit(save = "no", status = 0)
+}
+# The patients a marker's fit may use, after the severity floor and the SF band.
+# log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the unrestricted fit.
+restricted_patients <- function(mk) {
+  kept <- surv_all
+  floor_value <- sev_floor_for(mk$name)
+  if (!is.na(floor_value)) kept <- kept[which(anchor_of(kept, mk$name) >= floor_value), ]
+  if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_0), sf_0 > sf_band_limits[1], sf_0 <= sf_band_limits[2])
+  kept
+}
+
 DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
 DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10",
                                     "+ sex_category + race_category")
@@ -313,7 +344,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
   bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
-                                              rrt_sfx, sev_sfx, "_", h_suffix, ".rds"))
+                                              rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
   if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
@@ -323,6 +354,15 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
       return(r)
     }
     stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
+  }
+  # --- cohort restrictions (severity floor on this marker's anchor, baseline SF band)
+  if (nzchar(restrict_tag)) {
+    n_cohort <- nrow(surv_all)
+    surv_all <- restricted_patients(mk)
+    long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
+    stamp("restricted to ", nrow(surv_all), " of ", n_cohort, " patients",
+          if (!is.na(sev_floor_for(mk$name))) paste0("; anchor (", anchor_label(mk$name), ") >= ", sev_floor_for(mk$name)) else "",
+          if (nzchar(SF_BAND)) paste0("; baseline SF in (", sf_band_limits[1], ", ", sf_band_limits[2], "]") else "")
   }
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
@@ -628,7 +668,7 @@ result_file <- function(marker, model, adj_lab)
   file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
                                if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
-                               sev_sfx, "_", h_suffix, ".rds"))
+                               restrict_sfx_for(marker), "_", h_suffix, ".rds"))
 RUN_START <- Sys.time()
 
 # =============================================================================
@@ -686,14 +726,18 @@ manifest <- map_dfr(results, function(r)
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
-         n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN, site = site_name)
+         n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
+         cohort = config$cohort,
+         sev_floor = vapply(marker, sev_floor_for, numeric(1)),
+         sev_anchor = if_else(is.na(sev_floor), NA_character_, vapply(marker, anchor_label, character(1))),
+         sf_band = if (nzchar(SF_BAND)) SF_BAND else NA_character_, site = site_name)
 estimates  <- map_dfr(results, "estimates")
 absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")
 
 # Output tag: non-default forms (baseline offset, saturated or no modifier) get
 # their own files so a sensitivity run never overwrites the primary's rows.
-out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", sev_tag,
+out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                   if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                   h_suffix, "_", site_name)

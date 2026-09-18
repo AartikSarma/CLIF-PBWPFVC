@@ -150,9 +150,8 @@ base <- cs %>%
             # the respiratory component is computed from that same SF ratio, so the
             # two are collinear in the hazard (MIMIC: log SF x death R-hat 4.3)
             np_sofa = sofa_total - sofa_resp,
-            # severity anchor for cohort matching: no respiratory, coagulation or liver
-            # component, so it contains none of the biotrauma markers (13_biotrauma_grid.R)
-            sev_anchor = sofa_cv_97 + sofa_cns + sofa_renal,
+            # SOFA components for the per-marker severity anchor (13_biotrauma_grid.R)
+            sofa_cv_97, sofa_coag, sofa_liver, sofa_renal,
             age_grp = cut(age_at_admission, c(-Inf, age_breaks, Inf),
                           labels = c("Young", "Middle", "Old")),
             height_grp = cut(height_z, c(-Inf, quantile(height_z, c(1/3, 2/3), na.rm = TRUE), Inf),
