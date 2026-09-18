@@ -34,9 +34,6 @@ initialize_renv.R
 # ignore all generated analysis outputs
 output/
 
-# ignore rendered figures (regenerable from the figures/*.py scripts)
-figures/*.png
-
 # ignore collected per-site results for central pooling (read by pooled_estimates.R)
 results/
 
@@ -64,5 +61,3 @@ code/pooling/pooled_tte.R
 # session-local data exports at repo root -- never commit patient-derived data
 arma_pfvc_data*.csv
 
-# python bytecode cache for the figures/*.py scripts
-figures/__pycache__/

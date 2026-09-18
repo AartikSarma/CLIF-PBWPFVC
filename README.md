@@ -75,10 +75,10 @@ Lung-protective ventilation is defined as VT/PBW between 6–8 mL/kg.
 | 2 | That bias tracks otherwise unexplained differences in respiratory mechanics | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
 | 3 | The bias is associated with mortality | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
 | 4 | The bias is associated with rising markers of organ injury over time, in ventilated patients and not in the control cohorts | `injury`, `controls` | `20`–`29` |
-| 5 | Causal inference: target trial emulation and a practice-preference instrument | `causal` | `30`–`38` |
 
-[`code/README.md`](code/README.md) lists every script, what it reads and writes, and
-the old script names.
+A fifth figure, on causal inference, is not in the paper yet; its scripts are in the
+tag `pre-prune-2026-09-19`. [`code/README.md`](code/README.md) lists every script and
+what it writes, and says how to restore what was removed.
 
 ## Outputs
 
@@ -93,8 +93,6 @@ Each site has one output folder, `output/<site_name>_output/`:
   |---|---|---|
   | `final/cross_sectional/` | figures 1-3 | `03`-`05` |
   | `final/injury/` | figure 4 | `21`-`28` |
-  | `final/causal/` | figure 5 | `30`-`38`, and the target-trial supplements, which share the engine's folder |
-  | `final/supplement/` | everything else in `code/supplement/` | |
   | `final/controls/` | the control cohorts, all in one folder; file names carry `<site>_<cohort>` | `01`-`03`, `21`-`26` under `PBWPFVC_COHORT` |
 
   A script asks `utils/config.R` for its folder with `final_dir_for("<block>")`.
@@ -105,11 +103,10 @@ data leaves the site.
 
 **Output file names are an interface between scripts.** Every pooling and figure
 script finds its inputs by file-name prefix (`regression_results_long_`, `norm_`,
-`jm_`, `injury_`, `tte_`, ...). A prefix may change until the code is distributed to
-other sites, but change it together with its readers, in one commit: the pooling
-scripts in `code/pooling/`, `24_biotrauma_figures.R`, `27_control_comparison.R`,
-`28_biotrauma_summary.R` and `figures/*.py`. Once sites have returned `final/`
-folders, a renamed prefix orphans their results.
+`jm_`, `injury_`, ...). A prefix may change until the code is distributed to other
+sites, but change it together with its readers, in one commit: the pooling scripts in
+`code/pooling/`, `24_biotrauma_figures.R` and `27_control_comparison.R`. Once sites
+have returned `final/` folders, a renamed prefix orphans their results.
 
 ## Running the project
 
@@ -134,7 +131,6 @@ ask for, each script as a clean subprocess. From the repository root:
 ```bash
 Rscript code/00_run_pipeline.R                          # prep + cross_sectional (figures 1-3)
 Rscript code/00_run_pipeline.R --stages injury,controls # figure 4 and its control cohorts
-Rscript code/00_run_pipeline.R --stages causal          # figure 5
 Rscript code/00_run_pipeline.R --stages all
 ```
 
@@ -144,7 +140,6 @@ Rscript code/00_run_pipeline.R --stages all
 | `cross_sectional` | `04`, `05` | minutes |
 | `injury` | `29_run_biotrauma.sh`: panels, fixed-horizon comparators, joint models, figures | hours |
 | `controls` | `29_run_controls.sh build` then `anchors`: builds the no-support and noninvasive cohorts together and writes the severity-anchor distributions | under an hour |
-| `causal` | `32_tte_run_all.R`, `38_iv_preference.R` | hours |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
 what this runner has always done, so existing site instructions still work.
@@ -174,16 +169,14 @@ scripts in `code/pooling/` after every site has returned its `final/` folder. Th
 expect a results root with one subfolder per site (each site's `final/` renamed to
 the site name), by default the local `results/` folder, and write to an `All sites/`
 subfolder there. Override the root with `PBWPFVC_RESULTS_ROOT`. Each script reads
-only the block subfolders it pools (`cross_sectional/`, `injury/`, `causal/`) and never
+only the block subfolder it pools (`cross_sectional/` or `injury/`) and never
 `controls/`, so a control cohort cannot enter a pool of the ventilated cohort. `pooled_biotrauma.R` is in the repository;
-`pooled_estimates.R` and `pooled_tte.R` are kept local and gitignored.
+`pooled_estimates.R` is kept local and gitignored.
 
-### Supplements and archive
+### Archive
 
-`code/supplement/` holds tracked lead-site analyses that no runner calls:
-sensitivity analyses, diagnostics and earlier lines of inquiry. Its
-[README](code/supplement/README.md) is the inventory. `code/archive/` is gitignored
-local scratch.
+`code/archive/` is gitignored local scratch. Scripts removed from the repository are
+recoverable from the tag `pre-prune-2026-09-19`.
 
 ## Data safety
 

@@ -106,7 +106,7 @@ stopifnot(CUM_FORM %in% c("none", "mean", "days"))
 CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cum_days_above")
 # Effect modifier of the dose slope (PRIMARY = "disc"): the within-patient VT/PBW
 # change interacts with centred log PBW/PFVC discordance and, in the adjusted
-# model, with the age spline (the tte_within_demographic_hte adjudicator: discordance is 99%
+# model, with the age spline (the within-demographic adjudicator: discordance is 99%
 # demographics, so a discordance interaction only means something if it survives
 # an age interaction). "saturated" interacts the dose change with log PBW and log
 # PFVC separately (mirrors 4k). "none" fits the dose change alone.

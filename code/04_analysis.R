@@ -1153,12 +1153,12 @@ ggsave(file.path(final_dir, paste0("bias_pbwpfvc_ratio_", site_name, ".pdf")),
 message("All bias diagnostic plots saved")
 
 # NOTE: the federated per-percentile conditional-bias export that drives the POOLED
-# cross-cohort bias plots lives in a SEPARATE, deferred script — code/
-# xsec_cbias_federated_export.R — not this pipeline. After stratification some
+# cross-cohort bias plots is DEFERRED and not in this repository (it is recoverable
+# from the tag pre-prune-2026-09-19, as cbias_federated_export.R). After stratification some
 # (stratum x percentile) cells fall below n = 10, so those aggregates must be run
 # through the consortium's deterministic additive-masking pipeline before they can
 # leave a site, which is held until all sites confirm participation. The pooled
-# plots are likewise deferred in code/pooling/cbias_pooled_plots.R.
+# plots are likewise deferred.
 
 # =============================================================================
 # 4i. Inclusion CONSORT diagram + PBW:PFVC-by-demographics figure (site QC)

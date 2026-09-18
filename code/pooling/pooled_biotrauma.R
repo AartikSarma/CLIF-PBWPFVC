@@ -53,10 +53,10 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F
 # read one file family from every site, tagging the site; tolerant of absent files
 read_family <- function(pattern) {
   map_dfr(sites, function(s) {
-    # a returned final/ is sorted by block; the injury tables are in injury/, the preference
-    # instrument in causal/. controls/ is never listed, so a control cohort cannot enter a pool
-    # of the ventilated one. The site folder itself is listed too, for a flat (older) return.
-    fs <- list.files(file.path(root, s, c("", "injury", "causal")), pattern = pattern, full.names = TRUE)
+    # a returned final/ is sorted by block; the tables pooled here are in injury/. controls/
+    # is never listed, so a control cohort cannot enter a pool of the ventilated one. The
+    # site folder itself is listed too, for a flat (older) return.
+    fs <- list.files(file.path(root, s, c("", "injury")), pattern = pattern, full.names = TRUE)
     if (!length(fs)) return(NULL)
     map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5) %>%
               mutate(site = s, file = basename(f), .before = 1))
@@ -150,11 +150,6 @@ for (fam in c("quick_dose_channels", "quick_sf_channels")) {
   if (nrow(x) && "estimate" %in% names(x))
     pooled[[fam]] <- pool_by(x %>% filter(!is.na(estimate)), marker, exposure, model_horizon_h, model, term)
 }
-
-# --- 7. the practice-variation instrument (38_iv_preference): naive and 2SLS risk differences per site
-ivp <- read_family("^iv_preference_[A-Za-z0-9_]+\\.csv$")
-if (nrow(ivp)) ivp <- ivp %>% filter(!grepl("^iv_preference_(balance|cells)_", file))
-if (nrow(ivp)) pooled$iv_preference <- pool_by(ivp, instrument, estimator, exposure)
 
 # --- write
 for (nm in names(pooled)) {

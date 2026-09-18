@@ -18,7 +18,6 @@
 #   controls         21-27   figure 4's control cohorts, built together into
 #                            final/controls/ (29_run_controls.sh build + anchors; the
 #                            matched fits run too when SEV_MIN is set in the environment)
-#   causal           30-38   figure 5: target trial emulation and the preference instrument
 #
 # The default is "prep,cross_sectional", which is what this runner has always done.
 # The later stages take hours; ask for them by name, or --stages all.
@@ -83,7 +82,7 @@ parse_pipeline_args <- function(args) {
              file_type = "PBWPFVC_FILE_TYPE", stages = "stages")
   flags <- c("analysis_only")
   usage <- paste0("Usage: Rscript code/00_run_pipeline.R [--site_name NAME] [--site_path DIR] ",
-                  "[--file_type parquet|csv|fst] [--stages prep,cross_sectional,injury,controls,causal|all] ",
+                  "[--file_type parquet|csv|fst] [--stages prep,cross_sectional,injury,controls|all] ",
                   "[--analysis_only]")
   out <- list(); i <- 1L
   while (i <= length(args)) {
@@ -107,7 +106,7 @@ parse_pipeline_args <- function(args) {
 }
 cli_args <- parse_pipeline_args(commandArgs(trailingOnly = TRUE))
 analysis_only <- isTRUE(cli_args$analysis_only); cli_args$analysis_only <- NULL
-ALL_STAGES <- c("prep", "cross_sectional", "injury", "controls", "causal")
+ALL_STAGES <- c("prep", "cross_sectional", "injury", "controls")
 stages <- if (!is.null(cli_args$stages)) trimws(strsplit(cli_args$stages, ",")[[1]]) else
   if (analysis_only) "cross_sectional" else c("prep", "cross_sectional")
 if (identical(stages, "all")) stages <- ALL_STAGES
@@ -160,8 +159,7 @@ stage_steps <- list(
   # the matched fits need a severity floor chosen from the anchors stage's output, so
   # they run only when SEV_MIN is already in the environment
   controls = c(list(sh_step("29_run_controls.sh", "build"), sh_step("29_run_controls.sh", "anchors")),
-               if (nzchar(Sys.getenv("SEV_MIN", ""))) list(sh_step("29_run_controls.sh", "fits"))),
-  causal = list(r_step("32_tte_run_all.R"), r_step("38_iv_preference.R"))
+               if (nzchar(Sys.getenv("SEV_MIN", ""))) list(sh_step("29_run_controls.sh", "fits")))
 )
 pipeline_steps <- unlist(stage_steps[stages], recursive = FALSE)
 if (analysis_only) {
@@ -201,5 +199,5 @@ if ("controls" %in% stages && !nzchar(Sys.getenv("SEV_MIN", "")))
 
 message("=============================================================")
 message("[00] Pipeline complete. All scripts ran successfully.")
-message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/, causal/, supplement/ and controls/.")
+message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/ and controls/.")
 message("=============================================================")

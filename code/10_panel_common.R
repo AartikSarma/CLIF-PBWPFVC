@@ -1,19 +1,16 @@
 # =============================================================================
-# the TTE (30_tte_common) (panel): the shared daily patient-day panel
+# Script 10 (panel): the shared daily patient-day panel
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
 #
-# Builds the baseline table and the day-level panel that both the longitudinal
-# target trial emulation (30_tte_common.R and its 11.* leaves) and the biotrauma
-# joint models (2x_biotrauma_*.R) run on. Factored out of 30_tte_common.R on
-# 2026-09-13 so the two analyses share one exposure grid, one set of daily
-# confounders, and one pair of event definitions (death day, extubation day).
+# Builds the baseline table and the day-level panel the biotrauma block runs on
+# (21_biotrauma_panel.R, 25_injury_at_horizon.R): one exposure grid, one set of
+# daily confounders, one pair of event definitions (death day, extubation day).
+# It was factored out of the target trial emulation, which shared it and is no
+# longer in the repository (tag pre-prune-2026-09-19); comments below that mention
+# "the TTE" describe that second caller, and its knobs still work.
 #
 # This file performs NO file writes and applies NO analysis-specific exclusion.
-# In particular the TTE's structural-positivity restriction (patients who cannot
-# reach the strain ceiling even at the VT floor) stays in 30_tte_common.R: it is
-# right for a ceiling emulation and wrong for a mechanism analysis, where those
-# patients carry the dose-response.
 #
 # Contract. The caller defines, BEFORE sourcing:
 #   output_dir    intermediate folder of the site (parquet inputs)

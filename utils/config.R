@@ -55,9 +55,6 @@ load_config <- function() {
   #                                      sorted by manuscript block (final_dir_for() below):
   #     final/cross_sectional/           figures 1-3 (scripts 03-05)
   #     final/injury/                    figure 4 (scripts 21-28)
-  #     final/causal/                    figure 5 (scripts 30-38, and the TTE supplements,
-  #                                      which share the engine's folder)
-  #     final/supplement/                what the other code/supplement/ scripts write
   #     final/controls/                  the control cohorts' aggregates, all in one folder
   # A control's FILE NAMES carry {site}_{cohort} (e.g. jm_estimates_pfvc_7d_MIMIC_nosupport.csv),
   # so config$site_name is that tag and config$base_site is the site itself. Setting
@@ -80,7 +77,7 @@ load_config <- function() {
 # The folder a script writes its aggregates to: final/<block>/ for the ventilated cohort.
 # A control cohort keeps everything in final/controls/, whatever the block, because its
 # file names already say which cohort they are and the comparison reads one folder.
-FINAL_BLOCKS <- c("cross_sectional", "injury", "causal", "supplement")
+FINAL_BLOCKS <- c("cross_sectional", "injury")
 final_dir_for <- function(block) {
   if (!block %in% FINAL_BLOCKS) stop("final_dir_for(): unknown block '", block, "'; blocks are ", paste(FINAL_BLOCKS, collapse = ", "))
   block_dir <- if (config$cohort == "imv") file.path(config$final_root, block) else config$final_dir

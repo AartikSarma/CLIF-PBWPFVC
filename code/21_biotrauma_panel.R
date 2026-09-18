@@ -26,7 +26,7 @@
 #
 # Design (docs/joint_model_plan_2026-09.md, sections 3 and 4):
 #   * every index-IMV patient enters at day 0; no survival-based restriction, and
-#     no structural-positivity exclusion (that is TTE-only)
+#     no structural-positivity exclusion
 #   * the exposure is the PREVIOUS day's median VT/PBW (the clinician's dose) as a
 #     deviation from the patient's mean over the course, taken by joining on
 #     vent_day - 1 so a missing day gives a missing lag rather than a two-day-old

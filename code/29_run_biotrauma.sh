@@ -12,7 +12,6 @@
 #     difference from the median-PFVC patient at +/- 1 SD over the window)
 #   * the fixed-horizon comparator per marker (25_injury_at_horizon.R) and the
 #     longitudinal model alone (26_quick_lme.R), with the channel decomposition
-#   * one summary table (28_biotrauma_summary.R)
 #
 # Every stage is cached: a rerun skips panels, comparators and quick LMEs whose
 # outputs exist, and the fit script reuses every finished fit from its result
@@ -185,7 +184,5 @@ for H in $HORIZONS; do
   done
 done
 
-# ---- 5. summary
-run_stage "summary" -- Rscript code/28_biotrauma_summary.R
-[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "summary -> $FINAL/biotrauma_summary_${SITE}.csv"; echo "headline figure -> $FINAL/biotrauma_fig_trajectory_pfvc_48h_${SITE}.pdf"; }
+[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "headline figure -> $FINAL/biotrauma_fig_trajectory_pfvc_48h_${SITE}.pdf"; }
 exit 0
