@@ -50,7 +50,7 @@ MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
 # RRT as a third competing cause (creatinine only): its own tables and its own
 # bundles, so the two-cause primary is never overwritten by the sensitivity
 RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
 out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "",
                    if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
@@ -73,7 +73,11 @@ est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv"
 # terms; the trajectory contrasts need only the exposure terms and their
 # time interactions, so those are gated separately (`exposure_rhat`).
 SIZE_EXPOS <- c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS)
-EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_pt_mean", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"), paste0("vent_day:", SIZE_EXPOS))
+DOSE_MOD   <- c("log_pfvc_sd:vtpbw_c", "vtpbw_c:log_pfvc_sd",
+                "log_pfvc_sd:vtpbw_c:vent_day", "vent_day:log_pfvc_sd:vtpbw_c",
+                "log_pfvc_sd:vent_day:vtpbw_c", "vtpbw_c:vent_day")
+EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_pt_mean", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"),
+                paste0("vent_day:", SIZE_EXPOS), DOSE_MOD)
 block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
   summarise(longitudinal_rhat = suppressWarnings(max(rhat[block == "longitudinal"], na.rm = TRUE)),
             exposure_rhat     = suppressWarnings(max(rhat[block == "longitudinal" & term %in% EXPO_TERMS], na.rm = TRUE)),
@@ -132,6 +136,9 @@ population_row <- function(ld) {
     sex_category  = factor(levels(factor(ld$sex_category))[1],  levels = levels(factor(ld$sex_category))),
     race_category = factor(levels(factor(ld$race_category))[1], levels = levels(factor(ld$race_category))),
     l_log_sf = median(ld$l_log_sf), l_pressor = 0)
+  # the dose-interaction form centres the patient's mean VT/PBW, so zero is the
+  # median dose and every contrast is reported there
+  if ("vtpbw_c" %in% names(ld))    row$vtpbw_c    <- 0
   if ("log_y0" %in% names(ld))     row$log_y0     <- median(pt$log_y0)
   if ("ers_pfvc_0" %in% names(ld)) row$ers_pfvc_0 <- median(pt$ers_pfvc_0, na.rm = TRUE)
   row
@@ -144,7 +151,11 @@ level_rows <- list()
 # spacing, because the contrast is a level plus a rate times time and a reader
 # comparing rows is reading a slope off the page. A 48 or 72-hour run gets the
 # 24/48(/72) rows it always had.
-LEVEL_HOURS <- sort(unique(c(seq(24, floor(JM_HORIZON) * 24, by = 24), JM_HORIZON * 24)))
+# t = 0 is included so the trend panel starts at the index rather than at day 1.
+# The contrast there is the level term alone, which is an extrapolation: no
+# marker row exists at day 0 (each trajectory starts the period after that
+# patient's baseline draw), so read it as the model's anchor, not as data.
+LEVEL_HOURS <- sort(unique(c(0, seq(24, floor(JM_HORIZON) * 24, by = 24), JM_HORIZON * 24)))
 traj_plots <- list()
 
 for (i in seq_len(nrow(usable))) {
@@ -173,6 +184,7 @@ for (i in seq_len(nrow(usable))) {
 
   # ---- Q1 coefficients, per unit and per SD of the log marker
   for (term in c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c", "vtpbw_pt_mean",
+                 DOSE_MOD,
                  "l_vtpbw_within:log_pbw", "l_vtpbw_within:log_pfvc",
                  "mean_prior_vtpfvc", "cum_days_above", "ers_pfvc_0:l_vtpbw_within")) {
     if (!term %in% colnames(draws)) next

@@ -130,7 +130,14 @@ MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
 # VT/PBW with a different VT/PFVC"; at a given VT/PBW it is the PBW/PFVC
 # discordance contrast scaled by the dose. The hazard carries the index VT/PFVC
 # (percent) in place of log PFVC.
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
+# The control cohorts receive no set tidal volume, so every dose term is dropped
+# and the joint model becomes the PFVC trajectory alone. That is the point of
+# them: if smaller lungs still diverge where no ventilator is acting, the
+# divergence is the patient rather than the breath.
+HAS_DOSE <- config$cohort == "imv"
+if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "disc_level", "vtpfvc", "pfvc_dose"))
+  stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc or channels for the ", config$cohort, " cohort")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
@@ -286,7 +293,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   }
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
-    filter(period >= 1L, !is.na(.data[[mk$y]]), !is.na(l_vtpfvc), !is.na(l_sf), !is.na(l_pressor)) %>%
+    filter(period >= 1L, !is.na(.data[[mk$y]]), if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE,
+           !is.na(l_sf), !is.na(l_pressor)) %>%
     mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
@@ -294,7 +302,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
                                    all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
-    filter(!is.na(np_sofa), !is.na(vtpbw_pt_mean), !is.na(l_vtpbw_within),
+    filter(!is.na(np_sofa),
+           if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE,
+           if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE,
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
   # centred age for the dose x age interaction: uncentred, the interaction and the
   # dose main effect are collinear (age10 has a large mean relative to its spread)
@@ -313,9 +323,10 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   #     and log PFVC (size), the paper's primary parameterization
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    filter(!is.na(vtpbw_idx), !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
+    filter(if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE, !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
            if (MOD_FORM == "vtpfvc") is.finite(vtpfvc_idx) else TRUE) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
+  if (HAS_DOSE) ld <- ld %>% mutate(vtpbw_c = vtpbw_pt_mean - median(vtpbw_pt_mean, na.rm = TRUE))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
   lv <- sort(unique(ld$hospitalization_id))
   ld$id  <- factor(ld$hospitalization_id,  levels = lv)
@@ -339,8 +350,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
         if (use_rrt) paste0(", ", n_rrt, " RRT starts (third competing cause; death here means death before dialysis)") else "")
   # within-patient spread of the dose: a null dose slope on an exposure that
   # barely moves is a power statement, not a finding
-  within_sd <- sd(ld$l_vtpbw_within)
-  frac_moved <- mean(abs(ld$l_vtpbw_within) > 0.5)
+  within_sd  <- if (HAS_DOSE) sd(ld$l_vtpbw_within) else NA_real_
+  frac_moved <- if (HAS_DOSE) mean(abs(ld$l_vtpbw_within) > 0.5) else NA_real_
   counts <- tibble(marker = mk$name, model = model, adjustment = adj_lab,
                    n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub,
                    n_rrt = n_rrt, rrt_competing = use_rrt,
@@ -352,7 +363,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", "l_vtpbw_within", "vtpbw_pt_mean", "ldisc_c",
+  num_cols <- intersect(c("log_y", "log_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"), "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
@@ -387,14 +398,23 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     disc       = c("l_vtpbw_within * ldisc_c", if (adjusted) "l_vtpbw_within:age10_c"),
     saturated  = c("l_vtpbw_within * (log_pbw + log_pfvc)", if (adjusted) "l_vtpbw_within:age10_c"),
     none       = "l_vtpbw_within",
-    pfvc       = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
+    pfvc       = c(if (HAS_DOSE) "l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day"),
+    # The vulnerability form. The pfvc rate asks whether smaller lungs deteriorate
+    # faster during ventilation; it does not ask whether they are harmed more BY
+    # the volume delivered, which is what "more vulnerable to injury" claims. That
+    # is an effect modification, so the dose (the patient's mean VT/PBW, centred)
+    # multiplies both the size term and its divergence. The three-way term
+    # log_pfvc_sd:vtpbw_c:vent_day IS the vulnerability parameter: divergence per
+    # day per SD of lung size, per extra mL/kg delivered.
+    pfvc_dose  = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day",
+                   "vtpbw_c:vent_day", "log_pfvc_sd:vtpbw_c", "log_pfvc_sd:vtpbw_c:vent_day"),
     disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
-    channels   = c("l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
+    channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
-  rhs <- c(time_term, mod_terms, "vtpbw_pt_mean", CUM_TERM,
+  rhs <- c(time_term, mod_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
            lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
@@ -436,7 +456,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # channels form: the size term of the hazard is the four pieces too, in place of log PFVC and the demographics
   size_haz <- if (MOD_FORM == "channels") CHANNELS else if (MOD_FORM == "vtpfvc") "vtpfvc_idx" else
               if (HAZARD_INT) "vtpbw_idx * log_pfvc" else "log_pfvc"
-  cox_rhs <- paste(c(if (!HAZARD_INT || MOD_FORM == "channels") "vtpbw_idx", size_haz,
+  cox_rhs <- paste(c(if (HAS_DOSE && (!HAZARD_INT || MOD_FORM == "channels")) "vtpbw_idx", size_haz,
                      "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
                      if (adjusted && MOD_FORM != "channels") DEMO_RHS_HAZARD()), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))

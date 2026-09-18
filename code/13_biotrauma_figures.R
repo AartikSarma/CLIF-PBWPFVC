@@ -34,7 +34,7 @@ source("utils/config.R")
 site_name <- config$site_name
 source(here("code", "13_biotrauma_grid.R"))
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column
+SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column (pfvc_dose: at the median dose)
 SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)",
                     vtpfvc = "per point of VT/PFVC (% of predicted FVC) at a given VT/PBW", "per SD of log PFVC")
 TRAJ_STEP <- if (MOD_FORM == "vtpfvc") 2 else 1   # the trajectory figure's contrast: +/- 2 points of VT/PFVC, else +/- 1 SD
