@@ -135,7 +135,12 @@ population_row <- function(ld) {
 
 trajectory_rows <- list(); strain_rows <- list(); assoc_rows <- list(); hetero_rows <- list()
 level_rows <- list()
-LEVEL_HOURS <- c(24, 48, 72)
+# Horizons for the level contrast. The fixed three suit a 48 or 72-hour window;
+# a longer run (the 7-day daily grid, for a marker like bilirubin that turns over
+# in days) must also report at its own endpoint, or the contrast the run exists
+# to produce is never written. Filtered to the horizon below, so a 48-hour run
+# keeps exactly the rows it had before.
+LEVEL_HOURS <- sort(unique(c(24, 48, 72, 120, JM_HORIZON * 24)))
 traj_plots <- list()
 
 for (i in seq_len(nrow(usable))) {
