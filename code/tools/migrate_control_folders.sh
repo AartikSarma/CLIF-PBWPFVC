@@ -22,15 +22,15 @@ SITE=${1:-}; APPLY=${2:-}
 ROOT="output/${SITE}_output"
 [ -d "$ROOT" ] || { echo "no $ROOT: run from a checkout that holds the site's outputs"; exit 1; }
 
-move_tree () {   # source dir, destination dir
-  local src=$1 dst=$2 n_moved=0 n_kept=0
+move_tree () {   # source dir, destination dir, optional find depth limit
+  local src=$1 dst=$2 depth=${3:-} n_moved=0 n_kept=0
   [ -d "$src" ] || return 0
   while IFS= read -r -d '' path; do
     rel=${path#"$src"/}
     if [ -e "$dst/$rel" ]; then n_kept=$((n_kept + 1)); echo "  exists, left in place: $dst/$rel"; continue; fi
     n_moved=$((n_moved + 1))
     if [ "$APPLY" = "--apply" ]; then mkdir -p "$(dirname "$dst/$rel")" && mv "$path" "$dst/$rel"; fi
-  done < <(find "$src" -type f -print0)
+  done < <(find "$src" $depth -type f -print0)
   echo "  $src -> $dst: $n_moved files to move, $n_kept already there"
   if [ "$APPLY" = "--apply" ]; then find "$src" -type d -empty -delete 2>/dev/null; fi
 }
@@ -42,7 +42,10 @@ for COHORT in nosupport niv; do
   move_tree "$OLD/intermediate" "$ROOT/intermediate/controls/$COHORT"
   move_tree "$OLD/final"        "$ROOT/final/controls"
   move_tree "$OLD/logs"         "$ROOT/logs/$COHORT"
-  move_tree "$OLD"              "$ROOT/logs/$COHORT"      # stray top-level logs (01-03, biotrauma.out)
+  # stray logs at the top of the old folder (01-03, biotrauma.out). TOP LEVEL ONLY: a
+  # patient-level file left in place above because its destination exists must never
+  # be swept into logs/
+  move_tree "$OLD"              "$ROOT/logs/$COHORT" "-maxdepth 1"
   if [ "$APPLY" = "--apply" ]; then rmdir "$OLD" 2>/dev/null && echo "  removed empty $OLD"; fi
 done
 [ "$APPLY" = "--apply" ] || echo "dry run: nothing moved. Re-run with --apply."

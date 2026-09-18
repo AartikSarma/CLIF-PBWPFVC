@@ -39,6 +39,8 @@ HORIZON=${HORIZON:-7}
 
 BASE_SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
 [ -n "$BASE_SITE" ] || { echo "could not read site_name from config/config.json"; exit 1; }
+# an older shell may still export PBWPFVC_SITE_NAME={site}_{cohort}; utils/config.R strips it, so must this
+BASE_SITE="${BASE_SITE%_niv}"; BASE_SITE="${BASE_SITE%_nosupport}"
 LOG_DIR="output/${BASE_SITE}_output/logs/controls_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOG_DIR"
 echo "site ${BASE_SITE}; markers ${MARKERS}; logs in ${LOG_DIR}"
