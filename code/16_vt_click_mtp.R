@@ -57,16 +57,15 @@
 # effect modification at all; the risk-ratio check does not catch this. click_strain holds the
 # strain cut constant. If the PFVC slope flattens under click_strain, the click_all slope was dose
 # heterogeneity, which is itself evidence that strain is the dose; if it persists, it is effect
-# modification. The strain-matched click lands between the 50-mL heaps, so check its positivity row. This block follows the titration
-# script's CATE code in compact form (copied rather than moved to utils/, per the project's
+# modification. The strain-matched click lands between the 50-mL heaps, so check its positivity
+# row. This block follows the titration script's CATE code in compact form (copied rather than moved to utils/, per the project's
 # preference for inline analysis code).
 #
-# COVARIATES W: ns(age, 4), sex, race, ns(height, 4) x sex, SOFA, log SF ratio, ventilator mode,
-# and BMI. BMI DEPARTS FROM THE PROJECT RULE that BMI enters only pressure outcomes. The reason is
-# the treatment model: clinicians often set VT from ACTUAL weight, so weight drives the setting and
-# also predicts mortality. With height in W, BMI and weight carry the same information.
-# --no_bmi drops it. PBW, PFVC and the policy thresholds (functions of height, sex, age, race)
-# ride along as columns because lmtp passes the shift function only model columns.
+# COVARIATES W: ns(age, 4), sex, race, ns(height, 4) x sex, SOFA, log SF ratio, ventilator mode.
+# No BMI, per the project rule that BMI enters only pressure outcomes (it carries height, the
+# exposure's identifying variation). --with_bmi adds it as a sensitivity. PBW, PFVC and the policy
+# thresholds (functions of height, sex, age, race) ride along as columns because lmtp passes the
+# shift function only model columns.
 #
 # COHORT. PRIMARY: index modes where the clinician sets VT (assist control-volume control,
 # pressure-regulated volume control, SIMV). NOTE: script 03's VCV class holds only AC-VC and puts
@@ -93,7 +92,7 @@
 #   final/click_mtp_{site}.pdf
 #   Non-default options add a suffix before the site name, so runs never overwrite each other.
 # Usage: Rscript code/16_vt_click_mtp.R [--site_name NAME] [--output_root DIR]
-#          [--modes vt_set|all] [--on_grid_only] [--no_bmi] [--tau_pfvc 11] [--click_ml 50]
+#          [--modes vt_set|all] [--on_grid_only] [--with_bmi] [--tau_pfvc 11] [--click_ml 50]
 #   Env: PBWPFVC_CLICK_FOLDS (5), PBWPFVC_CLICK_BOOT (500), PBWPFVC_CORES.
 # =============================================================================
 rm(list = ls())
@@ -101,9 +100,9 @@ rm(list = ls())
 # --- Command-line arguments (parsed the way code/00_run_pipeline.R parses its own) ------
 parse_script_args <- function(args) {
   valued <- c("site_name", "output_root", "modes", "tau_pfvc", "click_ml")
-  flags  <- c("on_grid_only", "no_bmi")
+  flags  <- c("on_grid_only", "with_bmi")
   usage <- paste("Usage: Rscript code/16_vt_click_mtp.R [--site_name NAME] [--output_root DIR]",
-                 "[--modes vt_set|all] [--on_grid_only] [--no_bmi] [--tau_pfvc PCT] [--click_ml ML]")
+                 "[--modes vt_set|all] [--on_grid_only] [--with_bmi] [--tau_pfvc PCT] [--click_ml ML]")
   parsed <- list(); i <- 1L
   while (i <= length(args)) {
     a <- args[[i]]
@@ -129,13 +128,13 @@ cli_args <- parse_script_args(commandArgs(trailingOnly = TRUE))
 MODE_SET     <- if (is.null(cli_args$modes)) "vt_set" else cli_args$modes
 if (!MODE_SET %in% c("vt_set", "all")) stop("--modes must be vt_set or all; got '", MODE_SET, "'")
 ON_GRID_ONLY <- isTRUE(cli_args$on_grid_only)
-USE_BMI      <- !isTRUE(cli_args$no_bmi)
+USE_BMI      <- isTRUE(cli_args$with_bmi)
 TAU_PFVC     <- if (is.null(cli_args$tau_pfvc)) 11 else as.numeric(cli_args$tau_pfvc)
 CLICK_ML     <- if (is.null(cli_args$click_ml)) 50 else as.numeric(cli_args$click_ml)
 if (!is.finite(TAU_PFVC) || TAU_PFVC <= 0) stop("--tau_pfvc must be a positive number (% of predicted FVC)")
 if (!is.finite(CLICK_ML) || CLICK_ML <= 0) stop("--click_ml must be a positive number of mL")
 run_suffix <- paste0(if (MODE_SET != "vt_set") "_allmodes" else "", if (ON_GRID_ONLY) "_ongrid" else "",
-                     if (!USE_BMI) "_nobmi" else "", if (TAU_PFVC != 11) sprintf("_tau%g", TAU_PFVC) else "",
+                     if (USE_BMI) "_bmi" else "", if (TAU_PFVC != 11) sprintf("_tau%g", TAU_PFVC) else "",
                      if (CLICK_ML != 50) sprintf("_click%g", CLICK_ML) else "")
 
 # Run from the repository root whatever the caller's working directory. --output_root is
