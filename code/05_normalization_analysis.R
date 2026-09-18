@@ -59,7 +59,7 @@ source("utils/config.R")
 site_name <- config$site_name
 
 output_dir <- config$output_dir
-final_dir  <- config$final_dir
+final_dir  <- final_dir_for("cross_sectional")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))

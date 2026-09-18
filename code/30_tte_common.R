@@ -42,7 +42,7 @@ library(parallel)
 source("utils/config.R")
 site_name  <- config$site_name
 output_dir <- config$output_dir
-final_dir  <- config$final_dir
+final_dir  <- final_dir_for("causal")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 okabe <- c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
 RNGkind("L'Ecuyer-CMRG"); set.seed(20260617)

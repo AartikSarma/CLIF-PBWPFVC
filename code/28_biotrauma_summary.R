@@ -1,7 +1,7 @@
 # =============================================================================
-# Script 28 (summary): one table from the overnight biotrauma run
+# Script 28 (summary): one table from a biotrauma run
 # =============================================================================
-# Reads only the site's final/ CSVs and writes overnight_summary_{site}.csv, one
+# Reads only the site's final/ CSVs and writes biotrauma_summary_{site}.csv, one
 # row per estimate in long format (source file, family, marker, form, panel
 # horizon, contrast horizon, model / adjustment, exposure or term, estimate,
 # interval, p, status), and prints the fit status table from every manifest so
@@ -13,7 +13,7 @@ suppressPackageStartupMessages({ library(tidyverse); library(here) })
 rm(list = ls())
 source("utils/config.R")
 site_name <- config$site_name
-final_dir <- Sys.getenv("PBWPFVC_FIG_DIR", config$final_dir)
+final_dir <- Sys.getenv("PBWPFVC_FIG_DIR", final_dir_for("injury"))
 
 files <- list.files(final_dir, "\\.csv$", full.names = TRUE)
 fam_of <- function(f) str_match(basename(f), "^(jm_manifest|jm_level_contrast|injury_at_horizon_counts|injury_at_horizon|injury_channels|injury_nested|injury_dose_channels|injury_sf_channels|injury_negctrl|quick_lme|quick_channels|quick_nested|quick_dose_channels|quick_sf_channels)_")[, 2]
@@ -72,8 +72,8 @@ for (i in seq_along(files)) {
   if (!is.null(r)) rows[[length(rows) + 1]] <- bind_cols(base[rep(1, nrow(r)), ], r)
 }
 summary_tbl <- bind_rows(rows) %>% mutate(site = site_name)
-write_csv(summary_tbl, file.path(final_dir, paste0("overnight_summary_", site_name, ".csv")))
-message("overnight_summary: ", nrow(summary_tbl), " rows from ", length(files), " tables -> ", final_dir)
+write_csv(summary_tbl, file.path(final_dir, paste0("biotrauma_summary_", site_name, ".csv")))
+message("biotrauma_summary: ", nrow(summary_tbl), " rows from ", length(files), " tables -> ", final_dir)
 
 if (length(manifests)) {
   st <- bind_rows(manifests) %>%

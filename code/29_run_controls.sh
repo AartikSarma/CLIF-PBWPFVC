@@ -4,7 +4,7 @@
 # divergence-by-lung-size comparison
 # =============================================================================
 # Everything lands in the site's one output folder: the controls' aggregates in
-# output/{site}_output/final/controls/, the comparison in final/. Three stages,
+# output/{site}_output/final/controls/, the comparison in final/injury/. Three stages,
 # because the severity floor is chosen from the ventilated cohort's anchor
 # distribution and that has to be read before the matched fits run.
 #
@@ -81,7 +81,7 @@ case "$STAGE" in
       run_step "${COHORT}_anchors" env PBWPFVC_JM_ANCHOR_ONLY=1 Rscript code/22_biotrauma_fit.R
     done
     echo "anchor distributions:"
-    echo "  output/${BASE_SITE}_output/final/jm_severity_anchor_${HORIZON}d_${BASE_SITE}.csv"
+    echo "  output/${BASE_SITE}_output/final/injury/jm_severity_anchor_${HORIZON}d_${BASE_SITE}.csv"
     echo "  output/${BASE_SITE}_output/final/controls/jm_severity_anchor_${HORIZON}d_${BASE_SITE}_nosupport.csv"
     ;;
   fits)

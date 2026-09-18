@@ -39,7 +39,7 @@ dir.create(cbias_dir, recursive = TRUE, showWarnings = FALSE)
 okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
                "#0072B2", "#D55E00", "#CC79A7", "#000000")
 
-cbias_files <- Sys.glob(here("output", "*_output", "final", "cbias_export_*.csv"))
+cbias_files <- Sys.glob(here("output", "*_output", "final", "supplement", "cbias_export_*.csv"))
 if (length(cbias_files) == 0) {
   stop("No per-site cbias_export_*.csv found. Run code/supplement/xsec_cbias_federated_export.R ",
        "for each cohort (and apply masking) first.")

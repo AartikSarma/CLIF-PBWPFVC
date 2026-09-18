@@ -21,11 +21,12 @@
 # change from baseline by day, from jm_movement_*) is therefore read before the
 # divergence: no movement, no possible divergence, and the arm cannot adjudicate.
 #
-# Arms are discovered from the files present. Each cohort lives in its own site
-# folder ({site}, {site}_nosupport, {site}_niv); each restriction carries its own
-# tag. Run with the base config (no PBWPFVC_COHORT / PBWPFVC_SITE_NAME override).
+# Arms are discovered from the files present: the ventilated cohort's tables in
+# final/injury/, the control cohorts' in final/controls/ (file names tagged
+# {site}_nosupport, {site}_niv); each restriction carries its own tag. Run with
+# PBWPFVC_COHORT unset.
 #
-# Outputs, in the base site's final/ folder:
+# Outputs, in final/injury/:
 #   jm_control_comparison_{form}_{tag}_{site}.csv
 #   jm_control_movement_{form}_{tag}_{site}.csv
 #   jm_control_comparison_{form}_{tag}_{site}.pdf
@@ -47,7 +48,7 @@ source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 stopifnot(MOD_FORM %in% c("pfvc", "channels"))
 RHAT_GATE <- 1.1
-final_dir <- config$final_dir                     # the site's final/; the controls sit in final/controls/
+final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
 cohort_folders <- tibble(cohort = c("imv", "niv", "nosupport"),
@@ -57,7 +58,7 @@ cohort_folders <- tibble(cohort = c("imv", "niv", "nosupport"),
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")
 arms <- pmap_dfr(cohort_folders, function(cohort, cohort_label, site) {
-  folder <- if (cohort == "imv") final_dir else file.path(final_dir, "controls")
+  folder <- if (cohort == "imv") final_dir else file.path(config$final_root, "controls")
   found <- list.files(folder, pattern = paste0("^jm_estimates_.*", file_stub(site), "$"))
   restriction <- sub(paste0(file_stub(site), "$"), "", sub("^jm_estimates_", "", found))
   # only the cohort-restriction tags; the rrtcause_ and offset_ variants are other analyses

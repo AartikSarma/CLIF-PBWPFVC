@@ -197,9 +197,9 @@ for (step in pipeline_steps) {
 }
 if ("controls" %in% stages && !nzchar(Sys.getenv("SEV_MIN", "")))
   message("[00] controls: cohorts built and anchor distributions written. Choose the severity floor from\n",
-          "     final/jm_severity_anchor_*, then: SEV_MIN=\"platelets=2,bilirubin=1\" bash code/29_run_controls.sh fits")
+          "     final/injury/jm_severity_anchor_*, then: SEV_MIN=\"platelets=2,bilirubin=1\" bash code/29_run_controls.sh fits")
 
 message("=============================================================")
 message("[00] Pipeline complete. All scripts ran successfully.")
-message("Shareable aggregates: output/<site_name>_output/final/ (control cohorts in final/controls/).")
+message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/, causal/, supplement/ and controls/.")
 message("=============================================================")

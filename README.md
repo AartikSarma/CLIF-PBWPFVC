@@ -86,9 +86,18 @@ Each site has one output folder, `output/<site_name>_output/`:
 
 - `intermediate/` holds patient-level data and never leaves the site. The control
   cohorts' patient-level data sits under `intermediate/controls/<cohort>/`.
-- `final/` holds aggregates only and is the folder a site returns. The control
-  cohorts' aggregates all sit in `final/controls/`, and their file names carry
-  `<site>_<cohort>`.
+- `final/` holds aggregates only and is the folder a site returns. It is sorted by
+  manuscript block:
+
+  | Subfolder | Holds | Written by |
+  |---|---|---|
+  | `final/cross_sectional/` | figures 1-3 | `03`-`05` |
+  | `final/injury/` | figure 4 | `21`-`28` |
+  | `final/causal/` | figure 5 | `30`-`38`, and the target-trial supplements, which share the engine's folder |
+  | `final/supplement/` | everything else in `code/supplement/` | |
+  | `final/controls/` | the control cohorts, all in one folder; file names carry `<site>_<cohort>` | `01`-`03`, `21`-`26` under `PBWPFVC_COHORT` |
+
+  A script asks `utils/config.R` for its folder with `final_dir_for("<block>")`.
 
 Re-running a stage updates `final/` in place, so a site can return the folder again
 after any stage. All exports honor a minimum cell size of n >= 10. No patient-level
@@ -143,7 +152,7 @@ what this runner has always done, so existing site instructions still work.
 The control cohorts need one decision that cannot be automated. The matched
 no-support control is restricted to patients above a severity floor, and the floor
 is chosen from the ventilated cohort's distribution, which the `controls` stage
-writes to `final/jm_severity_anchor_*`. Then:
+writes to `final/injury/jm_severity_anchor_*`. Then:
 
 ```bash
 SEV_MIN="platelets=2,bilirubin=1" bash code/29_run_controls.sh fits
@@ -164,9 +173,9 @@ Pooling is **not** part of the per-site pipeline. The study coordinator runs the
 scripts in `code/pooling/` after every site has returned its `final/` folder. They
 expect a results root with one subfolder per site (each site's `final/` renamed to
 the site name), by default the local `results/` folder, and write to an `All sites/`
-subfolder there. Override the root with `PBWPFVC_RESULTS_ROOT`. They list each site
-folder without recursing, so a site's `controls/` subfolder is never pooled with the
-ventilated cohort by accident. `pooled_biotrauma.R` is in the repository;
+subfolder there. Override the root with `PBWPFVC_RESULTS_ROOT`. Each script reads
+only the block subfolders it pools (`cross_sectional/`, `injury/`, `causal/`) and never
+`controls/`, so a control cohort cannot enter a pool of the ventilated cohort. `pooled_biotrauma.R` is in the repository;
 `pooled_estimates.R` and `pooled_tte.R` are kept local and gitignored.
 
 ### Supplements and archive

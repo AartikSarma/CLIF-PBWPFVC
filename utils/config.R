@@ -51,8 +51,14 @@ load_config <- function() {
   # Where a cohort's files live. One site has ONE output folder, output/{site}_output/:
   #   intermediate/                      patient-level, never shared
   #   intermediate/controls/{cohort}/    the same for a control cohort
-  #   final/                             aggregates only: the folder a site returns
-  #   final/controls/                    the control cohorts' aggregates, all in one folder
+  #   final/                             aggregates only: the folder a site returns,
+  #                                      sorted by manuscript block (final_dir_for() below):
+  #     final/cross_sectional/           figures 1-3 (scripts 03-05)
+  #     final/injury/                    figure 4 (scripts 21-28)
+  #     final/causal/                    figure 5 (scripts 30-38, and the TTE supplements,
+  #                                      which share the engine's folder)
+  #     final/supplement/                what the other code/supplement/ scripts write
+  #     final/controls/                  the control cohorts' aggregates, all in one folder
   # A control's FILE NAMES carry {site}_{cohort} (e.g. jm_estimates_pfvc_7d_MIMIC_nosupport.csv),
   # so config$site_name is that tag and config$base_site is the site itself. Setting
   # PBWPFVC_COHORT is enough; a PBWPFVC_SITE_NAME that already ends in _{cohort} (the
@@ -67,9 +73,19 @@ load_config <- function() {
   site_root <- file.path(getwd(), "output", paste0(config$base_site, "_output"))
   config$output_dir <- if (config$cohort == "imv") file.path(site_root, "intermediate") else
     file.path(site_root, "intermediate", "controls", config$cohort)
-  config$final_dir  <- if (config$cohort == "imv") file.path(site_root, "final") else
-    file.path(site_root, "final", "controls")
+  config$final_root <- file.path(site_root, "final")
+  config$final_dir  <- if (config$cohort == "imv") config$final_root else file.path(config$final_root, "controls")
   return(config)
+}
+# The folder a script writes its aggregates to: final/<block>/ for the ventilated cohort.
+# A control cohort keeps everything in final/controls/, whatever the block, because its
+# file names already say which cohort they are and the comparison reads one folder.
+FINAL_BLOCKS <- c("cross_sectional", "injury", "causal", "supplement")
+final_dir_for <- function(block) {
+  if (!block %in% FINAL_BLOCKS) stop("final_dir_for(): unknown block '", block, "'; blocks are ", paste(FINAL_BLOCKS, collapse = ", "))
+  block_dir <- if (config$cohort == "imv") file.path(config$final_root, block) else config$final_dir
+  dir.create(block_dir, recursive = TRUE, showWarnings = FALSE)
+  block_dir
 }
 # device categories (CLIF mCIDE, lower case): the middle arm's, the control's, and
 # everything that counts as advanced support (escalation)

@@ -12,7 +12,7 @@ import os
 OUT = "figures"
 os.makedirs(OUT, exist_ok=True)
 def p(site, stub):
-    return f"output/{site}_output/final/{stub}_{site}.csv"
+    return f"output/{site}_output/final/supplement/{stub}_{site}.csv"
 
 OK = dict(orange="#E69F00", sky="#56B4E9", green="#009E73", blue="#0072B2",
           verm="#D55E00", purple="#CC79A7", yellow="#F0E442", grey="#999999")

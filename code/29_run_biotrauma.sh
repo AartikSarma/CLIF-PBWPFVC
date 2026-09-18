@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# the biotrauma suite (2x) (runner): the biotrauma analysis for one site
+# 29_run_biotrauma: the biotrauma analysis for one site
 # =============================================================================
 # One command per site. Produces, for creatinine, platelets, any vasopressor
 # and the SF ratio over the first 48 hours of ventilation:
@@ -61,7 +61,7 @@ SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' conf
 SITE="${SITE%_niv}"; SITE="${SITE%_nosupport}"; BASE_SITE=$SITE
 ROOT="output/${BASE_SITE}_output"
 case $COHORT in
-  imv) FINAL="$ROOT/final"; INTER="$ROOT/intermediate"; COHORT_LOGS="$ROOT/logs" ;;
+  imv) FINAL="$ROOT/final/injury"; INTER="$ROOT/intermediate"; COHORT_LOGS="$ROOT/logs" ;;
   niv|nosupport) SITE="${BASE_SITE}_${COHORT}"; export PBWPFVC_SITE_NAME=$BASE_SITE PBWPFVC_COHORT=$COHORT; SKIP_JM=1
        FINAL="$ROOT/final/controls"; INTER="$ROOT/intermediate/controls/$COHORT"; COHORT_LOGS="$ROOT/logs/$COHORT" ;;
   *) echo "COHORT must be imv, niv or nosupport"; exit 1 ;;
@@ -187,5 +187,5 @@ done
 
 # ---- 5. summary
 run_stage "summary" -- Rscript code/28_biotrauma_summary.R
-[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "summary -> $FINAL/overnight_summary_${SITE}.csv"; echo "headline figure -> $FINAL/biotrauma_fig_trajectory_pfvc_48h_${SITE}.pdf"; }
+[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "summary -> $FINAL/biotrauma_summary_${SITE}.csv"; echo "headline figure -> $FINAL/biotrauma_fig_trajectory_pfvc_48h_${SITE}.pdf"; }
 exit 0

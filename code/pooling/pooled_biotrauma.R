@@ -53,7 +53,10 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F
 # read one file family from every site, tagging the site; tolerant of absent files
 read_family <- function(pattern) {
   map_dfr(sites, function(s) {
-    fs <- list.files(file.path(root, s), pattern = pattern, full.names = TRUE)
+    # a returned final/ is sorted by block; the injury tables are in injury/, the preference
+    # instrument in causal/. controls/ is never listed, so a control cohort cannot enter a pool
+    # of the ventilated one. The site folder itself is listed too, for a flat (older) return.
+    fs <- list.files(file.path(root, s, c("", "injury", "causal")), pattern = pattern, full.names = TRUE)
     if (!length(fs)) return(NULL)
     map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5) %>%
               mutate(site = s, file = basename(f), .before = 1))

@@ -36,7 +36,9 @@ site_alias_suffixes <- function(n_sites) {
 # either a flat site folder or one whose tables sit in a nested `final/`.
 read_site_cohort_size <- function(site_dir) {
   log_files <- c(Sys.glob(file.path(site_dir, "attrition_log_*.csv")),
-                 Sys.glob(file.path(site_dir, "final", "attrition_log_*.csv")))
+                 Sys.glob(file.path(site_dir, "final", "attrition_log_*.csv")),
+                 Sys.glob(file.path(site_dir, "cross_sectional", "attrition_log_*.csv")),
+                 Sys.glob(file.path(site_dir, "final", "cross_sectional", "attrition_log_*.csv")))
   if (length(log_files) == 0) {
     stop("No attrition_log_*.csv in ", site_dir, ". The pooled figures need it to ",
          "rank cohorts by size for anonymized site labels; re-run script 01 for ",

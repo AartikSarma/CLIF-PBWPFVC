@@ -56,7 +56,7 @@ rm(list = ls())
 source("utils/config.R")
 site_name  <- config$site_name
 output_dir <- config$output_dir
-final_dir  <- config$final_dir
+final_dir  <- final_dir_for("supplement")
 dir.create(final_dir, showWarnings = FALSE, recursive = TRUE)
 if (!nzchar(Sys.getenv("PBWPFVC_JM_HORIZON_H"))) Sys.setenv(PBWPFVC_JM_HORIZON_H = "72")
 source(here("code", "20_biotrauma_grid.R"))

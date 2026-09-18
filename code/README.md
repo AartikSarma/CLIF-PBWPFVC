@@ -12,11 +12,11 @@ to change; that stops once sites have returned `final/` folders.
 
 ## Pipeline
 
-| Script | Block | What it does | Writes to `final/` |
+| Script | Block | What it does | Writes (prefix) |
 |---|---|---|---|
 | `00_run_pipeline.R` | | Entry point: restores `renv`, runs the requested stages | |
 | `01_cohort_identification.R` | prep | Filters the CLIF tables to the eligible cohort (ventilated, or a control cohort under `PBWPFVC_COHORT`) | |
-| `02_quality_checks.R` | prep | Outlier thresholds and QC summaries | `lab_summary_`, `vital_summary_` |
+| `02_quality_checks.R` | prep | Outlier thresholds and QC summaries | nothing in `final/`; its summaries stay in `intermediate/summary_stats/` |
 | `03_variable_derivation.R` | prep | PBW, PFVC, SOFA, SF and PF ratios, tidal-volume metrics | `attrition_log_`, `dist_` |
 | `04_analysis.R` | figures 1–3 | Demographic bias of PBW, mechanics, mortality regressions and survival, negative controls, E-values | `regression_results_long_`, `table1_`, `bias_`, `negative_control_`, `evalues_`, ... |
 | `05_normalization_analysis.R` | figures 2–3 | PBW versus PFVC normalization of the injury metrics: discordance, reclassification, prognostic head-to-head | `norm_` |
@@ -29,7 +29,7 @@ to change; that stops once sites have returned `final/` folders.
 | `25_injury_at_horizon.R` | figure 4 | Fixed-horizon comparator (survivors only) | `injury_` |
 | `26_quick_lme.R` | figure 4 | The longitudinal submodel alone, as a fast check | `quick_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, no support, matched no support, noninvasive | `jm_control_comparison_`, `jm_control_movement_` |
-| `28_biotrauma_summary.R` | figure 4 | One table collecting a run's results | `overnight_summary_` |
+| `28_biotrauma_summary.R` | figure 4 | One table collecting a run's results | `biotrauma_summary_` |
 | `29_run_biotrauma.sh` | figure 4 | Runner for 21–28 on one cohort | |
 | `29_run_controls.sh` | figure 4 | Runner for the control cohorts: `build`, `anchors`, `fits` | |
 | `29_run_sites.sh` | figure 4 | Runs `29_run_biotrauma.sh` over several sites in turn | |
@@ -55,15 +55,23 @@ to change; that stops once sites have returned `final/` folders.
   an external trial table.
 - `archive/` is gitignored local scratch.
 
+## Where aggregates go
+
+`final/` is sorted by block: `cross_sectional/` (`03`-`05`), `injury/` (`21`-`28`),
+`causal/` (`30`-`38` and the target-trial supplements, which share the engine's
+folder), `supplement/` (the rest of `supplement/`), and `controls/`. A script never
+builds the path itself: it calls `final_dir_for("<block>")` from `utils/config.R`.
+`tools/migrate_final_subfolders.sh` sorts a flat `final/` written before 2026-09-19.
+
 ## Cohorts and where files go
 
 `PBWPFVC_COHORT` selects the cohort: `imv` (default, the ventilated analytic cohort),
 `nosupport` (room air or nasal cannula only: the negative control) or `niv`
 (high-flow or noninvasive ventilation first: a point on the strain gradient, not a
 clean control, because tidal volumes there are uncontrolled). `utils/config.R` sends
-a control cohort's patient-level files to `intermediate/controls/<cohort>/` and its
-aggregates to `final/controls/`, inside the site's one output folder, and tags the
-file names `<site>_<cohort>`.
+a control cohort's patient-level files to `intermediate/controls/<cohort>/` and all
+its aggregates to `final/controls/`, whatever the block, inside the site's one output
+folder, and tags the file names `<site>_<cohort>`.
 
 ## Old names
 
