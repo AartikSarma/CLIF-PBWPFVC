@@ -270,6 +270,47 @@ shape <- bind_rows(
 write_csv(shape, file.path(final_dir, paste0("sevenday_shape_", MARKER, "_", site_name, ".csv")))
 
 # =============================================================================
+# 3c. oxygenation indices: the same free-per-day contrast on the index, on its
+#     numerator and on its ratio
+# =============================================================================
+# At MIMIC the whole index effect was its numerator, and the numerator moved
+# AGAINST the arithmetic prediction: more strain went with LESS mean airway
+# pressure, because the stiff lungs that get small tidal volumes also get the
+# PEEP. Over two days that is a single number; over seven it is a question of
+# whether the confounding grows as the survivors recover and are weaned, or
+# fades. So for an oxygenation index the shape is fitted on all three outcomes.
+# These are mixed models with outcome-specific variance components, so the
+# decomposition holds only to within `identity_gap`; the exact algebraic version
+# is 13_oi_diagnostics.R, which fits by least squares for that reason.
+DECOMP <- MARKER %in% c("oi", "osi")
+decomp <- if (!DECOMP) tibble() else {
+  ratio_col <- if (MARKER == "osi") "sf" else "pf"
+  d_dec <- d_all %>%
+    mutate(pf = if_else(is.finite(oi) & oi > 0 & is.finite(map_aw), 100 * map_aw / oi, NA_real_)) %>%
+    filter(is.finite(map_aw), map_aw > 0, is.finite(.data[[ratio_col]]), .data[[ratio_col]] > 0)
+  parts <- c(index = "log_y", numerator = "log(map_aw)", ratio = paste0("log(", ratio_col, ")"))
+  out <- map_dfr(names(parts), function(nm) {
+    dd <- d_dec %>% mutate(log_y = eval(parse(text = parts[[nm]]), envir = d_dec))
+    bind_rows(fit_shape(dd, "all at risk"),
+              fit_shape(dd %>% filter(event_day >= JM_HORIZON),
+                        paste0("ventilated through day ", JM_HORIZON))) %>%
+      mutate(part = nm)
+  })
+  if (!nrow(out)) out else {
+    gaps <- out %>% filter(kind == "contrast") %>%
+      select(sample, day, part, estimate) %>%
+      pivot_wider(names_from = part, values_from = estimate) %>%
+      mutate(identity_gap = numerator - ratio - index) %>%
+      select(sample, day, identity_gap)
+    out %>% left_join(gaps, by = c("sample", "day")) %>%
+      mutate(marker = MARKER, ratio_name = if (MARKER == "osi") "SF ratio" else "P/F ratio",
+             horizon_days = JM_HORIZON, site = site_name)
+  }
+}
+if (nrow(decomp))
+  write_csv(decomp, file.path(final_dir, paste0("sevenday_decomposition_", MARKER, "_", site_name, ".csv")))
+
+# =============================================================================
 # 3b. the raw marker by day and baseline tercile, before any model
 # =============================================================================
 traj_of <- function(dd, sample_lab) dd %>%
@@ -397,6 +438,27 @@ p10 <- {
          x = "AIC above best", y = NULL)
 }
 
+# ---- page 5, oxygenation indices only: where the per-day effect comes from
+p12 <- {
+  cc <- if (!nrow(decomp)) tibble() else decomp %>% filter(kind == "contrast", !is.na(estimate))
+  if (!nrow(cc)) plot_spacer() else {
+    lab <- c(index = toupper(MARKER), numerator = "mean airway pressure",
+             ratio = decomp$ratio_name[1])
+    cc %>% mutate(part_lab = factor(lab[part], lab)) %>%
+      ggplot(aes(day, estimate, colour = part_lab, fill = part_lab)) +
+      geom_hline(yintercept = 0, colour = "grey55") +
+      geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.12, colour = NA) +
+      geom_line(linewidth = 1) + geom_point() +
+      facet_wrap(~ sample) +
+      scale_colour_manual(values = okabe[c(8, 5, 2)], name = NULL) +
+      scale_fill_manual(values = okabe[c(8, 5, 2)], name = NULL) +
+      labs(title = paste0("Where the ", toupper(MARKER), " effect comes from, day by day"),
+           subtitle = paste0("the index is the numerator minus the ratio; an effect carried by mean airway pressure is the ",
+                             "support the patient needed, not the lung"),
+           x = "ventilator day", y = "log units per point of VT/PFVC")
+  }
+}
+
 pdf_path <- file.path(final_dir, paste0("sevenday_feasibility_", MARKER, "_", site_name, ".pdf"))
 head_note <- paste0(marker_lab, "; groups under ", MIN_CELL, " patients suppressed")
 pdf(pdf_path, width = 12, height = 8, onefile = TRUE)
@@ -411,6 +473,9 @@ print(p8 + plot_annotation(title = paste0(site_name, ": the ", marker_lab, " tra
 print(p9 / p10 + plot_layout(heights = c(2, 1)) +
         plot_annotation(title = paste0(site_name, ": what shape does the contrast need?"),
                         subtitle = head_note) & theme(legend.position = "top"))
+if (DECOMP && nrow(decomp))
+  print(p12 + plot_annotation(title = paste0(site_name, ": the lung or the ventilator, over seven days?"),
+                              subtitle = head_note) & theme(legend.position = "top"))
 invisible(dev.off())
 
 # =============================================================================
@@ -432,4 +497,10 @@ message("\nContrast per day (per point of VT/PFVC; the crossover, if it exists, 
 print(as.data.frame(shape %>% filter(kind == "contrast") %>%
                       select(sample, day, estimate, lo, hi, n_patients) %>%
                       mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+if (nrow(decomp)) {
+  message("\nDecomposition per day (log units per point of VT/PFVC; index = numerator - ratio):")
+  print(as.data.frame(decomp %>% filter(kind == "contrast", sample == "all at risk") %>%
+                        select(day, part, estimate, lo, hi, n_patients, identity_gap) %>%
+                        mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
+}
 message("\n13_seven_day_feasibility complete -> ", final_dir)
