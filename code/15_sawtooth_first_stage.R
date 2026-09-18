@@ -43,7 +43,9 @@
 #      not that the instrument works.
 #   F. Balance: each baseline covariate (age, SOFA, SF ratio, sex, race) regressed on Z with
 #      the same smooth, in covariate-SD units per SD of residual Z. Z must not predict who
-#      arrives sicker.
+#      arrives sicker. The sex row is uninformative by construction: Devine shifts PBW by
+#      4.5 kg between sexes, about half a 50-mL period, so with sex dropped from the controls
+#      residual Z carries sex mechanically. Read age, SOFA, SF ratio, and race.
 #
 # COHORT. The pre-gate table, NOT the analytic cohort: the 6-8 mL/kg gate selects on the
 # endogenous variable and truncates the sawtooth. One row per patient, the first complete
@@ -57,18 +59,26 @@
 #     across strata against 1/PFVC versus 1/PBW, which will need pooling.
 #   * The exclusion threat specific to this design: units may differ in which grid they round
 #     to, so a grid-specific Z can pick up unit-level mortality. The eventual 2SLS needs unit
-#     fixed effects; this check does not.
+#     fixed effects; this check does not. The same concern motivates a second instrument form,
+#     snapping tau x PBW to the empirically most common volumes rather than to one grid; it is
+#     left for the second stage, because choosing the heaps from the VT distribution uses the
+#     exposure itself.
 #   * Synthetic CLIF does not heap VT (checked 2026-09-18: share on multiples of 50 mL is 0.84x
 #     the no-rounding expectation, heights continuous, no dominant target), so on synthetic data
-#     this script is a NEGATIVE CONTROL. It behaved as one: partial F 0 to 4.2 across all 25
-#     tau x m cells, placebo grids included.
+#     this script is a NEGATIVE CONTROL. It behaved as one: across all 500 fitted cells the
+#     maximum partial F was 7.2, with 22 cells above 3.84 and 5 above 6.63, against 25 and 5
+#     expected under the null. Its binned-dose panel falls steeply with height because synthetic
+#     VT is roughly constant in mL; real data dosed at 6-8 mL/kg PBW should be much flatter.
 #
 # READING RULE. Under no instrument the partial F is chi-square(1): about 1 in 20 cells exceeds
 # 3.84 by chance, so across the 25-cell grid one or two "significant" cells are expected (the
 # synthetic 37 mL placebo reached 4.2). Read the instrument as present only if (i) the 50 or 25 mL
 # rounding grids at the modal target sit far above every placebo cell (F well above 10, not above
-# 3.84), (ii) F survives the ns(height, 6) and height x sex smooths, and (iii) the instrument-
-# driven SD of VT/PFVC is a non-trivial fraction of the demographic-gradient SD. A single strong
+# 3.84), (ii) F survives the ns(height, 6) and height x sex smooths, and (iii) the implied SE
+# of the eventual 2SLS coefficient is small enough to matter. The script prints it:
+#     SE per point of VT/PFVC ~ sd(death) / (SD of the Z-driven component x sqrt(n)).
+# At MIMIC scale (n ~ 12,000, mortality ~ 0.27) a 0.5-point SE needs a Z-driven SD near
+# 0.8 % of predicted FVC; synthetic gave 0.03 to 0.06. A single strong
 # cell off the modal target, or a placebo cell comparable to the rounding grids, means no instrument.
 #
 # Outputs (aggregates only; any row describing fewer than MIN_CELL patients is dropped):
@@ -116,7 +126,7 @@ first_timepoint_per_patient <- function(tp) {
     transmute(hospitalization_id, tidal_volume_set, vtpbw, vtpfvc, height_cm, pbw, pfvc,
               pbwpfvc = pbw / pfvc, age = age_at_admission,
               sex_category = factor(sex_category), race_category = factor(race_category),
-              sofa_total, sf_ratio)
+              sofa_total, sf_ratio, deceased)
 }
 cohorts <- list(
   volume_control = first_timepoint_per_patient(timepoints %>% filter(is_volume_control)),
@@ -244,9 +254,13 @@ first_stage_tbl <- first_stage_grid %>%
   unnest(fit) %>%
   group_by(cohort, outcome) %>%
   mutate(sd_outcome = sd(cohorts[[first(cohort)]][[first(outcome)]]),
-         sd_demographic_gradient = demographic_gradient_sd(cohorts[[first(cohort)]], first(outcome))) %>%
+         sd_demographic_gradient = demographic_gradient_sd(cohorts[[first(cohort)]], first(outcome)),
+         sd_death = sd(cohorts[[first(cohort)]]$deceased)) %>%
   ungroup() %>%
   mutate(instrument_to_demographic_sd_ratio = sd_instrument_driven_component / sd_demographic_gradient,
+         # approximate SE of the eventual 2SLS mortality coefficient, per unit of the outcome
+         # column (per point of VT/PFVC for vtpfvc): sd(death) / (SD of Z-driven part x sqrt(n))
+         implied_2sls_se = sd_death / (sd_instrument_driven_component * sqrt(cohort_sizes[cohort])),
          grid_type = if_else(grid_ml %in% PLACEBO_GRIDS_ML, "placebo", "rounding"),
          is_modal_target = target_ml_per_kg == modal_target,
          is_primary_cell = cohort == "volume_control" & is_modal_target & grid_ml == 50 &
@@ -261,7 +275,7 @@ write_csv(first_stage_tbl, file.path(final_dir, paste0("sawtooth_first_stage_", 
 headline <- first_stage_tbl %>%
   filter(cohort == "volume_control", is_modal_target, smooth %in% c("height_ns4_by_sex", "height_ns6")) %>%
   select(outcome, grid_ml, grid_type, smooth, partial_f, partial_r2, sd_instrument_driven_component,
-         instrument_to_demographic_sd_ratio) %>%
+         instrument_to_demographic_sd_ratio, implied_2sls_se) %>%
   arrange(outcome, grid_type, grid_ml, smooth)
 message(sprintf("\nFirst stage at the modal target (%g mL/kg), volume-control patients:", modal_target))
 print(as.data.frame(headline %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
