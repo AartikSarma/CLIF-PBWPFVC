@@ -51,11 +51,35 @@ lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Biliru
          any_pressor = "Any vasopressor (log-odds)",
          osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
-marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")")
+RRT_MARKERS <- character(0)   # markers taken from the dialysis-as-third-cause run
+marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")",
+                                   if_else(m %in% RRT_MARKERS, "\ndialysis modelled as a third cause", ""))
 
 # ---- inputs
 lc <- read_if(file.path(fig_dir, paste0("jm_level_contrast_", tag, ".csv")))
 es <- read_if(file.path(fig_dir, paste0("jm_estimates_", tag, ".csv")))
+# PBWPFVC_JM_WITH_RRT=1 folds the dialysis-as-third-cause run (creatinine) into
+# these figures. That fit lives in its own `rrtcause_` tables so a sensitivity
+# never overwrites the primary, which also means it is invisible on the shared
+# figure unless asked for. It is the better creatinine estimate, because
+# dialysis is started BECAUSE creatinine is rising and the two-cause fit drops
+# those days without modelling why, so where both exist this one wins and the
+# marker is labelled to say so.
+if (identical(Sys.getenv("PBWPFVC_JM_WITH_RRT", "0"), "1")) {
+  rtag <- paste0("rrtcause_", tag)
+  rlc <- read_if(file.path(fig_dir, paste0("jm_level_contrast_", rtag, ".csv")))
+  res <- read_if(file.path(fig_dir, paste0("jm_estimates_", rtag, ".csv")))
+  if (is.null(rlc) || is.null(res)) {
+    message("PBWPFVC_JM_WITH_RRT=1 but no ", rtag, " tables here; ignoring")
+  } else {
+    RRT_MARKERS <- sort(unique(rlc$marker))
+    message("folding in the dialysis-as-third-cause fit for: ", paste(RRT_MARKERS, collapse = ", "))
+    as_text <- function(d) d %>% mutate(across(everything(), as.character))
+    retype  <- function(d) d %>% type_convert(guess_integer = TRUE, na = c("", "NA"))
+    lc <- if (is.null(lc)) rlc else retype(bind_rows(as_text(lc %>% filter(!marker %in% RRT_MARKERS)), as_text(rlc)))
+    es <- if (is.null(es)) res else retype(bind_rows(as_text(es %>% filter(!marker %in% RRT_MARKERS)), as_text(res)))
+  }
+}
 if (is.null(lc) || is.null(es)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
 ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_.*\\.csv$", full.names = TRUE) %>%
   discard(~ grepl("counts_", .x)) %>% map_dfr(read_if)
