@@ -243,22 +243,30 @@ est <- bind_rows(
     transmute(marker, adjustment, horizon_h, estimate, lo, hi, estimator = "Fixed horizon, survivors only")
 ) %>%
   filter(marker %in% names(lab)) %>%
+  # A comparison needs two estimators. Keep the markers this run's joint model covers,
+  # at the horizons where a second estimator exists for that marker. That drops hour 0
+  # (no comparator can exist at the baseline) and, in a 7-day run, the days beyond the
+  # comparators' 24/48/72 h, which the trend figure already shows for the joint model.
+  group_by(marker) %>% filter(any(estimator == "Joint model (death modelled)")) %>%
+  group_by(marker, horizon_h) %>% filter(n_distinct(estimator) >= 2) %>% ungroup() %>%
   mutate(estimator = factor(estimator, c("Joint model (death modelled)", "Longitudinal model only", "Fixed horizon, survivors only")),
          adjustment = factor(adjustment, c("adjusted", "unadjusted")),
          horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
          marker_lab = marker_label(marker))
-p1 <- ggplot(est, aes(estimate, estimator, colour = adjustment)) +
-  geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-  geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6)) +
-  facet_grid(marker_lab ~ horizon, scales = "free_x") +
-  scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-  labs(title = paste0("Marker difference ", SIZE_LAB),
-       subtitle = paste0(site_name, if (FLIP_INJ) ": a larger lung for the dose is the negative of each estimate" else ": a LOWER PFVC is the negative of each estimate",
-                         "; log-odds for any vasopressor"),
-       x = paste0("log units ", SIZE_LAB, " (95% interval)"), y = NULL) +
-  theme(legend.position = "top", strip.text.y = element_text(angle = 0))
-ggsave(file.path(fig_dir, paste0("biotrauma_fig_estimators_", tag, ".pdf")), p1,
-       width = 10, height = 2 + 1.6 * n_distinct(est$marker))
+if (nrow(est)) {
+  p1 <- ggplot(est, aes(estimate, estimator, colour = adjustment)) +
+    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
+    geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6)) +
+    facet_grid(marker_lab ~ horizon, scales = "free_x") +
+    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+    labs(title = paste0("Marker difference ", SIZE_LAB),
+         subtitle = paste0(site_name, if (FLIP_INJ) ": a larger lung for the dose is the negative of each estimate" else ": a LOWER PFVC is the negative of each estimate",
+                           "; log-odds for any vasopressor"),
+         x = paste0("log units ", SIZE_LAB, " (95% interval)"), y = NULL) +
+    theme(legend.position = "top", strip.text.y = element_text(angle = 0))
+  ggsave(file.path(fig_dir, paste0("biotrauma_fig_estimators_", tag, ".pdf")), p1,
+         width = max(9, 3 + 2.4 * n_distinct(est$horizon_h)), height = 2 + 1.6 * n_distinct(est$marker))
+} else message("24_biotrauma_figures: no horizon has two estimators for a modelled marker; estimator figure skipped")
 
 # ---- 2. divergence per day (the rate term), adjusted beside unadjusted
 div <- es %>% filter(block == "longitudinal", term %in% c(paste0("vent_day:", SIZE_EX), paste0(SIZE_EX, ":vent_day")),
