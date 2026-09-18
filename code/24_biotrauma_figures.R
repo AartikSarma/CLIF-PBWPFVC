@@ -233,15 +233,52 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     geom_point(aes(shape = ok), size = 1.6) +
     facet_grid(marker_lab ~ ., scales = "free_y") +
     scale_x_continuous(breaks = day_breaks) + shared +
-    labs(title = "Difference toward injury", subtitle = "above zero = more injury with a smaller lung",
+    labs(title = "Ventilated: difference toward injury", subtitle = "above zero = more injury with a smaller lung",
          x = "days from the index", y = "log marker (log-odds for any vasopressor)")
-  pm_b <- ggplot(rate, aes(adjustment, e, colour = adjustment)) +
+  # ---- the control cohorts, beside the ventilated rate. The rate is where the
+  #      argument lives: if small predicted lungs diverge without a ventilator, the
+  #      ventilated divergence is not about the breath. No support is the negative
+  #      control; noninvasive support is a point on the strain gradient, not a control
+  #      (its tidal volumes are uncontrolled). A matched no-support arm (severity floor,
+  #      29_run_controls.sh fits) appears when its tables exist. Controls are read from
+  #      final/controls/ of this site, or from PBWPFVC_FIG_CONTROLS_DIR; with another
+  #      PBWPFVC_FIG_DIR and no controls folder named, the ventilated arm shows alone.
+  ctrl_dir <- Sys.getenv("PBWPFVC_FIG_CONTROLS_DIR",
+                         if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) "" else file.path(config$final_root, "controls"))
+  ctrl_stub <- function(cohort) paste0(MOD_FORM, "_", h_suffix, "_", site_name, "_", cohort, ".csv")
+  ctrl_rate <- tibble()
+  if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
+    for (cohort in c("nosupport", "niv")) {
+      found <- list.files(ctrl_dir, pattern = paste0("^jm_estimates_.*", ctrl_stub(cohort), "$"))
+      restriction <- sub(paste0(ctrl_stub(cohort), "$"), "", sub("^jm_estimates_", "", found))
+      keep <- grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)?$", restriction, perl = TRUE)   # unrestricted and matched only
+      for (k in which(keep)) {
+        arm_label <- paste0(if (cohort == "nosupport") "No\nsupport" else "Non-\ninvasive",
+                            if (nzchar(restriction[k])) paste0(",\nmatched", if (sum(nzchar(restriction[keep])) > 1)
+                              paste0("\n", sub("_$", "", restriction[k])) else "") else "")
+        ctrl_rate <- bind_rows(ctrl_rate, read_csv(file.path(ctrl_dir, found[k]), show_col_types = FALSE) %>%
+          filter(block == "longitudinal", model == "main", marker %in% present,
+                 term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
+          transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
+                    s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
+                    rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE, arm = arm_label, strain_rank = if (cohort == "nosupport") 1 else 3))
+      }
+    }
+  }
+  rate_arms <- bind_rows(ctrl_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = "Venti-\nlated", strain_rank = 4)) %>%
+    mutate(strain_rank = if_else(grepl("matched", arm), 2, strain_rank),
+           arm = factor(arm, unique(arm[order(strain_rank, arm)])),
+           marker_lab = factor(row_label(marker), row_order))
+  if (nrow(ctrl_rate)) message("24_biotrauma_figures: control arms in the rate panel: ",
+                                paste(unique(gsub("\n", " ", as.character(ctrl_rate$arm))), collapse = "; "))
+  pm_b <- ggplot(rate_arms, aes(arm, e, colour = adjustment)) +
     geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
-    geom_linerange(aes(ymin = l, ymax = h), linewidth = 0.8) +
-    geom_point(aes(shape = ok), size = 2.2, fill = "white") +
+    geom_linerange(aes(ymin = l, ymax = h), linewidth = 0.8, position = position_dodge(width = 0.55)) +
+    geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.55)) +
     facet_grid(marker_lab ~ ., scales = "free_y") + shared +
     guides(colour = "none") +
-    labs(title = "Rate per day", subtitle = "adjusted vs unadjusted",
+    labs(title = if (nrow(ctrl_rate)) "Rate per day, by cohort" else "Rate per day",
+         subtitle = if (nrow(ctrl_rate)) "no support is the negative control" else "adjusted vs unadjusted",
          x = NULL, y = "change per day toward injury")
   pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
     geom_hline(yintercept = 0.5, colour = "grey55") +
@@ -252,20 +289,20 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     scale_x_continuous(breaks = day_breaks) +
     scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) + shared +
     theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
-    labs(title = "Probability of more injury", subtitle = "posterior; dotted lines at 0.025 and 0.975",
+    labs(title = "Ventilated: probability of more injury", subtitle = "posterior; dotted lines at 0.025 and 0.975",
          x = "days from the index", y = "P(contrast in the injury direction)")
-  pm <- pm_a + pm_b + pm_c + plot_layout(widths = c(1.35, 0.6, 1), guides = "collect") +
+  pm <- pm_a + pm_b + pm_c + plot_layout(widths = c(1.35, 0.35 + 0.25 * n_distinct(rate_arms$arm), 1), guides = "collect") +
     plot_annotation(
       tag_levels = "A",
       title = paste0("A smaller predicted lung, at the same VT/PBW, and organ-injury markers over ", JM_HORIZON,
                      " days of ventilation"),
-      subtitle = paste0(site_name, ": joint model, death and extubation modelled; ", unit_lower,
+      subtitle = paste0(site_name, ": joint model, death and extubation (or escalation, in the controls) modelled; ", unit_lower,
                         ".\nA rate unmoved by adjustment for age, sex and race is not the age channel. ",
-                        "Hollow points and dashed lines did not converge.",
+                        "Row counts are the ventilated cohort's. Hollow points and dashed lines did not converge.",
                         if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its own anchor, so the rows are different patient subsets." else "")) &
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_main_", tag, ".pdf")), pm,
-         width = 13, height = 2 + 2.2 * n_distinct(trend$marker))
+         width = 12 + 0.8 * n_distinct(rate_arms$arm), height = 2 + 2.2 * n_distinct(trend$marker))
 }
 
 # ---- 1. estimator comparison
