@@ -79,6 +79,33 @@ block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
 manifest <- manifest %>% select(-any_of(c("longitudinal_rhat", "exposure_rhat", "association_rhat", "hazard_rhat"))) %>%
   left_join(block_gates, by = c("marker", "model", "adjustment"))
 usable <- manifest %>% filter(status %in% c("converged", "rhat_fail"))
+# PBWPFVC_JM_MARKERS restricts the report to those markers, as it does the fit:
+# re-reading every bundle costs minutes per marker, and a run that added one
+# marker should not have to redo the rest. Each table is then merged on write,
+# replacing only its own marker rows (`report_write` below). The figures are
+# drawn from the tables afterwards, so they still show every marker.
+want_markers <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MARKERS", ""), ",")[[1]])
+if (length(want_markers) && nzchar(want_markers[1])) {
+  missing <- setdiff(want_markers, unique(usable$marker))
+  if (length(missing)) stop("PBWPFVC_JM_MARKERS names markers with no fit in this manifest: ",
+                            paste(missing, collapse = ", "))
+  usable <- usable %>% filter(marker %in% want_markers)
+  message("restricted to markers: ", paste(want_markers, collapse = ", "))
+}
+RESTRICTED <- length(want_markers) && nzchar(want_markers[1])
+# merge on write: keep the rows of markers this run did not refit
+report_write <- function(new, name) {
+  path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
+  if (RESTRICTED && file.exists(path) && nrow(new)) {
+    old <- read_csv(path, show_col_types = FALSE) %>% filter(!marker %in% want_markers)
+    as_text <- function(d) d %>% mutate(across(everything(), as.character))
+    if (nrow(old)) {
+      message("  ", name, ": kept ", nrow(old), " rows from other markers")
+      new <- bind_rows(as_text(old), as_text(new))
+    }
+  }
+  if (nrow(new)) write_csv(new, path)
+}
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
 message("=== 13_biotrauma_report (", out_tag, "): ", nrow(usable), " fits, of which ",
         sum(usable$status == "converged"), " pass the R-hat gate ===")
@@ -263,16 +290,16 @@ association_hr  <- bind_rows(assoc_rows)   %>% mutate(grid = JM_GRID, horizon_da
 heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 level_contrast  <- bind_rows(level_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 if (nrow(level_contrast)) {
-  write_csv(level_contrast, file.path(final_dir, paste0("jm_level_contrast_", out_tag, ".csv")))
+  report_write(level_contrast, "level_contrast")
   message("--- marker difference per unit of the size exposure at each horizon (log units; ",
           "per SD for log_pfvc_sd / ldisc_sd, per log unit for the ch_* pieces; p_equal tests the four pieces equal)")
   print(as.data.frame(level_contrast %>% select(marker, adjustment, exposure, horizon_h, estimate, lo, hi, p_gt0, p_equal, n_patients, n_deaths) %>%
                         mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 }
-write_csv(trajectory_grid, file.path(final_dir, paste0("jm_trajectory_grid_", out_tag, ".csv")))
-write_csv(strain_effects,  file.path(final_dir, paste0("jm_strain_effects_",  out_tag, ".csv")))
-write_csv(association_hr,  file.path(final_dir, paste0("jm_association_hr_",  out_tag, ".csv")))
-if (nrow(heterogeneity)) write_csv(heterogeneity, file.path(final_dir, paste0("jm_heterogeneity_", out_tag, ".csv")))
+report_write(trajectory_grid, "trajectory_grid")
+report_write(strain_effects,  "strain_effects")
+report_write(association_hr,  "association_hr")
+if (nrow(heterogeneity)) report_write(heterogeneity, "heterogeneity")
 
 # ---- figures
 if (length(traj_plots)) {
