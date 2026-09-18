@@ -82,3 +82,15 @@ channels_equal_p <- function(est, V) {
   d <- L %*% est
   as.numeric(pchisq(t(d) %*% solve(L %*% V %*% t(L)) %*% d, df = 3, lower.tail = FALSE))
 }
+
+# Severity floor (PBWPFVC_JM_SEV_MIN): keep patients whose baseline severity anchor
+# is at or above this value. The anchor is cardiovascular + neurological + renal SOFA
+# on the index day. It leaves out the respiratory component (collinear with SF) and
+# the coagulation and liver components, which ARE platelets and bilirubin: a floor on
+# a score that contains the outcome selects extreme baselines and manufactures
+# regression to the mean. Used to severity-match the no-support control to the
+# ventilated cohort; run BOTH cohorts under the same floor. The floor enters every
+# cache name and output tag, so a restricted run never reuses an unrestricted fit.
+SEV_MIN <- suppressWarnings(as.numeric(Sys.getenv("PBWPFVC_JM_SEV_MIN", unset = NA)))
+sev_sfx <- if (is.na(SEV_MIN)) "" else paste0("_sev", SEV_MIN)
+sev_tag <- if (is.na(SEV_MIN)) "" else paste0("sev", SEV_MIN, "_")

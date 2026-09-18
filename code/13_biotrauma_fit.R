@@ -208,6 +208,39 @@ surv_all <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".pa
 meta     <- readRDS(file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
 message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients")
 
+# Severity anchor distribution, written for every run so the floor for a matched
+# control can be chosen from the ventilated cohort's aggregate (cells under 10 masked).
+if (!"sev_anchor" %in% names(surv_all))
+  stop("jm_surv has no sev_anchor column: rebuild the panel (13_biotrauma_panel.R) with the current code")
+# Adjacent values are MERGED until every band holds 10 or more patients. Masking a
+# small cell would not protect it, because the cumulative column gives it back.
+anchor_counts <- surv_all %>% filter(!is.na(sev_anchor)) %>% count(sev_anchor, name = "n_patients") %>% arrange(sev_anchor)
+band_id <- integer(nrow(anchor_counts)); running_n <- 0L; current_band <- 1L
+for (row_i in seq_len(nrow(anchor_counts))) {
+  band_id[row_i] <- current_band
+  running_n <- running_n + anchor_counts$n_patients[row_i]
+  if (running_n >= 10L) { current_band <- current_band + 1L; running_n <- 0L }
+}
+if (running_n > 0L && current_band > 1L) band_id[band_id == current_band] <- current_band - 1L   # short tail joins the band below
+severity_anchor <- anchor_counts %>% mutate(band = band_id) %>%
+  group_by(band) %>%
+  summarise(sev_anchor_from = min(sev_anchor), sev_anchor_to = max(sev_anchor), n_patients = sum(n_patients), .groups = "drop") %>%
+  mutate(pct = round(100 * n_patients / sum(n_patients), 1),
+         pct_at_or_above_from = round(100 * rev(cumsum(rev(n_patients))) / sum(n_patients), 1),
+         cohort = config$cohort, site = site_name) %>%
+  select(-band)
+stopifnot(nrow(severity_anchor) == 1L || all(severity_anchor$n_patients >= 10L))
+write_csv(severity_anchor, file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv")))
+message("Severity anchor (CV + CNS + renal SOFA, index day), adjacent values merged to bands of 10 or more:")
+print(as.data.frame(severity_anchor %>% select(sev_anchor_from, sev_anchor_to, n_patients, pct, pct_at_or_above_from)), row.names = FALSE)
+if (!is.na(SEV_MIN)) {
+  n_before <- nrow(surv_all)
+  surv_all <- surv_all %>% filter(!is.na(sev_anchor), sev_anchor >= SEV_MIN)
+  long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
+  message("*** severity floor: sev_anchor >= ", SEV_MIN, " keeps ", nrow(surv_all), " of ", n_before,
+          " patients. log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the unrestricted fit ***")
+}
+
 # =============================================================================
 # 13e. Marker specification
 # =============================================================================
@@ -280,7 +313,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
   bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
-                                              rrt_sfx, "_", h_suffix, ".rds"))
+                                              rrt_sfx, sev_sfx, "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
   if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
@@ -595,7 +628,7 @@ result_file <- function(marker, model, adj_lab)
   file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
                                if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
-                               "_", h_suffix, ".rds"))
+                               sev_sfx, "_", h_suffix, ".rds"))
 RUN_START <- Sys.time()
 
 # =============================================================================
@@ -660,7 +693,7 @@ scaling    <- map_dfr(results, "scaling")
 
 # Output tag: non-default forms (baseline offset, saturated or no modifier) get
 # their own files so a sensitivity run never overwrites the primary's rows.
-out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "",
+out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", sev_tag,
                   if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                   h_suffix, "_", site_name)

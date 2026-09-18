@@ -51,7 +51,7 @@ MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
 # bundles, so the two-cause primary is never overwritten by the sensitivity
 RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
 stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
-out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "",
+out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "", sev_tag,
                    if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                    h_suffix, "_", site_name)
@@ -164,7 +164,7 @@ for (i in seq_len(nrow(usable))) {
   f <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                     if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                     if (RRT_EVENT && u$marker == "creatinine") "_rrtcause" else "",
-                                    "_", h_suffix, ".rds"))
+                                    sev_sfx, "_", h_suffix, ".rds"))
   if (!file.exists(f)) stop("fit bundle missing: ", f)
   b <- readRDS(f); jm <- b$jm; ld <- b$long_data
   draws <- beta_draws(jm, b$lme)
