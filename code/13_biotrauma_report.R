@@ -343,17 +343,20 @@ if (nrow(association_hr)) {
     scale_colour_manual(values = okabe[c(5, 3)]) +
     labs(title = "Q2: cause-specific hazard per SD of the current log marker (value) or per unit slope",
          x = "Hazard ratio", y = NULL) + theme_minimal(base_size = 11)
-  fs <- strain_effects %>% filter(model == "main", term %in% c("l_vtpbw_within", "l_vtpbw_within:ldisc_c")) %>%
+  # The control cohorts carry no tidal volume, so they have no dose terms and the forest is the hazard panel alone.
+  has_dose_terms <- nrow(strain_effects) > 0
+  fs <- if (has_dose_terms) strain_effects %>% filter(model == "main", term %in% c("l_vtpbw_within", "l_vtpbw_within:ldisc_c")) %>%
     mutate(marker = paste(marker, if_else(term == "l_vtpbw_within", "dose slope", "x log discordance"))) %>%
     mutate(adjustment = factor(adjustment, c("adjusted", "unadjusted")))
-  p2 <- ggplot(fs, aes(per_sd_estimate, marker, colour = adjustment)) +
+  if (has_dose_terms) p2 <- ggplot(fs, aes(per_sd_estimate, marker, colour = adjustment)) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     geom_pointrange(aes(xmin = per_sd_lo, xmax = per_sd_hi), position = position_dodge(width = 0.5)) +
     scale_colour_manual(values = okabe[c(5, 3)]) +
     labs(title = "Q1: log marker (SD units) per 1 mL/kg PBW above the patient's own mean, and its modification by log PBW/PFVC",
          x = "SD of log marker per mL/kg PBW (slope) or per mL/kg per log-unit discordance (interaction)", y = NULL) +
     theme_minimal(base_size = 11)
-  ggsave(file.path(final_dir, paste0("jm_forest_", out_tag, ".pdf")), p2 / p1, width = 10, height = 9)
+  ggsave(file.path(final_dir, paste0("jm_forest_", out_tag, ".pdf")), if (has_dose_terms) p2 / p1 else p1,
+         width = 10, height = if (has_dose_terms) 9 else 5)
 }
 message("13_biotrauma_report complete: ", nrow(trajectory_grid), " grid rows, ",
         nrow(strain_effects), " strain terms, ", nrow(association_hr), " association terms -> ", final_dir)
