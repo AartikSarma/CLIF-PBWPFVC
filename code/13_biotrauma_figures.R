@@ -142,7 +142,8 @@ p0 <- wrap_plots(p0_list, ncol = 1, heights = c(if (nrow(p0_cont)) n_distinct(p0
                       "P(harm) = posterior probability that the contrast lies in the injury direction")) &
   theme(legend.position = "top")
 ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")), p0,
-       width = 10, height = 2.5 + 1.5 * n_distinct(lc0$marker))
+       # one row per marker x horizon, so a 7-day run needs the height a 48-hour one did not
+       width = 10, height = 2.5 + 0.42 * nrow(distinct(lc0, marker, horizon_h)))
 
 # ---- 0b. the trend across the window (three or more horizons only)
 #      The level contrast is a level plus a rate times time, so on a long window
