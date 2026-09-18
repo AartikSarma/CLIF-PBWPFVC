@@ -47,8 +47,12 @@ final_dir  <- here("output", paste0(site_name, "_output"), "final")
 source(here("code", "13_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
+# RRT as a third competing cause (creatinine only): its own tables and its own
+# bundles, so the two-cause primary is never overwritten by the sensitivity
+RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
 stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc"))
-out_tag  <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
+out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "",
+                   if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                    h_suffix, "_", site_name)
 okabe <- c("#009E73", "#56B4E9", "#E69F00", "#D55E00", "#0072B2", "#CC79A7")
@@ -147,7 +151,9 @@ for (i in seq_len(nrow(usable))) {
   u <- usable[i, ]
   tag <- paste(u$marker, u$model, u$adjustment, sep = "_")
   f <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
-                                    if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
+                                    if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                                    if (RRT_EVENT && u$marker == "creatinine") "_rrtcause" else "",
+                                    "_", h_suffix, ".rds"))
   if (!file.exists(f)) stop("fit bundle missing: ", f)
   b <- readRDS(f); jm <- b$jm; ld <- b$long_data
   draws <- beta_draws(jm, b$lme)
@@ -214,7 +220,8 @@ for (i in seq_len(nrow(usable))) {
   al <- do.call(rbind, jm$mcmc$alphas)[keep, , drop = FALSE]
   for (cn in colnames(al)) {
     kind  <- if (grepl("value", cn)) "value" else "slope"
-    cause <- if (grepl("death", cn)) "death" else "extubation"
+    # a third cause (RRT, creatinine only) must not be silently labelled extubation
+    cause <- if (grepl("death", cn)) "death" else if (grepl("rrt", cn)) "rrt" else "extubation"
     scale <- if (kind == "value") sd_log_y else 1
     v <- al[, cn] * scale
     assoc_rows[[length(assoc_rows) + 1L]] <- tibble(

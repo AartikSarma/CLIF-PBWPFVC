@@ -375,12 +375,33 @@ surv <- base %>%
     event_time = pmax(event_day, STEP),   # JMbayes2 needs strictly positive times
     event_factor = factor(c("censored", "death", COMPETING_EVENT)[event + 1L],
                           levels = c("censored", "death", COMPETING_EVENT)),
+    # A THIRD cause for the creatinine model: renal replacement. Dialysis does not
+    # end the patient's course, but it ends the creatinine trajectory, and it is
+    # started BECAUSE the creatinine is rising, so dropping those patient-days (as
+    # the panel does) censors informatively on the very signal being measured. A
+    # shared-parameter joint model corrects that only for events it models, so
+    # these columns let RRT enter as a cause and share the random effects. Death
+    # wins a tie with RRT, RRT wins a tie with extubation, because the question is
+    # which one ends the marker series. Used only when PBWPFVC_JM_RRT_EVENT=1, and
+    # only for creatinine: with RRT in, "death" means death before dialysis, so
+    # every other marker's hazards would silently change meaning.
+    t_death = if_else(death_in, death_time, Inf),
+    t_extub = if_else(extub_in, extub_time, Inf),
+    t_rrt   = if_else(!is.na(rrt_day) & rrt_day >= 0 & rrt_day <= JM_HORIZON, as.numeric(rrt_day), Inf),
+    t_first = pmin(t_death, t_rrt, t_extub),
+    event_rrt = case_when(!is.finite(t_first) ~ 0L, t_death <= t_first ~ 1L,
+                          t_rrt <= t_first ~ 3L, TRUE ~ 2L),
+    event_day_rrt  = if_else(is.finite(t_first), t_first, as.numeric(JM_HORIZON)),
+    event_time_rrt = pmax(event_day_rrt, STEP),
+    event_factor_rrt = factor(c("censored", "death", COMPETING_EVENT, "rrt")[event_rrt + 1L],
+                              levels = c("censored", "death", COMPETING_EVENT, "rrt")),
     ers_pfvc_0 = ers * pfvc_gli,                 # specific elastance at the index (plateau subset)
     disc       = pbw / pfvc_gli,                 # PBW/PFVC discordance
     rrt_before_index = !is.na(rrt_day) & rrt_day < 0,
     creatinine_0 = if_else(rrt_before_index, NA_real_, creatinine_0)   # no creatinine trajectory on CRRT at the index
   ) %>%
   select(hospitalization_id, t0, event, event_day, event_time, event_factor,
+         event_rrt, event_day_rrt, event_time_rrt, event_factor_rrt,
          death_day, imv_extub_day, death_time, extub_time, rrt_day, rrt_period, rrt_before_index,
          pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, bmi, height_cm,

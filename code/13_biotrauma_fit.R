@@ -134,6 +134,10 @@ stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "ch
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
 HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
+# Renal replacement as a third competing cause, for creatinine only. Off by
+# default because it redefines the other two: with RRT in, the death hazard is
+# the hazard of death BEFORE dialysis, on a risk set that empties faster.
+RRT_EVENT  <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
 # Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
 # in the hazard, log PFVC is nearly a linear combination of a spline in age, so
 # the two sit on a posterior ridge the sampler crawls along (MIMIC: log PFVC x
@@ -264,8 +268,12 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   tag <- paste(mk$name, model, adj_lab, sep = "_")
   stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
   stamp("start")
+  # the RRT variant is a different survival model, so it must not share a cache
+  # entry (or a bundle) with the two-cause fit of the same marker
+  rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
   bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
-                                              if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
+                                              if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                                              rrt_sfx, "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
   if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
@@ -313,14 +321,29 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   ld$id  <- factor(ld$hospitalization_id,  levels = lv)
   sd_$id <- factor(sd_$hospitalization_id, levels = lv)
   sd_ <- sd_ %>% arrange(id)
+  # RRT as a third cause (creatinine only; see 13_biotrauma_panel.R). Swapping the
+  # event columns is the whole change: crisk_setup builds a stratum per level and
+  # the Cox formula already interacts every covariate with strata, so the third
+  # cause gets its own coefficients and its own association parameter.
+  use_rrt <- RRT_EVENT && mk$name == "creatinine" && "event_factor_rrt" %in% names(sd_)
+  if (RRT_EVENT && mk$name != "creatinine")
+    stamp("NOTE: PBWPFVC_JM_RRT_EVENT ignored for ", mk$name,
+          " (RRT ends the creatinine trajectory, not this one)")
+  if (RRT_EVENT && mk$name == "creatinine" && !"event_factor_rrt" %in% names(sd_))
+    stop("this panel predates the RRT competing event: rebuild it with the current 13_biotrauma_panel.R")
+  if (use_rrt) sd_ <- sd_ %>% mutate(event = event_rrt, event_day = event_day_rrt,
+                                     event_time = event_time_rrt, event_factor = event_factor_rrt)
   n_pts <- length(lv); n_deaths <- sum(sd_$event == 1L); n_extub <- sum(sd_$event == 2L)
-  stamp(nrow(ld), " rows, ", n_pts, " patients, ", n_deaths, " deaths, ", n_extub, " extubations")
+  n_rrt <- if (use_rrt) sum(sd_$event == 3L) else NA_integer_
+  stamp(nrow(ld), " rows, ", n_pts, " patients, ", n_deaths, " deaths, ", n_extub, " extubations",
+        if (use_rrt) paste0(", ", n_rrt, " RRT starts (third competing cause; death here means death before dialysis)") else "")
   # within-patient spread of the dose: a null dose slope on an exposure that
   # barely moves is a power statement, not a finding
   within_sd <- sd(ld$l_vtpbw_within)
   frac_moved <- mean(abs(ld$l_vtpbw_within) > 0.5)
   counts <- tibble(marker = mk$name, model = model, adjustment = adj_lab,
                    n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub,
+                   n_rrt = n_rrt, rrt_competing = use_rrt,
                    dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved)
   if (n_pts < MIN_PATIENTS || n_deaths < MIN_DEATHS) {
     stamp("skipped: too few patients or deaths")
@@ -550,7 +573,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 # per-fit result file (aggregates only; beside the bundles in intermediate/)
 result_file <- function(marker, model, adj_lab)
   file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
-                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "", "_", h_suffix, ".rds"))
+                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                               if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
+                               "_", h_suffix, ".rds"))
 RUN_START <- Sys.time()
 
 # =============================================================================
@@ -615,7 +640,8 @@ scaling    <- map_dfr(results, "scaling")
 
 # Output tag: non-default forms (baseline offset, saturated or no modifier) get
 # their own files so a sensitivity run never overwrites the primary's rows.
-out_tag <- paste0(if (BASELINE_FORM == "offset") "offset_" else "",
+out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "",
+                  if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                   h_suffix, "_", site_name)
 # Merge on write: a run restricted to some markers (PBWPFVC_JM_MARKERS) replaces
