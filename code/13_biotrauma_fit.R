@@ -374,7 +374,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 13_biotrauma_panel.R.")
-  s_bad <- vapply(c("vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS,
+  s_bad <- vapply(c(if (HAS_DOSE) "vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS,
                     if (MOD_FORM == "vtpfvc") "vtpfvc_idx"),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
