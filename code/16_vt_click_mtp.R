@@ -14,6 +14,10 @@
 #               low-VT arm's p75): the PFVC-anchored arm
 #   click_pbw   one click lower only if VT/PBW > TAU_PBW, with TAU_PBW set so the SAME share
 #               of patients is shifted as under click_pfvc: the PBW-anchored arm, bite-matched
+#   click_strain  a STRAIN-matched click for everyone: VT lower by CLICK_ML x PFVC / mean(PFVC)
+#               mL, so every shifted patient loses the same VT/PFVC (CLICK_ML x 0.1 / mean PFVC
+#               points) and the average cut in mL equals the fixed click's. The fallback's
+#               companion (see CATE below).
 # Every later setting follows the natural course given the (shifted) index setting, so the
 # estimand is the effect of the initial setting together with its persistence. Outcome:
 # all-cause death within 28 days of the index (out-of-hospital deaths included).
@@ -31,7 +35,10 @@
 # no tail trimming. WHAT IT IDENTIFIES: whether a fixed VT cut helps more in the patients PFVC
 # flags than in those PBW flags. That is the targeting question the paper asks, and it is
 # identified. It is NOT lung mechanics: the selection difference between the arms is ~99%
-# age, sex and race (11.Z), so a PFVC advantage says who to treat, not why.
+# age, sex and race (11.Z), so a PFVC advantage says who to treat, not why. The mechanism under
+# test is dose: a 50-mL click removes more strain from a smaller lung (1.7 points of VT/PFVC at
+# 3 L, 1.0 at 5 L), and the PFVC arm selects smaller lungs, so its clicks deliver more strain
+# reduction per patient. That is what PFVC anchoring is for.
 #
 # FALLBACK, PRE-SPECIFIED. The head-to-head is the headline only if, for BOTH targeted policies
 # and in EVERY PFVC tertile, at most POS_MAX_SHARE_GT10 (5%) of density ratios exceed 10 and the
@@ -40,11 +47,17 @@
 # policy). Otherwise the headline is click_all versus natural with its CATE by PFVC. The script
 # evaluates the rule and writes the decision (click_decision_{site}.csv); it is not a judgment call.
 #
-# CATE BY PFVC (always reported). DR-learner: per-patient pseudo-outcome difference between the
-# click_all and natural fits (estimate + influence function), smoothed on log PFVC and on log
+# CATE BY PFVC (always reported). DR-learner: per-patient pseudo-outcome difference between a
+# click fit and the natural fit (estimate + influence function), smoothed on log PFVC and on log
 # PBW/PFVC with a natural spline; p90 - p10 gradient with a patient bootstrap; and the relative
 # (risk-ratio) curve, because low PFVC marks high baseline risk, so a sloped risk difference with a
-# flat risk ratio is baseline risk, not effect modification. This block follows the titration
+# flat risk ratio is baseline risk, not effect modification.
+# Read the two shifts together. Under click_all the dose itself varies with PFVC (a fixed 50 mL is
+# a bigger strain cut in a smaller lung), so a CATE sloping toward small PFVC is EXPECTED with no
+# effect modification at all; the risk-ratio check does not catch this. click_strain holds the
+# strain cut constant. If the PFVC slope flattens under click_strain, the click_all slope was dose
+# heterogeneity, which is itself evidence that strain is the dose; if it persists, it is effect
+# modification. The strain-matched click lands between the 50-mL heaps, so check its positivity row. This block follows the titration
 # script's CATE code in compact form (copied rather than moved to utils/, per the project's
 # preference for inline analysis code).
 #
@@ -168,8 +181,8 @@ SL.ranger.mc <- function(...) SuperLearner::SL.ranger(..., num.threads = NTHREAD
 LEARNERS_OUTCOME <- c("SL.glm", "SL.gam", "SL.ranger.mc", "SL.mean")
 LEARNERS_TRT     <- c("SL.glm", "SL.ranger.mc", "SL.mean")
 okabe <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999")
-POLICY_LEVELS <- c("natural", "click_all", "click_pfvc", "click_pbw")
-POLICY_COLOURS <- setNames(okabe[c(8, 3, 5, 6)], POLICY_LEVELS)
+POLICY_LEVELS <- c("natural", "click_all", "click_pfvc", "click_pbw", "click_strain")
+POLICY_COLOURS <- setNames(okabe[c(8, 3, 5, 6, 7)], POLICY_LEVELS)
 RNGkind("L'Ecuyer-CMRG"); set.seed(20260918)
 
 # =============================================================================
@@ -233,17 +246,21 @@ share_pfvc_arm <- mean(cohort$feasible & cohort$vt > cohort$vt_cut_pfvc)
 if (share_pfvc_arm <= 0) stop("click_pfvc shifts nobody at tau_pfvc = ", TAU_PFVC, "%: lower --tau_pfvc.")
 # bite matching: the VT/PBW threshold that shifts the same share of patients
 TAU_PBW <- unname(quantile(cohort$vtpbw_index[cohort$feasible], 1 - share_pfvc_arm / mean(cohort$feasible), type = 1))
-cohort <- cohort %>% mutate(vt_cut_pbw = TAU_PBW * pbw)
+# the strain-matched click: the same VT/PFVC cut for every patient, equal on average in mL
+STRAIN_CUT_POINTS <- CLICK_ML * 0.1 / mean(cohort$pfvc)
+cohort <- cohort %>% mutate(vt_cut_pbw = TAU_PBW * pbw, strain_click_ml = CLICK_ML * pfvc / mean(pfvc))
 
-select_for <- function(policy, vt, cut_pfvc, cut_pbw) switch(policy,
-  natural = rep(FALSE, length(vt)), click_all = rep(TRUE, length(vt)),
-  click_pfvc = vt > cut_pfvc, click_pbw = vt > cut_pbw)
-shifted_by <- function(policy, d) d$feasible & select_for(policy, d$vt, d$vt_cut_pfvc, d$vt_cut_pbw)
-# the shift lmtp applies (it sees only model columns, which carry the thresholds)
+# per-patient click size (mL) and who is selected, for each policy
+click_size <- function(policy, d) if (policy == "click_strain") d$strain_click_ml else rep(CLICK_ML, nrow(d))
+select_for <- function(policy, d) switch(policy,
+  natural = rep(FALSE, nrow(d)), click_all = rep(TRUE, nrow(d)), click_strain = rep(TRUE, nrow(d)),
+  click_pfvc = d$vt > d$vt_cut_pfvc, click_pbw = d$vt > d$vt_cut_pbw)
+shifted_by <- function(policy, d) select_for(policy, d) & (d$vt - click_size(policy, d) >= d$vt_floor)
+# the shift lmtp applies (it sees only model columns, which carry the thresholds and click sizes)
 make_shift <- function(policy) function(data, trt) {
-  vt <- data[[trt]]; lowered <- vt - CLICK_ML
-  selected <- select_for(policy, vt, data$vt_cut_pfvc, data$vt_cut_pbw)
-  ifelse(selected & lowered >= data$vt_floor, lowered, vt)
+  d <- data.frame(vt = data[[trt]], vt_floor = data$vt_floor, vt_cut_pfvc = data$vt_cut_pfvc,
+                  vt_cut_pbw = data$vt_cut_pbw, strain_click_ml = data$strain_click_ml)
+  ifelse(shifted_by(policy, d), d$vt - click_size(policy, d), d$vt)
 }
 
 tertile <- function(x, labels) cut(x, quantile(x, c(0, 1/3, 2/3, 1)), include.lowest = TRUE, labels = labels)
@@ -268,7 +285,7 @@ selection_table <- map_dfr(POLICY_LEVELS[-1], function(policy) {
 write_csv(selection_table, out_file("click_selection"))
 
 # =============================================================================
-# 3. Fit the four policies (lmtp, one time point)
+# 3. Fit the policies (lmtp, one time point)
 # =============================================================================
 age_basis    <- ns(cohort$age_at_admission / 10, df = 4)
 height_basis <- ns(cohort$height_cm, df = 4)
@@ -276,7 +293,7 @@ model_data <- cohort %>%
   transmute(vt, Y = died_28, male = as.integer(tolower(sex_category) == "male"),
             race_category = factor(race_category), mode = factor(mode),
             sofa_total, log_sf = log(sf_ratio), bmi = if (USE_BMI) bmi else NA_real_,
-            vt_floor, vt_cut_pfvc, vt_cut_pbw) %>%
+            vt_floor, vt_cut_pfvc, vt_cut_pbw, strain_click_ml) %>%
   as.data.frame()
 for (j in 1:4) {
   model_data[[paste0("age_ns", j)]] <- age_basis[, j]
@@ -342,15 +359,17 @@ contrast_row <- function(fit, reference_fit, label) {
 }
 policy_summary <- map_dfr(POLICY_LEVELS[-1], function(policy) {
   flag <- cohort[[paste0("shifted_", policy)]]
+  cut_ml <- click_size(policy, cohort)[flag]
   contrast_row(fits[[policy]], fits$natural, paste(policy, "- natural")) %>%
     mutate(policy = policy, share_shifted = mean(flag), n_shifted = sum(flag),
-           mean_cut_ml_all = CLICK_ML * mean(flag),
-           mean_cut_vtpfvc_points_shifted = mean(CLICK_ML / cohort$pfvc[flag] * 0.1),
-           mean_cut_vtpbw_mlkg_shifted = mean(CLICK_ML / cohort$pbw[flag]))
+           mean_cut_ml_shifted = mean(cut_ml),
+           mean_cut_vtpfvc_points_shifted = mean(cut_ml / cohort$pfvc[flag] * 0.1),
+           mean_cut_vtpbw_mlkg_shifted = mean(cut_ml / cohort$pbw[flag]))
 }) %>%
   bind_rows(contrast_row(fits$click_pfvc, fits$click_pbw, "click_pfvc - click_pbw (head-to-head)") %>%
               mutate(policy = "head_to_head")) %>%
-  mutate(tau_pfvc = TAU_PFVC, tau_pbw = TAU_PBW, click_ml = CLICK_ML, jaccard_arms = jaccard_arms,
+  mutate(tau_pfvc = TAU_PFVC, tau_pbw = TAU_PBW, click_ml = CLICK_ML, strain_cut_points = STRAIN_CUT_POINTS,
+         jaccard_arms = jaccard_arms,
          n_patients = nrow(cohort), headline = headline, site = site_name)
 write_csv(policy_summary, out_file("click_policies"))
 message("\nPolicy estimates (28-day mortality; negative RD = fewer deaths):")
@@ -359,15 +378,15 @@ print(as.data.frame(policy_summary %>% transmute(contrast, share_shifted = round
 message("Headline by the pre-specified rule: ", headline)
 
 # =============================================================================
-# 5. CATE of click_all by PFVC and by discordance (DR-learner)
+# 5. CATE by PFVC and by discordance (DR-learner), for the fixed and the strain-matched click
 # =============================================================================
-pseudo_click   <- fits$click_all$estimate@x + fits$click_all$estimate@eif
-pseudo_natural <- fits$natural$estimate@x + fits$natural$estimate@eif
-individual_effect <- pseudo_click - pseudo_natural
+pseudo_outcome <- function(fit) fit$estimate@x + fit$estimate@eif
+pseudo_natural <- pseudo_outcome(fits$natural)
 RR_FLOOR <- 0.05   # the risk ratio is reported only where the fitted natural-course risk exceeds this
 
-cate_by <- function(modifier_values, label) {
-  d <- tibble(log_mod = log(modifier_values), effect = individual_effect,
+cate_by <- function(shift_policy, modifier_values, label) {
+  pseudo_click <- pseudo_outcome(fits[[shift_policy]])
+  d <- tibble(log_mod = log(modifier_values), effect = pseudo_click - pseudo_natural,
               click = pseudo_click, natural = pseudo_natural)
   basis <- ns(d$log_mod, df = 3)
   knots <- attr(basis, "knots"); boundary <- attr(basis, "Boundary.knots")
@@ -386,11 +405,11 @@ cate_by <- function(modifier_values, label) {
   point <- curves_from(d)
   boot <- map(seq_len(N_BOOT), ~ curves_from(d[sample.int(nrow(d), replace = TRUE), ]))
   band <- function(key, prob) apply(sapply(boot, `[[`, key), 1, quantile, prob, na.rm = TRUE)
-  curve <- tibble(modifier = label, value = exp(grid$log_mod),
+  curve <- tibble(shift = shift_policy, modifier = label, value = exp(grid$log_mod),
                   rd = point$rd, rd_lo = band("rd", 0.025), rd_hi = band("rd", 0.975),
                   rr = point$rr, rr_lo = band("rr", 0.025), rr_hi = band("rr", 0.975))
   gradient_rd <- map_dbl(boot, "gradient_rd"); gradient_rr <- map_dbl(boot, "gradient_rr")
-  slope <- tibble(modifier = label,
+  slope <- tibble(shift = shift_policy, modifier = label,
     statistic = c("RD(p90) - RD(p10)", "RR(p90) / RR(p10)"),
     p10 = exp(ends$log_mod[1]), p90 = exp(ends$log_mod[2]),
     estimate = c(point$gradient_rd, point$gradient_rr),
@@ -399,13 +418,16 @@ cate_by <- function(modifier_values, label) {
   list(curve = curve, slope = slope)
 }
 message("CATE by PFVC and by discordance (", N_BOOT, " bootstrap replicates) ...")
-cate_pfvc <- cate_by(cohort$pfvc, "PFVC (L)")
-cate_discordance <- cate_by(cohort$discordance, "PBW/PFVC discordance")
-cate_curves <- bind_rows(cate_pfvc$curve, cate_discordance$curve) %>% mutate(site = site_name)
-cate_slopes <- bind_rows(cate_pfvc$slope, cate_discordance$slope) %>% mutate(site = site_name)
+cate_results <- list()
+for (shift_policy in c("click_all", "click_strain")) {
+  cate_results[[length(cate_results) + 1]] <- cate_by(shift_policy, cohort$pfvc, "PFVC (L)")
+  cate_results[[length(cate_results) + 1]] <- cate_by(shift_policy, cohort$discordance, "PBW/PFVC discordance")
+}
+cate_curves <- map_dfr(cate_results, "curve") %>% mutate(site = site_name)
+cate_slopes <- map_dfr(cate_results, "slope") %>% mutate(site = site_name)
 write_csv(cate_curves, out_file("click_cate"))
 write_csv(cate_slopes, out_file("click_cate_slope"))
-message("CATE gradients (click_all - natural):")
+message("CATE gradients (each click - natural; compare click_all with click_strain for dose heterogeneity):")
 print(as.data.frame(cate_slopes %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 # =============================================================================
@@ -438,17 +460,23 @@ panel_positivity <- positivity_table %>% filter(pfvc_tertile != "All") %>%
        x = NULL, y = "ESS / n")
 
 cate_panel <- function(curves, y, lo, hi, reference, ylab, title, log_y = FALSE) {
-  plot <- ggplot(curves, aes(value, .data[[y]])) + geom_hline(yintercept = reference, colour = "grey70") +
-    geom_ribbon(aes(ymin = .data[[lo]], ymax = .data[[hi]]), fill = okabe[3], alpha = 0.2) +
-    geom_line(colour = okabe[3], linewidth = 0.9) + facet_wrap(~ modifier, scales = "free_x") +
+  plot <- ggplot(curves, aes(value, .data[[y]], colour = shift, fill = shift)) +
+    geom_hline(yintercept = reference, colour = "grey70") +
+    geom_ribbon(aes(ymin = .data[[lo]], ymax = .data[[hi]]), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.9) + facet_wrap(~ modifier, scales = "free_x") +
+    scale_colour_manual(values = POLICY_COLOURS, name = NULL) +
+    scale_fill_manual(values = POLICY_COLOURS, name = NULL) +
     labs(title = title, x = NULL, y = ylab)
   if (log_y) plot + scale_y_log10() else plot
 }
 panel_cate_rd <- cate_panel(cate_curves %>% mutate(across(c(rd, rd_lo, rd_hi), ~ 100 * .x)),
                             "rd", "rd_lo", "rd_hi", 0, "risk difference (pp)",
-                            "D. CATE of one click lower for everyone (click_all - natural)")
+                            sprintf("D. CATE of one click lower for everyone: fixed %g mL vs strain-matched (%.2f points of VT/PFVC)",
+                                    CLICK_ML, STRAIN_CUT_POINTS))
 panel_cate_rr <- cate_panel(cate_curves, "rr", "rr_lo", "rr_hi", 1, "risk ratio",
-                            "E. Same, relative scale (flat here + sloped above = baseline risk)", log_y = TRUE)
+                            "E. Same, relative scale (flat here + sloped above = baseline risk)", log_y = TRUE) +
+  labs(caption = paste("A PFVC slope under the fixed click that flattens under the strain-matched click is dose",
+                       "heterogeneity (strain is the dose); a slope that persists is effect modification."))
 
 figure <- (panel_selection + panel_positivity) / panel_effects / panel_cate_rd / panel_cate_rr +
   plot_annotation(title = sprintf("One-click tidal-volume MTP at the index (%s%s)", site_name,
