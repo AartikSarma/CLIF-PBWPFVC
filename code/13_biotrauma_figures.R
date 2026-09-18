@@ -156,37 +156,55 @@ ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")),
 #      when age, sex and race enter the model is not the age channel, and that
 #      invariance is the argument, so it is drawn rather than described.
 if (n_distinct(lc0$horizon_h) >= 3) {
+  RHAT_GATE <- 1.1
   inj_sign <- function(m) if_else(worse[m] == "higher", -1, 1) * if_else(FLIP_INJ, -1, 1)
-  trend <- lc0 %>% mutate(day = horizon_h / 24)
-  pt_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
-    geom_hline(yintercept = 0, colour = "grey55") +
-    geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
-    geom_line(linewidth = 1) + geom_point(size = 1.8) +
-    facet_wrap(~ marker_lab, scales = "free_y", ncol = 1) +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    scale_fill_manual(values = okabe[c(1, 2)], name = NULL) +
-    labs(title = "The contrast as it accumulates",
-         subtitle = "above zero is more injury; log units, log-odds for any vasopressor",
-         x = "days from the index", y = NULL)
+  # A marker whose exposure terms did not converge must not be drawn like one
+  # that did: the any-vasopressor rate at MIMIC came back with an R-hat of 2.5
+  # beside two labs at 1.01, and on the page they looked the same. Non-converged
+  # estimates are drawn hollow with a dashed line and their R-hat in the strip.
   rate <- es %>%
     filter(block == "longitudinal", model == "main", marker %in% names(lab),
            term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
     transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
               s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-              marker_lab = marker_label(marker))
-  pt_b <- ggplot(rate, aes(e, marker_lab, colour = adjustment)) +
-    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-    geom_pointrange(aes(xmin = l, xmax = h), position = position_dodge(width = 0.6)) +
+              rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
+  worst <- rate %>% group_by(marker) %>% summarise(mx = max(rhat, na.rm = TRUE), .groups = "drop")
+  strip <- function(m) {
+    w <- worst$mx[match(m, worst$marker)]
+    paste0(marker_label(m), if_else(is.finite(w) & w > RHAT_GATE, sprintf("\nR-hat %.2f: DID NOT CONVERGE", w), ""))
+  }
+  lvl <- sort(unique(strip(unique(rate$marker))))   # one order for both panels
+  rate  <- rate  %>% mutate(marker_lab = factor(strip(marker), lvl))
+  trend <- lc0 %>% mutate(day = horizon_h / 24,
+                          ok = marker %in% rate$marker[rate$ok],
+                          marker_lab = factor(strip(marker), lvl))
+  pt_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
+    geom_hline(yintercept = 0, colour = "grey55") +
+    geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
+    geom_line(aes(linetype = ok), linewidth = 1) +
+    geom_point(aes(shape = ok), size = 1.8) +
+    facet_wrap(~ marker_lab, scales = "free_y", ncol = 1) +
     scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+    scale_fill_manual(values = okabe[c(1, 2)], guide = "none") +
+    scale_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "22"), guide = "none") +
+    scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none") +
+    labs(title = "The contrast as it accumulates", subtitle = "above zero is more injury",
+         x = "days from the index", y = "log units (log-odds for any vasopressor)")
+  pt_b <- ggplot(rate, aes(e, adjustment, colour = adjustment)) +
+    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
+    geom_pointrange(aes(xmin = l, xmax = h, shape = ok)) +
+    facet_wrap(~ marker_lab, scales = "free_x", ncol = 1) +
+    scale_colour_manual(values = okabe[c(1, 2)], guide = "none") +
+    scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none") +
     labs(title = "The rate alone, per day",
-         subtitle = "a rate unchanged by demographic adjustment is not the age channel",
-         x = paste0("change per day toward injury, ", unit_lower), y = NULL) +
-    theme(strip.text.y = element_text(angle = 0))
+         subtitle = "a rate that adjustment does not move is not the age channel",
+         x = paste0("change per day toward injury, ", unit_lower), y = NULL)
   pt <- pt_a + pt_b + plot_layout(widths = c(1.15, 1), guides = "collect") +
     plot_annotation(title = paste0("Marker trends over ", JM_HORIZON, " days (joint model, ", unit_lower, ")"),
-                    subtitle = site_name) & theme(legend.position = "top")
+                    subtitle = paste0(site_name, ": hollow points and dashed lines did not converge")) &
+    theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_trend_", tag, ".pdf")), pt,
-         width = 12, height = 2.5 + 1.9 * n_distinct(trend$marker))
+         width = 13, height = 2.5 + 2.1 * n_distinct(trend$marker))
 }
 
 # ---- 1. estimator comparison
