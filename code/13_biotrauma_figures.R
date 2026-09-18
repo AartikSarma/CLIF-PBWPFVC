@@ -44,10 +44,12 @@ tag       <- paste0(if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suf
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))
 worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
-           ne_equiv_peak = "higher", ne_equiv = "higher", any_pressor = "higher")
+           ne_equiv_peak = "higher", ne_equiv = "higher", any_pressor = "higher",
+           osi = "higher", oi = "higher")
 lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio",
          dp = "Driving pressure", ne_equiv_peak = "NE-equivalent dose (per kg, flagged)", ne_equiv = "NE-equivalents",
-         any_pressor = "Any vasopressor (log-odds)")
+         any_pressor = "Any vasopressor (log-odds)",
+         osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
 marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")")
 

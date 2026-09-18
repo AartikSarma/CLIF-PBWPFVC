@@ -216,6 +216,14 @@ markers <- list(
   sf            = list(y = "sf",            y0 = "sf_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "SF ratio"),
   dp            = list(y = "dp",            y0 = "dp_0",         own_lag = NULL,       random = "pddiag",       offset = 0,    label = "Driving pressure"),
   ne_equiv_peak = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0.01, label = "NE-equivalent dose"),
+  # The oxygenation indices, 100 x mean airway pressure / ratio (SF for OSI, P/F
+  # for OI), rising with worse oxygenation. SF is a component of both, so the
+  # lagged SF covariate is dropped for them as it is for SF itself (own_lag).
+  # Read them with 13_oi_diagnostics.R beside them: at MIMIC the whole index
+  # effect was its numerator, which is the support the patient needed and not
+  # the lung.
+  osi           = list(y = "osi",           y0 = "osi_0",        own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "Oxygen saturation index"),
+  oi            = list(y = "oi",            y0 = "oi_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "Oxygenation index"),
   # The hurdle's binary part: any vasoactive running in the period (NE-equivalent
   # dose > 0), a logistic mixed model (GLMMadaptive) linked to the hazards through
   # its logit. Unit-invariant, so free of the per-kg height artefact that makes
