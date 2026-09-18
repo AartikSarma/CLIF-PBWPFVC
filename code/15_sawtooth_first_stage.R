@@ -47,11 +47,19 @@
 #      4.5 kg between sexes, about half a 50-mL period, so with sex dropped from the controls
 #      residual Z carries sex mechanically. Read age, SOFA, SF ratio, and race.
 #
-# COHORT. The pre-gate table, NOT the analytic cohort: the 6-8 mL/kg gate selects on the
-# endogenous variable and truncates the sawtooth. One row per patient, the first complete
-# hypoxemic timepoint (SF < 315; the band scan's index rule) with no VT/PBW gate. PRIMARY:
-# volume-control timepoints only (mode_category = "assist control-volume control", script 03's
-# VCV class), where set VT is the clinician's rounded choice. SENSITIVITY: all modes.
+# COHORT. PRIMARY: the analytic cohort, VT/PBW 6-8 mL/kg (--vtpbw_band, default "6,8"). The
+# index reproduces script 03 exactly: among complete, hypoxemic (SF < 315), in-band timepoints,
+# the first with a recorded driving pressure within 6 h of the first ventilator timepoint, else
+# the first. So the all-modes cohort IS the analytic cohort, and its n should match script 03's.
+# The volume-control cohort applies the same rule to VCV timepoints only (mode_category =
+# "assist control-volume control", script 03's VCV class), where set VT is the clinician's
+# rounded choice; it is the primary of the two.
+# The band selects on the exposure. Whether a patient enters depends on their VT/PBW, which
+# depends on Z and on whatever else drives the dose, so inside the band Z can correlate with
+# those drivers. The in-band first stage is the one an analytic-cohort 2SLS would use, but a
+# second-stage run must be read against --vtpbw_band none (the pre-gate cohort: the same
+# two-tier index over complete hypoxemic timepoints of any dose): if the first stage exists
+# only inside the band, the band is manufacturing it.
 #
 # WHAT A STRONG FIRST STAGE WOULD AND WOULD NOT BUY.
 #   * It identifies the effect of strain WITHIN demographic strata. It does not by itself
@@ -86,13 +94,18 @@
 #   final/sawtooth_first_stage_{site}.csv   one row per cohort x tau x m x smooth x outcome
 #   final/sawtooth_balance_{site}.csv       covariate balance on Z
 #   final/sawtooth_{site}.pdf               VT heaping, VT/PBW target, F heatmap, binned sawtooth
+#   A non-default band adds a suffix before the site name: _pregate for "none",
+#   _band{lo}_{hi} otherwise, so runs never overwrite each other.
 # Usage: Rscript code/15_sawtooth_first_stage.R [--site_name NAME] [--output_root DIR]
+#                                               [--vtpbw_band LO,HI|none]
 #   --site_name    overrides config$site_name (the same PBWPFVC_SITE_NAME override the
 #                  pipeline runner uses); config/config.json must still exist
 #   --output_root  the folder that holds {site_name}_output/ (default: the repository's
 #                  output/). Reads the pre-gate table from {root}/{site}_output and writes
 #                  to {root}/{site}_output/final. This is NOT the runner's --site_path:
 #                  that is the raw CLIF tables, which this script never reads.
+#   --vtpbw_band   the VT/PBW band in mL/kg, "6,8" by default (the analytic cohort);
+#                  "none" for the pre-gate cohort
 # Both --flag value and --flag=value work, and the script runs from any working directory.
 # Grid knobs stay in the environment: PBWPFVC_SAW_TAUS="6,6.5,7,7.5,8",
 # PBWPFVC_SAW_GRIDS="50,25,10", PBWPFVC_SAW_PLACEBO="37,43".
@@ -101,8 +114,9 @@ rm(list = ls())
 
 # --- Command-line arguments (parsed the way code/00_run_pipeline.R parses its own) ------
 parse_script_args <- function(args) {
-  known <- c("site_name", "output_root")
-  usage <- "Usage: Rscript code/15_sawtooth_first_stage.R [--site_name NAME] [--output_root DIR]"
+  known <- c("site_name", "output_root", "vtpbw_band")
+  usage <- paste("Usage: Rscript code/15_sawtooth_first_stage.R [--site_name NAME] [--output_root DIR]",
+                 "[--vtpbw_band LO,HI|none]")
   parsed <- list(); i <- 1L
   while (i <= length(args)) {
     a <- args[[i]]
@@ -122,6 +136,21 @@ parse_script_args <- function(args) {
   parsed
 }
 cli_args <- parse_script_args(commandArgs(trailingOnly = TRUE))
+
+# the VT/PBW band: NULL = no band (pre-gate cohort); otherwise c(lo, hi) in mL/kg
+band_arg <- if (is.null(cli_args$vtpbw_band)) "6,8" else cli_args$vtpbw_band
+if (identical(tolower(band_arg), "none")) {
+  VTPBW_BAND <- NULL
+} else {
+  VTPBW_BAND <- suppressWarnings(as.numeric(strsplit(band_arg, ",")[[1]]))
+  if (length(VTPBW_BAND) != 2 || any(!is.finite(VTPBW_BAND)) || VTPBW_BAND[1] >= VTPBW_BAND[2])
+    stop("--vtpbw_band must be LO,HI with LO < HI (e.g. 6,8) or none; got '", band_arg, "'")
+}
+# outputs of the default band keep the plain names; any other band gets a suffix
+band_suffix <- if (is.null(VTPBW_BAND)) "_pregate" else if (identical(VTPBW_BAND, c(6, 8))) "" else
+  sprintf("_band%g_%g", VTPBW_BAND[1], VTPBW_BAND[2])
+band_label <- if (is.null(VTPBW_BAND)) "pre-gate cohort (no VT/PBW band)" else
+  sprintf("VT/PBW %g-%g mL/kg", VTPBW_BAND[1], VTPBW_BAND[2])
 
 # Run from the repository root whatever the caller's working directory, so the relative
 # utils/ and config/ paths resolve. --output_root is resolved against the CALLER's directory
@@ -161,30 +190,46 @@ VCV_MODES <- c("assist control-volume control")   # script 03's mp_mode_class ==
 okabe <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999")
 
 # =============================================================================
-# 1. Cohort: one row per patient, first complete hypoxemic timepoint, no VT/PBW gate
+# 1. Cohort: one row per patient, script 03's two-tier index inside the VT/PBW band
 # =============================================================================
-timepoints <- read_parquet(pregate_path) %>%
+all_timepoints <- read_parquet(pregate_path)
+# t0 as script 03 defines it: each patient's first ventilator timepoint, complete or not
+ventilation_start <- all_timepoints %>% group_by(hospitalization_id) %>%
+  summarise(ventilation_start_dttm = min(recorded_dttm), .groups = "drop")
+INDEX_WINDOW_HOURS <- 6   # script 03's tier-1 window
+
+qualifying_timepoints <- all_timepoints %>%
   filter(has_all_data, sf_ratio < SF_HYPOXEMIA_THRESHOLD, is.finite(tidal_volume_set),
          tidal_volume_set > 0, is.finite(height_cm), is.finite(pbw), is.finite(pfvc)) %>%
+  { if (is.null(VTPBW_BAND)) . else filter(., vtpbw >= VTPBW_BAND[1], vtpbw <= VTPBW_BAND[2]) } %>%
   mutate(mode_lower = tolower(mode_category),
          is_volume_control = mode_lower %in% VCV_MODES)
+rm(all_timepoints)
 
-first_timepoint_per_patient <- function(tp) {
-  tp %>% group_by(hospitalization_id) %>%
-    slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+# Tier 1: the first qualifying timepoint with a recorded driving pressure within the window.
+# Tier 2: the first qualifying timepoint, for patients tier 1 does not cover.
+index_timepoint_per_patient <- function(tp) {
+  tier1 <- tp %>% left_join(ventilation_start, by = "hospitalization_id") %>%
+    filter(!is.na(dp), recorded_dttm <= ventilation_start_dttm + lubridate::hours(INDEX_WINDOW_HOURS)) %>%
+    group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    select(-ventilation_start_dttm)
+  tier2 <- tp %>% filter(!hospitalization_id %in% tier1$hospitalization_id) %>%
+    group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup()
+  bind_rows(tier1, tier2) %>%
     transmute(hospitalization_id, tidal_volume_set, vtpbw, vtpfvc, height_cm, pbw, pfvc,
               pbwpfvc = pbw / pfvc, age = age_at_admission,
               sex_category = factor(sex_category), race_category = factor(race_category),
               sofa_total, sf_ratio, deceased)
 }
 cohorts <- list(
-  volume_control = first_timepoint_per_patient(timepoints %>% filter(is_volume_control)),
-  all_modes      = first_timepoint_per_patient(timepoints))
+  volume_control = index_timepoint_per_patient(qualifying_timepoints %>% filter(is_volume_control)),
+  all_modes      = index_timepoint_per_patient(qualifying_timepoints))
+message("Cohort: ", band_label, if (identical(band_suffix, ""))
+  " -- the all-modes n should equal script 03's analytic cohort" else "")
 cohort_sizes <- map_int(cohorts, nrow)
-message(sprintf("Index patients: volume control %d, all modes %d (%.0f%% of all-mode index rows are VCV)",
+message(sprintf("Index patients: volume control %d, all modes %d (%.0f%% have a qualifying VCV timepoint)",
                 cohort_sizes[["volume_control"]], cohort_sizes[["all_modes"]],
-                100 * mean(timepoints %>% group_by(hospitalization_id) %>%
-                             slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% pull(is_volume_control))))
+                100 * cohort_sizes[["volume_control"]] / cohort_sizes[["all_modes"]]))
 if (cohort_sizes[["volume_control"]] < 300)
   stop("Fewer than 300 volume-control index patients: the first stage is not estimable here. ",
        "Check the mode_category strings against CLIF mCIDE before concluding anything.")
@@ -243,7 +288,7 @@ heaping_reads <- function(cohort, cohort_name) {
     mutate(cohort = cohort_name, n_cohort = nrow(cohort), site = site_name, .before = 1)
 }
 heaping_tbl <- imap_dfr(cohorts, heaping_reads)
-write_csv(heaping_tbl, file.path(final_dir, paste0("sawtooth_heaping_", site_name, ".csv")))
+write_csv(heaping_tbl, file.path(final_dir, paste0("sawtooth_heaping", band_suffix, "_", site_name, ".csv")))
 
 modal_target <- cohorts$volume_control %>%
   mutate(nearest_half = round(vtpbw * 2) / 2) %>% count(nearest_half) %>%
@@ -317,7 +362,7 @@ first_stage_tbl <- first_stage_grid %>%
          outcome_label = unname(OUTCOMES[outcome]),
          period_cm = grid_ml / target_ml_per_kg * DEVINE_CM_PER_KG,
          n_patients = cohort_sizes[cohort], site = site_name)
-write_csv(first_stage_tbl, file.path(final_dir, paste0("sawtooth_first_stage_", site_name, ".csv")))
+write_csv(first_stage_tbl, file.path(final_dir, paste0("sawtooth_first_stage", band_suffix, "_", site_name, ".csv")))
 
 # the question in one line per grid: does the richest smooth still leave a first stage, and does
 # the placebo grid have none?
@@ -367,7 +412,7 @@ balance_tbl <- expand_grid(cohort = names(cohorts), target_ml_per_kg = TARGETS_M
   mutate(covariate_label = unname(BALANCE_COVARIATES[covariate]),
          is_modal_target = target_ml_per_kg == modal_target,
          n_patients = cohort_sizes[cohort], site = site_name)
-write_csv(balance_tbl, file.path(final_dir, paste0("sawtooth_balance_", site_name, ".csv")))
+write_csv(balance_tbl, file.path(final_dir, paste0("sawtooth_balance", band_suffix, "_", site_name, ".csv")))
 
 # =============================================================================
 # 5. Figure
@@ -423,7 +468,7 @@ panel_saw <- ggplot(binned, aes(height_bin)) +
 fig <- (panel_vt + panel_target) / panel_heat / panel_saw +
   plot_layout(heights = c(1, 1.1, 1.1)) +
   plot_annotation(title = sprintf("Rounding-sawtooth instrument: first-stage check (%s)", site_name),
-                  subtitle = sprintf("volume-control index patients, n = %d; pre-gate cohort (no VT/PBW band)",
+                  subtitle = sprintf(paste0("volume-control index patients, n = %d; ", band_label),
                                      cohort_sizes[["volume_control"]]))
-ggsave(file.path(final_dir, paste0("sawtooth_", site_name, ".pdf")), fig, width = 11, height = 13)
+ggsave(file.path(final_dir, paste0("sawtooth", band_suffix, "_", site_name, ".pdf")), fig, width = 11, height = 13)
 message("15_sawtooth_first_stage complete -> ", final_dir)
