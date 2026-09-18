@@ -86,19 +86,68 @@
 #   final/sawtooth_first_stage_{site}.csv   one row per cohort x tau x m x smooth x outcome
 #   final/sawtooth_balance_{site}.csv       covariate balance on Z
 #   final/sawtooth_{site}.pdf               VT heaping, VT/PBW target, F heatmap, binned sawtooth
-# Usage: Rscript code/15_sawtooth_first_stage.R
-#        (PBWPFVC_SAW_TAUS="6,6.5,7,7.5,8"; PBWPFVC_SAW_GRIDS="50,25,10";
-#         PBWPFVC_SAW_PLACEBO="37,43")
+# Usage: Rscript code/15_sawtooth_first_stage.R [--site_name NAME] [--output_root DIR]
+#   --site_name    overrides config$site_name (the same PBWPFVC_SITE_NAME override the
+#                  pipeline runner uses); config/config.json must still exist
+#   --output_root  the folder that holds {site_name}_output/ (default: the repository's
+#                  output/). Reads the pre-gate table from {root}/{site}_output and writes
+#                  to {root}/{site}_output/final. This is NOT the runner's --site_path:
+#                  that is the raw CLIF tables, which this script never reads.
+# Both --flag value and --flag=value work, and the script runs from any working directory.
+# Grid knobs stay in the environment: PBWPFVC_SAW_TAUS="6,6.5,7,7.5,8",
+# PBWPFVC_SAW_GRIDS="50,25,10", PBWPFVC_SAW_PLACEBO="37,43".
 # =============================================================================
+rm(list = ls())
+
+# --- Command-line arguments (parsed the way code/00_run_pipeline.R parses its own) ------
+parse_script_args <- function(args) {
+  known <- c("site_name", "output_root")
+  usage <- "Usage: Rscript code/15_sawtooth_first_stage.R [--site_name NAME] [--output_root DIR]"
+  parsed <- list(); i <- 1L
+  while (i <= length(args)) {
+    a <- args[[i]]
+    if (a %in% c("--help", "-h")) { message(usage); quit(save = "no", status = 0) }
+    if (grepl("^--[a-z_]+=", a)) {                       # --flag=value
+      key <- sub("^--([a-z_]+)=.*$", "\\1", a); val <- sub("^--[a-z_]+=", "", a); i <- i + 1L
+    } else if (grepl("^--[a-z_]+$", a)) {                # --flag value
+      key <- sub("^--", "", a)
+      if (i == length(args) || grepl("^--", args[[i + 1L]]))
+        stop("Missing value for --", key, "\n", usage)
+      val <- args[[i + 1L]]; i <- i + 2L
+    } else stop("Unrecognized argument: ", a, "\n", usage)
+    if (!key %in% known) stop("Unknown option --", key, "\n", usage)
+    if (!nzchar(val)) stop("Empty value for --", key, "\n", usage)
+    parsed[[key]] <- val
+  }
+  parsed
+}
+cli_args <- parse_script_args(commandArgs(trailingOnly = TRUE))
+
+# Run from the repository root whatever the caller's working directory, so the relative
+# utils/ and config/ paths resolve. --output_root is resolved against the CALLER's directory
+# first, before the setwd.
+if (!is.null(cli_args$output_root))
+  cli_args$output_root <- normalizePath(path.expand(cli_args$output_root), mustWork = FALSE)
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE))
+if (length(script_file) == 1) setwd(normalizePath(file.path(dirname(script_file), "..")))
+
+# utils/config.R applies PBWPFVC_SITE_NAME, so the override is logged the way the runner's is
+if (!is.null(cli_args$site_name)) Sys.setenv(PBWPFVC_SITE_NAME = cli_args$site_name)
+
 suppressPackageStartupMessages({
   library(tidyverse); library(arrow); library(here); library(splines)
   library(sandwich); library(patchwork)
 })
-rm(list = ls())
 source("utils/config.R")
-site_name  <- config$site_name
-output_dir <- here("output", paste0(site_name, "_output"), "intermediate")
-final_dir  <- here("output", paste0(site_name, "_output"), "final")
+site_name    <- config$site_name
+output_root  <- if (is.null(cli_args$output_root)) here("output") else cli_args$output_root
+output_dir   <- file.path(output_root, paste0(site_name, "_output"), "intermediate")
+final_dir    <- file.path(output_root, paste0(site_name, "_output"), "final")
+pregate_path <- file.path(output_dir, "analysis_all_eligible_timepoints.parquet")
+if (!file.exists(pregate_path))
+  stop("Pre-gate table not found: ", pregate_path,
+       "\nRun scripts 01-03 for site '", site_name, "' first, or check --site_name / --output_root.")
+message("Site: ", site_name, " | output root: ", output_root)
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
 parse_num_list <- function(env_name, default) as.numeric(strsplit(Sys.getenv(env_name, default), ",")[[1]])
@@ -114,7 +163,7 @@ okabe <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#C
 # =============================================================================
 # 1. Cohort: one row per patient, first complete hypoxemic timepoint, no VT/PBW gate
 # =============================================================================
-timepoints <- read_parquet(file.path(output_dir, "analysis_all_eligible_timepoints.parquet")) %>%
+timepoints <- read_parquet(pregate_path) %>%
   filter(has_all_data, sf_ratio < SF_HYPOXEMIA_THRESHOLD, is.finite(tidal_volume_set),
          tidal_volume_set > 0, is.finite(height_cm), is.finite(pbw), is.finite(pfvc)) %>%
   mutate(mode_lower = tolower(mode_category),
