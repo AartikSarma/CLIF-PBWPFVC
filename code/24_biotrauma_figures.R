@@ -237,10 +237,11 @@ if (n_distinct(lc0$horizon_h) >= 3) {
          x = "days from the index", y = "log marker (log-odds for any vasopressor)")
   # ---- the control cohorts, beside the ventilated rate. The rate is where the
   #      argument lives: if small predicted lungs diverge without a ventilator, the
-  #      ventilated divergence is not about the breath. No support is the negative
-  #      control; noninvasive support is a point on the strain gradient, not a control
-  #      (its tidal volumes are uncontrolled). A matched no-support arm (severity floor,
-  #      29_run_controls.sh fits) appears when its tables exist. Controls are read from
+  #      ventilated divergence is not about the breath. The controls are the
+  #      no-support cohort, unmatched, and matched on severity (29_run_controls.sh fits;
+  #      the arm appears when its tables exist). The noninvasive cohort is deliberately
+  #      NOT drawn: NIPPV delivers large, unlimited positive-pressure volumes, so it is
+  #      a strained group and cannot serve as a control. Controls are read from
   #      final/controls/ of this site, or from PBWPFVC_FIG_CONTROLS_DIR; with another
   #      PBWPFVC_FIG_DIR and no controls folder named, the ventilated arm shows alone.
   ctrl_dir <- Sys.getenv("PBWPFVC_FIG_CONTROLS_DIR",
@@ -248,25 +249,25 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   ctrl_stub <- function(cohort) paste0(MOD_FORM, "_", h_suffix, "_", site_name, "_", cohort, ".csv")
   ctrl_rate <- tibble()
   if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
-    for (cohort in c("nosupport", "niv")) {
+    for (cohort in "nosupport") {
       found <- list.files(ctrl_dir, pattern = paste0("^jm_estimates_.*", ctrl_stub(cohort), "$"))
       restriction <- sub(paste0(ctrl_stub(cohort), "$"), "", sub("^jm_estimates_", "", found))
       keep <- grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)?$", restriction, perl = TRUE)   # unrestricted and matched only
       for (k in which(keep)) {
-        arm_label <- paste0(if (cohort == "nosupport") "No\nsupport" else "Non-\ninvasive",
-                            if (nzchar(restriction[k])) paste0(",\nmatched", if (sum(nzchar(restriction[keep])) > 1)
-                              paste0("\n", sub("_$", "", restriction[k])) else "") else "")
+        arm_label <- paste0("No support,\n", if (nzchar(restriction[k])) "matched" else "unmatched",
+                            if (nzchar(restriction[k]) && sum(nzchar(restriction[keep])) > 1)
+                              paste0("\n", sub("_$", "", restriction[k])) else "")
         ctrl_rate <- bind_rows(ctrl_rate, read_csv(file.path(ctrl_dir, found[k]), show_col_types = FALSE) %>%
           filter(block == "longitudinal", model == "main", marker %in% present,
                  term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
           transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
                     s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-                    rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE, arm = arm_label, strain_rank = if (cohort == "nosupport") 1 else 3))
+                    rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE, arm = arm_label, strain_rank = 1))
       }
     }
   }
-  rate_arms <- bind_rows(ctrl_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = "Venti-\nlated", strain_rank = 4)) %>%
-    mutate(strain_rank = if_else(grepl("matched", arm), 2, strain_rank),
+  rate_arms <- bind_rows(ctrl_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = "Ventilated", strain_rank = 4)) %>%
+    mutate(strain_rank = if_else(grepl("\nmatched", arm, fixed = TRUE), 2, strain_rank),   # not "unmatched"
            arm = factor(arm, unique(arm[order(strain_rank, arm)])),
            marker_lab = factor(row_label(marker), row_order))
   if (nrow(ctrl_rate)) message("24_biotrauma_figures: control arms in the rate panel: ",
@@ -278,7 +279,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     facet_grid(marker_lab ~ ., scales = "free_y") + shared +
     guides(colour = "none") +
     labs(title = if (nrow(ctrl_rate)) "Rate per day, by cohort" else "Rate per day",
-         subtitle = if (nrow(ctrl_rate)) "no support is the negative control" else "adjusted vs unadjusted",
+         subtitle = if (nrow(ctrl_rate)) "controls: no respiratory support" else "adjusted vs unadjusted",
          x = NULL, y = "change per day toward injury")
   pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
     geom_hline(yintercept = 0.5, colour = "grey55") +
@@ -296,7 +297,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
       tag_levels = "A",
       title = paste0("A smaller predicted lung, at the same VT/PBW, and organ-injury markers over ", JM_HORIZON,
                      " days of ventilation"),
-      subtitle = paste0(site_name, ": joint model, death and extubation (or escalation, in the controls) modelled; ", unit_lower,
+      subtitle = paste0(site_name, ": joint model, death and extubation (in the controls, escalation of support) modelled; ", unit_lower,
                         ".\nA rate unmoved by adjustment for age, sex and race is not the age channel. ",
                         "Row counts are the ventilated cohort's. Hollow points and dashed lines did not converge.",
                         if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its own anchor, so the rows are different patient subsets." else "")) &

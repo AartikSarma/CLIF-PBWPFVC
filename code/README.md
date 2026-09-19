@@ -29,7 +29,7 @@ to change; that stops once sites have returned `final/` folders.
 | `24_biotrauma_figures.R` | figure 4 | Figures from the aggregate tables only | `biotrauma_fig_` |
 | `25_injury_at_horizon.R` | figure 4, robustness | Fixed-horizon comparator among survivors: what the joint model is compared against | `injury_` |
 | `26_quick_lme.R` | figure 4, robustness | The longitudinal submodel alone, without the death correction | `quick_` |
-| `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, no support, matched no support, noninvasive | `jm_control_comparison_`, `jm_control_movement_` |
+| `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, no support unmatched and matched (and noninvasive, if built) | `jm_control_comparison_`, `jm_control_movement_` |
 | `29_run_biotrauma.sh` | figure 4 | Runner for 21–26 on one cohort | |
 | `29_run_controls.sh` | figure 4 | Runner for the control cohorts: `build`, `anchors`, `fits` | |
 
@@ -53,8 +53,9 @@ and `controls/`. A script never builds the path itself: it calls
 
 `PBWPFVC_COHORT` selects the cohort: `imv` (default, the ventilated analytic cohort),
 `nosupport` (room air or nasal cannula only: the negative control) or `niv`
-(high-flow or noninvasive ventilation first: a point on the strain gradient, not a
-clean control, because tidal volumes there are uncontrolled). `utils/config.R` sends
+(high-flow or noninvasive ventilation first). The noninvasive cohort is built only on
+request and is never drawn as a control, because NIPPV delivers large, unlimited
+positive-pressure volumes. `utils/config.R` sends
 a control cohort's patient-level files to `intermediate/controls/<cohort>/` and all
 its aggregates to `final/controls/`, whatever the block, inside the site's one output
 folder, and tags the file names `<site>_<cohort>`.

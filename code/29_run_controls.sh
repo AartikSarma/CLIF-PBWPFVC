@@ -10,7 +10,9 @@
 #
 #   bash code/29_run_controls.sh build
 #       scripts 01-03 for every control cohort (CONTROL_COHORTS, default
-#       "nosupport niv"). The ventilated cohort must already be built (00_run_pipeline.R).
+#       "nosupport"). The ventilated cohort must already be built (00_run_pipeline.R).
+#       The noninvasive cohort (niv) is not a control: NIPPV delivers large, unlimited
+#       positive-pressure volumes. Build it only on request, CONTROL_COHORTS="nosupport niv".
 #
 #   bash code/29_run_controls.sh anchors
 #       rebuilds the 7-day panel of both cohorts (they must carry the SOFA
@@ -33,7 +35,7 @@ STAGE=${1:-}
 MARKERS=${MARKERS:-platelets,bilirubin}
 SF_BANDS=${SF_BANDS:-"235,315 115,235 0,115"}
 SEV_MIN=${SEV_MIN:-}
-CONTROL_COHORTS=${CONTROL_COHORTS:-"nosupport niv"}
+CONTROL_COHORTS=${CONTROL_COHORTS:-nosupport}
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}
 HORIZON=${HORIZON:-7}
 

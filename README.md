@@ -50,10 +50,11 @@ guidance on constructing these tables.
 Adult (age >= 18) ICU encounters receiving invasive mechanical ventilation, with
 the height and ventilator data needed to compute PBW, PFVC, and delivered tidal
 volume. Detailed inclusion/exclusion criteria and attrition are produced by
-`01_cohort_identification.R` and logged to the cohort attrition table. Two control
-cohorts are built the same way for figure 4: patients who never received advanced
-respiratory support (`nosupport`) and patients whose first advanced support was
-high-flow oxygen or noninvasive ventilation (`niv`).
+`01_cohort_identification.R` and logged to the cohort attrition table. The control
+cohort for figure 4 is built the same way: patients who never received advanced
+respiratory support (`nosupport`), analysed unmatched and matched on severity. A
+noninvasive cohort (`niv`) can be built on request, but it is not a control: NIPPV
+delivers large, unlimited positive-pressure volumes.
 
 ## Key derived variables
 
@@ -139,7 +140,7 @@ Rscript code/00_run_pipeline.R --stages all
 | `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
 | `cross_sectional` | `04`, `05` | minutes |
 | `injury` | `29_run_biotrauma.sh`: panels, fixed-horizon comparators, joint models, figures | hours |
-| `controls` | `29_run_controls.sh build` then `anchors`: builds the no-support and noninvasive cohorts together and writes the severity-anchor distributions | under an hour |
+| `controls` | `29_run_controls.sh build` then `anchors`: builds the no-support control cohort and writes the severity-anchor distributions | under an hour |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
 what this runner has always done, so existing site instructions still work.
