@@ -25,7 +25,8 @@
 #       disk with the same chain settings are reused, so the two unrestricted
 #       arms cost nothing if they have been run.
 #
-# Knobs (environment): CONTROL_COHORTS, MARKERS, SEV_MIN, SF_BANDS, ITER, BURNIN, CHAINS, THIN, HORIZON.
+# Knobs (environment): CONTROL_COHORTS, MARKERS, SEV_MIN, SF_BANDS (set it empty to skip
+# the ventilated SF strata), ITER, BURNIN, CHAINS, THIN, HORIZON.
 # A failed arm is reported and the run continues: the arms are independent.
 # =============================================================================
 set -uo pipefail
@@ -33,7 +34,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 STAGE=${1:-}
 MARKERS=${MARKERS:-platelets,bilirubin}
-SF_BANDS=${SF_BANDS:-"235,315 115,235 0,115"}
+SF_BANDS=${SF_BANDS-"235,315 115,235 0,115"}   # SF_BANDS= (empty) skips the ventilated SF strata
 SEV_MIN=${SEV_MIN:-}
 CONTROL_COHORTS=${CONTROL_COHORTS:-nosupport}
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}
