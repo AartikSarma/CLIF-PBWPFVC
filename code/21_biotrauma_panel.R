@@ -90,9 +90,15 @@ message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " da
 # OI  = FiO2(%) x mean AIRWAY pressure / PaO2      (arterial gas; indication-driven, sparse)
 # OSI = FiO2(%) x mean airway pressure / SpO2      (the saturation analogue, dense)
 #     = 100 x mean airway pressure / SF, exactly, since SF = SpO2 / FiO2 as a fraction
-# Higher is worse for both. Mean airway pressure is never forward-filled, so both
-# indices exist only on periods with a RECORDED value, and that coverage is the
-# thing to read before trusting any OI result.
+# Higher is worse for both. Each index is computed AT A MEASUREMENT from values taken
+# at the same time (user, 2026-09-21: an index whose numerator and denominator come
+# from different hours is uninterpretable):
+#   OSI at each SpO2: SpO2 clamped to 80-97 as for SF, FiO2 from the last 4 h (as for
+#                     SF), mean airway pressure the nearest RECORDED value within
+#                     OXY_MATCH_H hours either side (never forward-filled)
+#   OI at each PaO2:  FiO2 from the last 4 h, mean airway pressure as above
+# and a period keeps its WORST (highest) index. A measurement with no mean airway
+# pressure within the window has no index, so coverage is the thing to read first.
 #
 # CAUTION, and it is the reason OI was parked in the first place: mean airway
 # pressure is a ventilator setting that the exposure moves arithmetically. A
@@ -101,20 +107,37 @@ message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " da
 # nothing happening in the lung. Read OI beside its components (this script
 # writes the mean airway pressure by day), and treat PEEP-per-PFVC as the
 # mediator it is, not as a nuisance.
-oi_from <- function(map_aw, fio2, pao2, sf) {
-  fio2_pct <- if_else(fio2 > 1.5, fio2, fio2 * 100)          # the panel carries both conventions
-  tibble(map_aw = map_aw,
-         oi  = if_else(is.finite(pao2) & pao2 > 0, fio2_pct * map_aw / pao2, NA_real_),
-         osi = if_else(is.finite(sf)   & sf   > 0, 100      * map_aw / sf,   NA_real_))
+OXY_MATCH_H <- as.numeric(Sys.getenv("PBWPFVC_OXY_MATCH_H", "1"))
+maw_near <- copy(maw_dt)[, t_maw := t]                     # keeps the matched reading's own time
+near_maw <- function(pts) {                                # nearest mean airway pressure, within the window
+  as_tibble(maw_near[pts, roll = "nearest", on = .(hospitalization_id, t)]) %>%
+    filter(!is.na(map_aw), abs(t - t_maw) <= OXY_MATCH_H * 3600)
 }
+osi_pts <- fio2_dt[spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
+  near_maw() %>%
+  mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set),
+         osi = 100 * map_aw / (spo2_clamped / fio2_frac)) %>%
+  filter(is.finite(osi), osi > 0) %>% select(hospitalization_id, t, osi)
+oi_pts <- fio2_dt[copy(pao2_dt), roll = 4 * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
+  near_maw() %>%
+  mutate(fio2_pct = if_else(fio2_set > 1.5, fio2_set, fio2_set * 100), oi = fio2_pct * map_aw / pao2) %>%
+  filter(is.finite(oi), oi > 0) %>% select(hospitalization_id, t, oi)
+message("Oxygenation indices from matched measurements (mean airway pressure within ", OXY_MATCH_H, " h): ",
+        nrow(osi_pts), " OSI and ", nrow(oi_pts), " OI values")
+t0_secs <- base %>% transmute(hospitalization_id, t0n = as.numeric(t0))
+worst_index <- function(pts, col, period_hours, max_period) pts %>%
+  inner_join(t0_secs, by = "hospitalization_id") %>%
+  mutate(period = as.integer(floor((t - t0n) / 3600 / period_hours))) %>%
+  filter(period >= 0L, period <= max_period) %>%
+  group_by(hospitalization_id, period) %>%
+  summarise(!!col := max(.data[[col]]), .groups = "drop")
 if (JM_GRID == "daily") {
   pf  <- panel_full %>% mutate(period = as.integer(vent_day))
   dpp <- dp_daily   %>% mutate(period = as.integer(vent_day))
-  oxy <- maw_daily %>%
-    left_join(pao2_daily, by = c("hospitalization_id", "vent_day")) %>%
-    left_join(pf %>% select(hospitalization_id, vent_day, fio2, sf), by = c("hospitalization_id", "vent_day")) %>%
-    bind_cols(., oi_from(.$map_aw, .$fio2, .$pao2, .$sf) %>% select(oi, osi)) %>%
-    transmute(hospitalization_id, period = as.integer(vent_day), map_aw, oi, osi)
+  # the day's median mean airway pressure (descriptive) beside the day's worst matched indices
+  oxy <- maw_daily %>% transmute(hospitalization_id, period = as.integer(vent_day), map_aw) %>%
+    full_join(worst_index(osi_pts, "osi", 24, MAX_VENT_DAY), by = c("hospitalization_id", "period")) %>%
+    full_join(worst_index(oi_pts,  "oi",  24, MAX_VENT_DAY), by = c("hospitalization_id", "period"))
   # the competing event: extubation (analytic cohort) or escalation to invasive ventilation (control)
   extub_time <- base %>% transmute(hospitalization_id,
                                    extub_time = if (config$cohort != "imv") escalation_time_days else as.numeric(imv_extub_day))
@@ -148,8 +171,7 @@ if (JM_GRID == "daily") {
     filter(is.finite(sf_pt)) %>% inner_join(t0_num, by = "hospitalization_id") %>%
     mutate(period = as.integer(floor((t - t0n) / 3600 / STEP_H))) %>% filter(period >= 0L, period <= MAXP) %>%
     group_by(hospitalization_id, period) %>% summarise(sf = min(sf_pt), .groups = "drop")
-  # oxygenation index on the fine grid: recorded mean airway pressure and the
-  # period's worst arterial PaO2, paired with the period's worst SF for OSI
+  # the period's median recorded mean airway pressure (descriptive; the indices are matched above)
   maw_p <- wf %>% mutate(period = per(recorded_dttm, t0)) %>%
     filter(period >= 0L, period <= MAXP, !is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
     group_by(hospitalization_id, period) %>%
@@ -161,11 +183,8 @@ if (JM_GRID == "daily") {
     group_by(hospitalization_id, period) %>%
     summarise(pao2 = min(lab_value_numeric, na.rm = TRUE), .groups = "drop")
   oxy <- maw_p %>%
-    left_join(pao2_p, by = c("hospitalization_id", "period")) %>%
-    left_join(sf_p, by = c("hospitalization_id", "period")) %>%
-    left_join(set_p %>% select(hospitalization_id, period, fio2), by = c("hospitalization_id", "period")) %>%
-    bind_cols(., oi_from(.$map_aw, .$fio2, .$pao2, .$sf) %>% select(oi, osi)) %>%
-    select(hospitalization_id, period, map_aw, oi, osi)
+    full_join(worst_index(osi_pts, "osi", STEP_H, MAXP), by = c("hospitalization_id", "period")) %>%
+    full_join(worst_index(oi_pts,  "oi",  STEP_H, MAXP), by = c("hospitalization_id", "period"))
   med_p <- read_parquet(file.path(output_dir, "cohort_meds.parquet")) %>%
     filter(med_group == "vasoactives") %>% inner_join(b0, by = "hospitalization_id") %>%
     mutate(period = per(admin_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
@@ -241,17 +260,14 @@ if (is_synthetic) {
   }
   for (m in setdiff(names(marker_sd), c("dp", "map_aw"))) pf <- perturb(pf, m)
   dpp <- perturb(dpp, "dp")
-  # The oxygenation indices are built FROM the other columns, so perturbing them
-  # directly would break the identity log index = log 100 + log(numerator) -
-  # log(ratio) that injury_oi_diagnostics.R checks. Perturb the numerator instead and
-  # rebuild each index from its perturbed ingredients: OI's PaO2 is untouched, so
-  # it moves with the numerator alone, while OSI is rebuilt over the perturbed SF.
+  # The oxygenation indices are computed from matched measurements, so they are
+  # perturbed through their numerator: both move with the patient's mean airway
+  # pressure perturbation.
   oxy <- oxy %>% mutate(vent_day = period * STEP, map_aw_raw = map_aw)
   oxy <- perturb(oxy, "map_aw") %>%
-    left_join(pf %>% select(hospitalization_id, period, sf_pert = sf), by = c("hospitalization_id", "period")) %>%
-    mutate(oi  = oi * map_aw / map_aw_raw,
-           osi = if_else(is.finite(sf_pert) & sf_pert > 0, 100 * map_aw / sf_pert, NA_real_)) %>%
-    select(-vent_day, -map_aw_raw, -sf_pert)
+    mutate(ratio = if_else(is.finite(map_aw / map_aw_raw), map_aw / map_aw_raw, 1),
+           oi = oi * ratio, osi = osi * ratio) %>%
+    select(-vent_day, -map_aw_raw, -ratio)
 }
 
 # =============================================================================
