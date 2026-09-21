@@ -51,6 +51,9 @@
 #   with an offset_ prefix), PBWPFVC_JM_ITER / _BURNIN / _CHAINS (3500 / 500 / 3;
 #   lower them only for plumbing runs), PBWPFVC_CORES, PBWPFVC_JM_PILOT (0 skips
 #   the timing pilot), PBWPFVC_JM_HEARTBEAT (seconds between progress lines; 0 off).
+#   PBWPFVC_JM_SHAPE_ONLY=1 (pfvc form, daily grid): no joint models; the size
+#   divergence as a line and as a day spline, longitudinal submodel only (section
+#   13f0) -> final/jm_shape_{tag}.csv and .pdf.
 #
 # Usage: Rscript code/22_biotrauma_fit.R
 # =============================================================================
@@ -199,6 +202,12 @@ stop_heartbeat <- function(hb) {
 }
 RHAT_GATE  <- 1.1
 MIN_PATIENTS <- 20L; MIN_DEATHS <- 5L
+# Shape check (section 13f0): PBWPFVC_JM_SHAPE_ONLY=1 fits the longitudinal submodel
+# alone, with the size effect as a line and as a spline in time, and no joint model.
+SHAPE_ONLY <- identical(Sys.getenv("PBWPFVC_JM_SHAPE_ONLY", "0"), "1")
+SHAPE_SPLIT_DAY <- 3   # early and late divergence meet here: creatinine lags, platelets bottom out about now
+if (SHAPE_ONLY && (MOD_FORM != "pfvc" || JM_GRID != "daily"))
+  stop("the shape check reads the pfvc form on the daily grid: set PBWPFVC_JM_MODIFIER=pfvc PBWPFVC_JM_GRID=daily")
 message("=== 22_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
         ", MCMC ", N_ITER, "/", N_BURNIN, " x ", N_CHAINS, " chains on ", JM_CORES, " cores ===")
 if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_JM_ITER for any reported fit ***")
@@ -344,6 +353,80 @@ PRESSURE_MARKERS <- c("dp")
 base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi") else BASE_RHS
 
 # =============================================================================
+# 13f0. Shape check of the divergence (PBWPFVC_JM_SHAPE_ONLY=1)
+# =============================================================================
+# The pfvc form draws the size effect as a straight line in time, level + rate x
+# day, while the average trajectory gets a 3-df spline. A straight line fits
+# injury that accrues at the same pace every ventilated day; the markers need not
+# behave that way (creatinine lags injury by a day or two, platelets bottom out
+# and recover). This check refits the longitudinal submodel alone, by maximum
+# likelihood and in minutes, on exactly the patients and covariates of each
+# joint-model fit, twice: with the line, and with the size effect on the same
+# day spline as the trajectory (log_pfvc_sd x ns(vent_day, 3)). Each is reported
+# per SD of log PFVC on the log-marker scale:
+#   gap     the marker difference on each day
+#   change  the gap on each day minus the gap on the first day: the divergence
+#   rate    the average divergence per day from the first day to the last (under
+#           the line this IS the rate), and over the early and late segments
+#           split at SHAPE_SPLIT_DAY: a lag shows as early < late, a plateau or
+#           recovery as early > late
+# with the likelihood-ratio test of the spline against the line (2 df). Death and
+# extubation are not modelled here, as in 26_quick_lme.R: the check reads the
+# shape, and the joint model stays the estimate.
+shape_check <- function(ld, rhs, random_spec, mk, adj_lab, counts, stamp) {
+  rate_term <- "log_pfvc_sd:vent_day"
+  stopifnot(rate_term %in% rhs)
+  fit_ml <- function(rhs_terms) lme(as.formula(paste("log_y ~", paste(rhs_terms, collapse = " + "))),
+                                    random = random_spec, data = ld, method = "ML",
+                                    control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200))
+  fits <- list(linear = fit_ml(rhs),
+               spline = fit_ml(replace(rhs, rhs == rate_term, "log_pfvc_sd:ns(vent_day, 3)")))
+  # the same ns() call on the same rows as inside the formula, so the same knots
+  day_basis <- ns(ld$vent_day, 3)
+  days <- sort(unique(ld$vent_day)); first_day <- min(days); last_day <- max(days)
+  stopifnot(first_day < SHAPE_SPLIT_DAY, SHAPE_SPLIT_DAY < last_day)
+  # a coefficient by its components, whatever order R put them in
+  coef_named <- function(b, comps) {
+    hit <- names(b)[vapply(strsplit(names(b), ":"), setequal, logical(1), comps)]
+    stopifnot(length(hit) == 1L); hit
+  }
+  lr   <- as.numeric(2 * (logLik(fits$spline) - logLik(fits$linear)))
+  lr_df <- attr(logLik(fits$spline), "df") - attr(logLik(fits$linear), "df")
+  imap_dfr(fits, function(f, shape) {
+    b <- fixef(f); V <- as.matrix(vcov(f))
+    gap_w <- function(day) {   # weights on b giving the gap on `day`
+      w <- setNames(numeric(length(b)), names(b)); w["log_pfvc_sd"] <- 1
+      if (shape == "linear") w[coef_named(b, c("log_pfvc_sd", "vent_day"))] <- day
+      else {
+        bk <- predict(day_basis, day)
+        for (k in 1:3) w[coef_named(b, c("log_pfvc_sd", paste0("ns(vent_day, 3)", k)))] <- bk[k]
+      }
+      w
+    }
+    g_first <- gap_w(first_day); g_split <- gap_w(SHAPE_SPLIT_DAY); g_last <- gap_w(last_day)
+    contrasts <- c(
+      set_names(map(days, gap_w), paste0("gap|", days)),
+      set_names(map(days, ~ gap_w(.x) - g_first), paste0("change|", days)),
+      list("rate|all"   = (g_last - g_first) / (last_day - first_day),
+           "rate|early" = (g_split - g_first) / (SHAPE_SPLIT_DAY - first_day),
+           "rate|late"  = (g_last - g_split) / (last_day - SHAPE_SPLIT_DAY)))
+    imap_dfr(contrasts, function(w, key) {
+      parts <- strsplit(key, "|", fixed = TRUE)[[1]]
+      est <- sum(w * b); se <- sqrt(as.numeric(t(w) %*% V %*% w))
+      tibble(quantity = parts[1],
+             day = if (parts[1] == "rate") NA_real_ else as.numeric(parts[2]),
+             segment = if (parts[1] == "rate") parts[2] else NA_character_,
+             estimate = est, se = se, lo = est - 1.96 * se, hi = est + 1.96 * se)
+    }) %>% mutate(shape = shape, aic = AIC(f), .before = 1)
+  }) %>%
+    mutate(marker = mk$name, adjustment = adj_lab, .before = 1) %>%
+    mutate(lr_spline_vs_linear = lr, lr_df = lr_df, p_nonlinear = pchisq(lr, lr_df, lower.tail = FALSE),
+           first_day = first_day, split_day = SHAPE_SPLIT_DAY, last_day = last_day,
+           n_patients = counts$n_patients, n_obs = counts$n_obs, cohort = config$cohort,
+           horizon_days = JM_HORIZON, site = site_name)
+}
+
+# =============================================================================
 # 13f. One fit
 # =============================================================================
 fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
@@ -359,7 +442,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                               rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
-  if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
+  if (!USE_FRESH && !SHAPE_ONLY && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
     same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
     # a fit made under another entry rule, or before the panel was last rebuilt (e.g.
@@ -545,6 +628,12 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (mk$random == "intercept" && ASSOC_FORM == "value_slope")
     stop("marker ", mk$y, " has a random intercept only on this grid; the slope association needs a random slope. ",
          "Use PBWPFVC_JM_ASSOC=value.")
+  if (SHAPE_ONLY) {
+    if (isTRUE(mk$binary)) return(list(status = "skipped", reason = "the shape check is for continuous markers", counts = counts))
+    shape <- shape_check(ld, rhs, random_spec, mk, adj_lab, counts, stamp)
+    stamp("shape check done")
+    return(list(status = "shape", reason = NA_character_, counts = counts, shape = shape))
+  }
   if (isTRUE(mk$binary)) {
     # logistic mixed model, independent intercept and slope variances (the || form)
     # Student-t penalty on the fixed effects, and a wide coefficient ceiling:
@@ -723,7 +812,8 @@ RUN_START <- Sys.time()
 # =============================================================================
 jobs <- expand_grid(marker = names(markers), model = want_models, adjusted = c(TRUE, FALSE)) %>%
   filter(!(model == "hetero" & !adjusted)) %>%          # heterogeneity: adjusted only
-  filter(!(MOD_FORM == "channels" & adjusted))          # channels: one arm, the pieces are the demographics
+  filter(!(MOD_FORM == "channels" & adjusted)) %>%      # channels: one arm, the pieces are the demographics
+  filter(!(SHAPE_ONLY & model == "hetero"))             # the shape check reads the main model
 run_job <- function(marker, model, adjusted) {
   tryCatch(fit_one(markers[[marker]], model, adjusted),
            error = function(e) {
@@ -737,7 +827,7 @@ run_job <- function(marker, model, adjusted) {
 # as many fits at once as the core budget allows (N_CORES / N_CHAINS). Worker
 # output is forwarded to this console (outfile = ""), so stamps and heartbeats
 # from concurrent fits interleave, each prefixed by its fit tag.
-N_FITS_PAR <- max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS, N_FITS_MAX))
+N_FITS_PAR <- if (SHAPE_ONLY) 1L else max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS, N_FITS_MAX))   # the shape check's LMEs take minutes
 if (N_FITS_PAR > 1L) {
   message("Running ", nrow(jobs), " fits, ", N_FITS_PAR, " at a time (", N_CHAINS, " chains each)")
   cl <- makeCluster(N_FITS_PAR, type = "PSOCK", outfile = "")
@@ -789,6 +879,45 @@ out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                   if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
                   h_suffix, "_", site_name)
+
+# The shape check writes its own table and figure, and nothing else: the joint-model
+# tables below belong to the MCMC fits and must not be merged with this run's rows.
+if (SHAPE_ONLY) {
+  shape <- map_dfr(results, "shape")
+  failed <- manifest %>% filter(status != "shape")
+  if (nrow(failed)) { message("Shape check not run for:"); print(as.data.frame(failed %>% select(marker, adjustment, status, reason)), row.names = FALSE) }
+  if (!nrow(shape)) stop("no shape check succeeded")
+  shape_path <- file.path(final_dir, paste0("jm_shape_", out_tag, ".csv"))
+  if (file.exists(shape_path))   # merge on write, as for the joint-model tables
+    shape <- bind_rows(read_csv(shape_path, show_col_types = FALSE) %>%
+                         anti_join(manifest %>% distinct(marker, adjustment), by = c("marker", "adjustment")),
+                       shape)
+  write_csv(mask_small_counts(shape), shape_path)
+  message("\nDivergence per day per SD of log PFVC (log-marker scale): the line against the spline;",
+          " early = days ", min(shape$first_day), "-", SHAPE_SPLIT_DAY, ", late = ", SHAPE_SPLIT_DAY, "-", max(shape$last_day))
+  print(as.data.frame(shape %>% filter(quantity == "rate") %>%
+                        transmute(marker, adjustment, shape, segment, estimate = signif(estimate, 3),
+                                  lo = signif(lo, 3), hi = signif(hi, 3), p_nonlinear = signif(p_nonlinear, 3)) %>%
+                        arrange(marker, adjustment, shape, factor(segment, c("all", "early", "late")))), row.names = FALSE)
+  shape_fig <- shape %>% filter(quantity == "change") %>%
+    group_by(marker, adjustment) %>%
+    mutate(panel = sprintf("%s, %s\nspline vs line p = %.2g", marker, adjustment, first(p_nonlinear))) %>% ungroup() %>%
+    ggplot(aes(day, estimate, colour = shape, fill = shape)) +
+    geom_hline(yintercept = 0, colour = "grey60") +
+    geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~ panel, scales = "free_y") +
+    scale_colour_manual(values = c(linear = "#0072B2", spline = "#E69F00"), aesthetics = c("colour", "fill")) +
+    labs(x = "Day of ventilation", y = "Change in the gap since the first day\n(log marker per SD of log PFVC)",
+         colour = NULL, fill = NULL,
+         title = "Shape of the PFVC divergence: straight line against day spline",
+         subtitle = "Longitudinal model alone (maximum likelihood); death and extubation not modelled") +
+    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+  ggsave(file.path(final_dir, paste0("jm_shape_", out_tag, ".pdf")), shape_fig,
+         width = 3 + 2.6 * min(3, n_distinct(shape_fig$data$panel)), height = 1.5 + 2.6 * ceiling(n_distinct(shape_fig$data$panel) / 3))
+  message("shape check -> ", shape_path)
+  quit(save = "no", status = 0)
+}
 # Merge on write: a run restricted to some markers (PBWPFVC_JM_MARKERS) replaces
 # only its own marker/model/adjustment rows in each table and keeps the rest, so
 # the full set can be assembled from several runs (a lab-only rerun, a longer-
