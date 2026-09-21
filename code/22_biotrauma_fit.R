@@ -260,6 +260,9 @@ if (nzchar(want_markers)) {
                                           paste(setdiff(want, names(markers)), collapse = ", "))
   markers <- markers[want]
 }
+# which entry rule a marker's fit uses (see the entry filter in fit_one); stored with
+# each result so a cached fit made under the other rule is refitted
+entry_rule_for <- function(mk) if (mk$name == "creatinine" && RRT_EVENT) "rrt_one_value" else "two_values"
 want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main,hetero"), ",")[[1]])
 stopifnot(all(want_models %in% c("main", "hetero")))
 
@@ -359,18 +362,19 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
     same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
-    # a fit made before the panel was last rebuilt used the old panel (e.g. before ESRD
-    # and dialysis entered the RRT definition): refit, whatever the chain settings
+    # a fit made under another entry rule, or before the panel was last rebuilt (e.g.
+    # before ESRD and dialysis entered the RRT definition), is on different data:
+    # refit, whatever the chain settings, and PBWPFVC_JM_RESUME does not override that
+    rule_on_disk <- if (is.null(r$entry_rule)) "two_values" else r$entry_rule
     panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
-    if (file.mtime(rf) < file.mtime(panel_file)) {
-      stamp("result on disk predates the current panel; refitting")
-      same <- FALSE; resume_ok <- FALSE
-    } else resume_ok <- USE_RESUME
-    if (same || resume_ok) {
+    other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
+                  if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
+    if (nzchar(other_data)) {
+      stamp("result on disk is on other data (", other_data, "); refitting")
+    } else if (same || USE_RESUME) {
       stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
       return(r)
-    }
-    stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
+    } else stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
   }
   # --- cohort restrictions (severity floor on this marker's anchor, baseline SF band)
   if (nzchar(restrict_tag)) {
@@ -414,7 +418,18 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # applied by hand -- the response becomes log(y_t / y_0), the log percent change.
   if (!is.null(mk$y0) && BASELINE_FORM == "offset") ld <- ld %>% mutate(log_y = log_y - log_y0)
   if (model == "hetero") ld <- ld %>% filter(!is.na(ers_pfvc_0))
-  n_per <- ld %>% count(hospitalization_id) %>% filter(n >= 2L)
+  # Entry: two or more post-baseline values, except that a patient who starts renal
+  # replacement in the window enters the creatinine model with one (user, 2026-09-21).
+  # RRT is started because creatinine is rising, so a two-value rule dropped most of
+  # the patients whose competing event the model is meant to see (182 of 1,216 first-
+  # week starters entered at MIMIC). ESRD patients are unaffected: they have no day-0
+  # creatinine, so no trajectory at all.
+  one_value_ids <- if (entry_rule_for(mk) == "rrt_one_value")
+    surv_all$hospitalization_id[!is.na(surv_all$rrt_day) & surv_all$rrt_day >= 0 & surv_all$rrt_day <= JM_HORIZON] else character(0)
+  n_per <- ld %>% count(hospitalization_id) %>%
+    filter(n >= 2L | (n >= 1L & hospitalization_id %in% one_value_ids))
+  if (length(one_value_ids))
+    stamp(sum(n_per$n == 1L), " patients enter with one creatinine value because RRT starts in the window")
   ld <- ld %>% filter(hospitalization_id %in% n_per$hospitalization_id)
 
   # --- survival rows for those patients; hazard exposures = index VT/PBW (dose)
@@ -688,7 +703,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                  max_rhat = max_rhat, key_rhat = key_rhat,
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
-                 acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN)
+                 acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
+                 entry_rule = entry_rule_for(mk))
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
   saveRDS(result, result_file(mk$name, model, adj_lab))
