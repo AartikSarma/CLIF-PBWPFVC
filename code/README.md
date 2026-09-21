@@ -39,7 +39,9 @@ to change; that stops once sites have returned `final/` folders.
   `pooled_biotrauma.R` is tracked; `pooled_estimates.R` is kept local and gitignored.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
-  external trial table, and the two `migrate_*.sh` helpers move outputs written
+  external trial table, `creatinine_positive_control.R` checks that creatinine rises
+  where kidney injury is expected (by ESRD, dialysis procedures and pressor dose; aggregates
+  only, cells under 10 suppressed), and the two `migrate_*.sh` helpers move outputs written
   under older folder layouts. Delete the helpers once every site folder is migrated.
 - `archive/` is gitignored local scratch.
 
