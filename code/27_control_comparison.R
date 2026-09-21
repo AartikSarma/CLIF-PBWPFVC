@@ -83,10 +83,21 @@ arms <- arms %>%
 message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site, "): ", nrow(arms), " arms ===")
 message(paste0("  ", arms$arm, collapse = "\n"))
 
+# Each arm's table, with creatinine taken from its dialysis-as-third-cause fit
+# (the rrtcause_ twin, as 29_run_figure4.sh fits it) whenever that twin exists.
 read_arm <- function(table_name, arm_row) {
   path <- file.path(arm_row$folder, paste0("jm_", table_name, "_", arm_row$restriction, file_stub(arm_row$site)))
-  if (!file.exists(path)) return(NULL)
-  read_csv(path, show_col_types = FALSE) %>% mutate(arm = arm_row$arm, cohort = arm_row$cohort)
+  twin <- file.path(arm_row$folder, paste0("jm_", table_name, "_rrtcause_", arm_row$restriction, file_stub(arm_row$site)))
+  as_text <- function(d) d %>% mutate(across(everything(), as.character))
+  main <- if (file.exists(path)) read_csv(path, show_col_types = FALSE) else NULL
+  rrt  <- if (file.exists(twin)) read_csv(twin, show_col_types = FALSE) %>% filter(marker == "creatinine") else NULL
+  if (!is.null(main) && !is.null(rrt) && nrow(rrt)) main <- main %>% filter(marker != "creatinine")
+  out <- bind_rows(if (!is.null(main)) as_text(main), if (!is.null(rrt)) as_text(rrt))
+  if (!nrow(out)) return(NULL)
+  has_rrt <- !is.null(rrt) && nrow(rrt) > 0
+  out %>% type_convert(guess_integer = TRUE, na = c("", "NA")) %>%
+    mutate(arm = arm_row$arm, cohort = arm_row$cohort,
+           creatinine_model = if_else(marker == "creatinine" & has_rrt, "dialysis as a third cause", NA_character_))
 }
 each_arm <- function(table_name) map_dfr(seq_len(nrow(arms)), function(arm_i) read_arm(table_name, arms[arm_i, ]))
 
@@ -98,7 +109,7 @@ movement  <- each_arm("movement")
 size_terms <- estimates %>%
   filter(model == "main", block == "longitudinal", term %in% c("log_pfvc_sd", "log_pfvc_sd:vent_day")) %>%
   mutate(quantity = if_else(term == "log_pfvc_sd", "level", "divergence")) %>%
-  select(arm, cohort, marker, adjustment, quantity, estimate, lo, hi, rhat) %>%
+  select(arm, cohort, marker, adjustment, any_of("creatinine_model"), quantity, estimate, lo, hi, rhat) %>%
   pivot_wider(names_from = quantity, values_from = c(estimate, lo, hi, rhat), names_glue = "{quantity}_{.value}")
 # Movement is summarised over ALL days, not the last one: platelets fall and recover
 # inside a week, and a marker that moved and came back would read as still on day 7.

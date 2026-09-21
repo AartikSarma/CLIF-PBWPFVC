@@ -359,7 +359,14 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (!USE_FRESH && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
     same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
-    if (same || USE_RESUME) {
+    # a fit made before the panel was last rebuilt used the old panel (e.g. before ESRD
+    # and dialysis entered the RRT definition): refit, whatever the chain settings
+    panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
+    if (file.mtime(rf) < file.mtime(panel_file)) {
+      stamp("result on disk predates the current panel; refitting")
+      same <- FALSE; resume_ok <- FALSE
+    } else resume_ok <- USE_RESUME
+    if (same || resume_ok) {
       stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
       return(r)
     }
@@ -775,7 +782,7 @@ if (identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1"))
     unlink(file.path(final_dir, paste0("jm_", nm, "_", out_tag, ".csv")))
 merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
-  if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1") && nrow(new)) {
+  if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")) {
     old <- read_csv(path, show_col_types = FALSE)
     # every fit this run ATTEMPTED replaces its old rows, including one that failed or
     # was skipped: otherwise a failed refit leaves the previous run's estimates in
@@ -789,6 +796,7 @@ merge_write <- function(new, name) {
     message("  ", name, ": kept ", nrow(old), " rows from other markers")
   }
   if (nrow(new)) write_csv(mask_small_counts(new), path)   # counts of 1-9 blanked (utils/config.R)
+  else if (file.exists(path)) unlink(path)                   # nothing left for this tag: no stale table
 }
 merge_write(manifest,   "manifest")
 merge_write(estimates,  "estimates")

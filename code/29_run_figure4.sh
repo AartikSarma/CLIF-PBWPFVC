@@ -102,9 +102,25 @@ build_cohort () { # cohort, folder holding its derived tables
 build_cohort imv       "$ROOT/intermediate"
 build_cohort nosupport "$ROOT/intermediate/controls/nosupport"
 
-# ---- 2 panels
-run_step panel_ventilated with_cohort imv       Rscript code/21_biotrauma_panel.R
-run_step panel_nosupport  with_cohort nosupport Rscript code/21_biotrauma_panel.R
+# ---- 2 panels, rebuilt only when something they are built from has changed: a fit made
+#      on an older panel is refitted (22_biotrauma_fit.R compares the times), so an
+#      unconditional rebuild would refit everything on every rerun. FORCE_PANEL=1 rebuilds.
+FORCE_PANEL=${FORCE_PANEL:-0}
+build_panel () {  # cohort, folder holding its derived tables
+  local cohort=$1 derived=$2 panel="$2/jm_surv_7d.parquet" dep
+  if [[ $FORCE_PANEL == 0 && $DRY == 0 && -f "$panel" ]]; then
+    local stale=""
+    for dep in code/21_biotrauma_panel.R code/10_panel_common.R code/20_biotrauma_grid.R utils/config.R \
+               "$derived/analysis_cross_sectional.parquet" "$derived/cohort_dialysis.parquet" "$derived/cohort_esrd.parquet"; do
+      [[ ! -e "$dep" || "$dep" -nt "$panel" ]] && stale="$dep" && break
+    done
+    if [[ -z "$stale" ]]; then echo "[$(date +%H:%M:%S)] panel_${cohort}: up to date, kept (FORCE_PANEL=1 rebuilds)"; return 0; fi
+    echo "[$(date +%H:%M:%S)] panel_${cohort}: $(basename "$stale") is newer than the panel (or missing); rebuilding"
+  fi
+  run_step "panel_${cohort}" with_cohort "$cohort" Rscript code/21_biotrauma_panel.R
+}
+build_panel imv       "$ROOT/intermediate"
+build_panel nosupport "$ROOT/intermediate/controls/nosupport"
 
 # ---- 3 anchors
 ANCHOR_MARKERS="creatinine,${CONTROL_MARKERS}"
