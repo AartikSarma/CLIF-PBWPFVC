@@ -53,18 +53,15 @@ worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf 
            ne_equiv_peak = "higher", ne_equiv = "higher", any_pressor = "higher",
            osi = "higher", oi = "higher")
 lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio",
-         dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents, per kg)", ne_equiv = "NE-equivalents",
+         dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents, per kg;\nlevel partly carries height)", ne_equiv = "NE-equivalents",
          any_pressor = "Any vasopressor (log-odds)",
          osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
-# Markers whose LEVEL against PFVC is not interpretable, so no figure draws it; only
-# their rate is shown. The vasopressor dose is per kg of one weight per patient:
-# log(dose/kg) = log(dose) - log(weight), and log(weight) carries 2 log(height), the
-# variation that identifies PFVC after age, sex and race, so the level carries a
-# mechanical association with PFVC. The weight is constant within a patient, so it
-# cancels in the rate over days (feedback memory, 2026-09-21).
-LEVEL_UNREADABLE <- c("ne_equiv_peak")
-level_note <- "level not drawn:\na per-kg dose carries height,\nwhich identifies PFVC;\nthe rate is unaffected"
+# The vasopressor dose is per kg of one weight per patient. The weight cancels exactly
+# in the rate over days. In the level it cancels only in proportion to the baseline
+# coefficient: the model adjusts for the day-0 dose, also per kg, so (1 - b) of log
+# weight, and with it 2 log height, stays in the level (b = 0.52 at MIMIC). The row
+# label says so; the level is drawn (user, 2026-09-21).
 RRT_MARKERS <- character(0)   # markers taken from the dialysis-as-third-cause run
 marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")",
                                    if_else(m %in% RRT_MARKERS, "\ndialysis modelled as a third cause", ""))
@@ -95,7 +92,6 @@ if (identical(Sys.getenv("PBWPFVC_JM_WITH_RRT", "0"), "1")) {
   }
 }
 if (is.null(lc) || is.null(es)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
-lc <- lc %>% filter(!marker %in% LEVEL_UNREADABLE)   # level contrasts, estimator comparison, panels A and C
 ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_.*\\.csv$", full.names = TRUE) %>%
   discard(~ grepl("counts_", .x)) %>% map_dfr(read_if)
 ql <- list.files(fig_dir, "^quick_lme_[a-z_]+_.*\\.csv$", full.names = TRUE) %>% map_dfr(read_if) %>%
@@ -245,21 +241,12 @@ if (n_distinct(lc0$horizon_h) >= 3) {
                  scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 1), guide = "none"),
                  theme(strip.text.y = element_blank(), plot.title = element_text(face = "bold")))
   day_breaks <- sort(unique(trend$day))
-  # rows whose level is not drawn keep their place in panels A and C, with a note
-  # (the layer exists only when some row needs it: a note layer with no rows and
-  #  constants in aes() breaks the panel drawing, which is how the 48-hour tag failed)
-  note_rows <- tibble(marker = intersect(present, LEVEL_UNREADABLE)) %>%
-    mutate(marker_lab = factor(row_label(marker), row_order), x = mean(day_breaks), label = level_note)
-  note_layer <- function(y_at) if (nrow(note_rows))
-    geom_label(data = note_rows %>% mutate(y = y_at), aes(x = x, y = y, label = label), inherit.aes = FALSE,
-               fill = "white", linewidth = 0, size = 3, colour = "grey35", lineheight = 0.9)
   pm_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
     geom_hline(yintercept = 0, colour = "grey55") +
     geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    note_layer(0) +
-    facet_grid(marker_lab ~ ., scales = "free_y", drop = FALSE) +
+    facet_grid(marker_lab ~ ., scales = "free_y") +
     scale_x_continuous(breaks = day_breaks) + shared +
     labs(title = "Ventilated: difference toward injury", subtitle = "above zero = more injury with a smaller lung",
          x = "days from the index", y = "log marker (log-odds for any vasopressor)")
@@ -314,8 +301,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     geom_hline(yintercept = c(0.025, 0.975), linetype = 3, colour = "grey70") +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    note_layer(0.5) +
-    facet_grid(marker_lab ~ ., drop = FALSE) +
+    facet_grid(marker_lab ~ .) +
     scale_x_continuous(breaks = day_breaks) +
     scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) + shared +
     theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
@@ -376,8 +362,7 @@ div <- es %>% filter(block == "longitudinal", term %in% c(paste0("vent_day:", SI
                      model == "main", marker %in% names(lab)) %>%
   transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
             marker_lab = marker_label(marker))
-lev <- es %>% filter(block == "longitudinal", term == SIZE_EX, model == "main", marker %in% names(lab),
-                     !marker %in% LEVEL_UNREADABLE) %>%
+lev <- es %>% filter(block == "longitudinal", term == SIZE_EX, model == "main", marker %in% names(lab)) %>%
   transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
             marker_lab = marker_label(marker))
 p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +
