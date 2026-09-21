@@ -103,7 +103,8 @@ size_terms <- estimates %>%
 # Movement is summarised over ALL days, not the last one: platelets fall and recover
 # inside a week, and a marker that moved and came back would read as still on day 7.
 last_movement <- if (nrow(movement)) movement %>%
-  filter(model == "main") %>%
+  # a yes/no marker (any vasopressor) has no change from baseline: its rows are empty
+  filter(model == "main", is.finite(mean_change)) %>%
   group_by(arm, marker, adjustment) %>% arrange(day, .by_group = TRUE) %>%
   summarise(movement_peak_mean_change = mean_change[which.max(abs(mean_change))],
             movement_peak_day = day[which.max(abs(mean_change))],
