@@ -81,6 +81,10 @@ with_cohort () {  # cohort (imv | nosupport), then the command
 # one arm: the markers, then creatinine with dialysis as a third competing cause
 fit_arm () {      # arm name, cohort, marker list, then extra environment assignments
   local arm=$1 cohort=$2 markers=$3; shift 3
+  # a cohort whose panel failed to build is not fitted: its old panel is out of date
+  if [[ " ${FAILED[*]-} " == *" panel_${cohort} "* ]]; then
+    echo "[$(date +%H:%M:%S)] ${arm}: skipped, the ${cohort} panel failed to build"; FAILED+=("${arm}_skipped"); return 0
+  fi
   run_step "${arm}_fit"    with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" Rscript code/22_biotrauma_fit.R
   run_step "${arm}_report" with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" Rscript code/23_biotrauma_report.R
   if [[ $CREATININE == 1 ]]; then
@@ -92,7 +96,9 @@ fit_arm () {      # arm name, cohort, marker list, then extra environment assign
 # ---- 1 build
 build_cohort () { # cohort, folder holding its derived tables
   local cohort=$1 derived=$2
-  if [[ $FORCE_BUILD == 0 && -f "$derived/analysis_cross_sectional.parquet" ]]; then
+  # a cohort built before dialysis and ESRD entered the RRT definition (2026-09-21) lacks
+  # rrt_sources_available.rds, and its panel cannot be built: rebuild it
+  if [[ $FORCE_BUILD == 0 && -f "$derived/analysis_cross_sectional.parquet" && -f "$derived/rrt_sources_available.rds" ]]; then
     echo "[$(date +%H:%M:%S)] ${cohort}: cohort already built, scripts 01-03 skipped (FORCE_BUILD=1 rebuilds)"; return 0
   fi
   for script in 01_cohort_identification 02_quality_checks 03_variable_derivation; do
