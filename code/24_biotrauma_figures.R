@@ -246,15 +246,19 @@ if (n_distinct(lc0$horizon_h) >= 3) {
                  theme(strip.text.y = element_blank(), plot.title = element_text(face = "bold")))
   day_breaks <- sort(unique(trend$day))
   # rows whose level is not drawn keep their place in panels A and C, with a note
+  # (the layer exists only when some row needs it: a note layer with no rows and
+  #  constants in aes() breaks the panel drawing, which is how the 48-hour tag failed)
   note_rows <- tibble(marker = intersect(present, LEVEL_UNREADABLE)) %>%
-    mutate(marker_lab = factor(row_label(marker), row_order))
+    mutate(marker_lab = factor(row_label(marker), row_order), x = mean(day_breaks), label = level_note)
+  note_layer <- function(y_at) if (nrow(note_rows))
+    geom_label(data = note_rows %>% mutate(y = y_at), aes(x = x, y = y, label = label), inherit.aes = FALSE,
+               fill = "white", linewidth = 0, size = 3, colour = "grey35", lineheight = 0.9)
   pm_a <- ggplot(trend, aes(day, inj, colour = adjustment, fill = adjustment)) +
     geom_hline(yintercept = 0, colour = "grey55") +
     geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    geom_label(data = note_rows, aes(x = mean(day_breaks), y = 0, label = level_note), inherit.aes = FALSE, fill = "white", linewidth = 0,
-              size = 3, colour = "grey35", lineheight = 0.9) +
+    note_layer(0) +
     facet_grid(marker_lab ~ ., scales = "free_y", drop = FALSE) +
     scale_x_continuous(breaks = day_breaks) + shared +
     labs(title = "Ventilated: difference toward injury", subtitle = "above zero = more injury with a smaller lung",
@@ -310,8 +314,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     geom_hline(yintercept = c(0.025, 0.975), linetype = 3, colour = "grey70") +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    geom_label(data = note_rows, aes(x = mean(day_breaks), y = 0.5, label = level_note), inherit.aes = FALSE, fill = "white", linewidth = 0,
-              size = 3, colour = "grey35", lineheight = 0.9) +
+    note_layer(0.5) +
     facet_grid(marker_lab ~ ., drop = FALSE) +
     scale_x_continuous(breaks = day_breaks) +
     scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) + shared +
