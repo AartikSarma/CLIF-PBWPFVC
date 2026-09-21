@@ -777,7 +777,10 @@ merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
   if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1") && nrow(new)) {
     old <- read_csv(path, show_col_types = FALSE)
-    keys <- new %>% distinct(marker, model, adjustment)
+    # every fit this run ATTEMPTED replaces its old rows, including one that failed or
+    # was skipped: otherwise a failed refit leaves the previous run's estimates in
+    # place beside a manifest that says it failed
+    keys <- manifest %>% distinct(marker, model, adjustment)
     old  <- old %>% anti_join(keys, by = c("marker", "model", "adjustment"))
     # both as text: the CSV holds text, and a column that is all NA reads back as
     # logical, which bind_rows refuses to combine with the new table's type
@@ -785,7 +788,7 @@ merge_write <- function(new, name) {
     new  <- bind_rows(as_text(old), as_text(new))
     message("  ", name, ": kept ", nrow(old), " rows from other markers")
   }
-  if (nrow(new)) write_csv(new, path)
+  if (nrow(new)) write_csv(mask_small_counts(new), path)   # counts of 1-9 blanked (utils/config.R)
 }
 merge_write(manifest,   "manifest")
 merge_write(estimates,  "estimates")

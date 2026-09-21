@@ -95,7 +95,7 @@ channels_equal_p <- function(est, V) {
 # treatment). The oxygenation and mechanics markers have no component to drop.
 ANCHOR_POOL <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal")
 ANCHOR_DROP <- c(creatinine = "sofa_renal", platelets = "sofa_coag", bilirubin = "sofa_liver",
-                 ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97")
+                 ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97", pressor_dose = "sofa_cv_97")
 anchor_components <- function(marker) setdiff(ANCHOR_POOL, unname(ANCHOR_DROP[marker]))
 anchor_label <- function(marker)
   paste(sub("_97", "", sub("sofa_", "", anchor_components(marker))), collapse = " + ")

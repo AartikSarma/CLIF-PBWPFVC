@@ -30,8 +30,8 @@ to change; that stops once sites have returned `final/` folders.
 | `25_injury_at_horizon.R` | figure 4, robustness | Fixed-horizon comparator among survivors: what the joint model is compared against | `injury_` |
 | `26_quick_lme.R` | figure 4, robustness | The longitudinal submodel alone, without the death correction | `quick_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, no support unmatched and matched (and noninvasive, if built) | `jm_control_comparison_`, `jm_control_movement_` |
-| `29_run_biotrauma.sh` | figure 4 | Runner for 21–26 on one cohort | |
-| `29_run_controls.sh` | figure 4 | Runner for the control cohorts: `build`, `anchors`, `fits` | |
+| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, automatic severity floors | |
+| `29_run_biotrauma.sh` | figure 4, robustness | Runner for the 48-hour fits and the comparators 25 and 26; not in the pipeline | |
 
 ## Folders
 

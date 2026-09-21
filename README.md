@@ -42,6 +42,17 @@ CLIF version 2.1. The following tables are required:
    - `assessment_category` = 'gcs_total' (for the SOFA neurologic component)
 8. **respiratory_support**: `hospitalization_id`, `recorded_dttm`, `device_category`, `mode_category`, `tracheostomy`, `fio2_set`, `peep_set`, `tidal_volume_set`, `tidal_volume_obs`, `resp_rate_set`, `resp_rate_obs`, `plateau_pressure_obs`, `mean_airway_pressure_obs`
 
+Figure 4 also reads three optional tables. Without them the pipeline still runs, and
+the logs and panel summary say what was not available:
+
+- **crrt_therapy**: `hospitalization_id`, `recorded_dttm` (the start of continuous renal
+  replacement ends the creatinine trajectory)
+- **patient_procedures**: `hospitalization_id`, `procedure_billed_dttm`, `procedure_code`
+  (intermittent dialysis, CPT 90935/90937/90945/90947 or ICD-10-PCS 5A1D70Z/80Z/90Z,
+  also ends it)
+- **hospital_diagnosis**: `hospitalization_id`, `diagnosis_code` (ESRD, ICD-10
+  N18.5/N18.6/Z99.2: no creatinine trajectory at all)
+
 See the [CLIF data dictionary](https://clif-icu.com/data-dictionary) for
 guidance on constructing these tables.
 
@@ -75,7 +86,7 @@ Lung-protective ventilation is defined as VT/PBW between 6–8 mL/kg.
 | 1 | PBW overestimates lung size in older, shorter, female and non-white patients (replicating PMC12313249 in modern cohorts) | `cross_sectional` | `04_analysis.R` |
 | 2 | That bias tracks otherwise unexplained differences in respiratory mechanics | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
 | 3 | The bias is associated with mortality | `cross_sectional` | `04_analysis.R`, `05_normalization_analysis.R` |
-| 4 | The bias is associated with rising markers of organ injury over time, in ventilated patients and not in the control cohorts | `injury`, `controls` | `20`–`29` |
+| 4 | The bias is associated with rising markers of organ injury over time, in ventilated patients and not in the control cohorts | `injury` | `20`–`29` |
 
 A fifth figure, on causal inference, is not in the paper yet; its scripts are in the
 tag `pre-prune-2026-09-19`. [`code/README.md`](code/README.md) lists every script and
@@ -131,7 +142,7 @@ ask for, each script as a clean subprocess. From the repository root:
 
 ```bash
 Rscript code/00_run_pipeline.R                          # prep + cross_sectional (figures 1-3)
-Rscript code/00_run_pipeline.R --stages injury,controls # figure 4 and its control cohorts
+Rscript code/00_run_pipeline.R --stages injury          # figure 4, with its controls
 Rscript code/00_run_pipeline.R --stages all
 ```
 
@@ -139,20 +150,36 @@ Rscript code/00_run_pipeline.R --stages all
 |---|---|---|
 | `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
 | `cross_sectional` | `04`, `05` | minutes |
-| `injury` | `29_run_biotrauma.sh`: panels, fixed-horizon comparators, joint models, figures | hours |
-| `controls` | `29_run_controls.sh build` then `anchors`: builds the no-support control cohort and writes the severity-anchor distributions | under an hour |
+| `injury` | `29_run_figure4.sh`: every analysis behind figure 4 and the figure itself (see below) | many hours |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
 what this runner has always done, so existing site instructions still work.
 
-The control cohorts need one decision that cannot be automated. The matched
-no-support control is restricted to patients above a severity floor, and the floor
-is chosen from the ventilated cohort's distribution, which the `controls` stage
-writes to `final/injury/jm_severity_anchor_*`. Then:
+### Figure 4 in one command
+
+`code/29_run_figure4.sh` runs everything behind figure 4 for a site and draws it:
+
+- **Markers:** platelets, bilirubin, creatinine, vasopressor dose on pressor days, and
+  the oxygen saturation index, each over the first 7 days, adjusted and unadjusted.
+  Creatinine ends at renal replacement of any kind, continuous or intermittent, which
+  is modelled as a third competing event; patients with ESRD are censored at day 0.
+- **Arms:** all ventilated patients; ventilated patients by baseline SF (235-315,
+  115-235, 115 or less); and the negative control, patients with no respiratory
+  support, unmatched and matched to the ventilated cohort's severity.
+- **Matching:** each marker's severity floor is set automatically at the ventilated
+  cohort's median anchor score. `SEV_MIN` overrides it.
+
+It builds the control cohort when missing, reuses finished fits, carries on past a
+failed step and lists the failures at the end. Expect it to take many hours at the
+default chain length (`ITER=6000 BURNIN=1500`); `PAR=2` runs two fits at once where
+memory allows. `bash code/29_run_figure4.sh --dry-run` lists every step.
 
 ```bash
-SEV_MIN="platelets=2,bilirubin=1" bash code/29_run_controls.sh fits
+caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 ```
+
+The figure is `final/injury/biotrauma_fig_main_pfvc_7d_<site>.pdf`. Every table it
+writes suppresses counts of 1 to 9.
 
 To run a single script while debugging, run it from the repository root, for
 example `Rscript code/04_analysis.R`. Scripts read the previous step's outputs, so

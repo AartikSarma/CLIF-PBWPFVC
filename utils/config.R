@@ -105,5 +105,24 @@ estimate_fio2_nosupport <- function(df) {
   df
 }
 
+# Small cells. Every aggregate a site returns reports no group of 1-9 patients or
+# events (project rule: minimum cell size 10). mask_small_counts() blanks such values
+# in any count column it knows, and is applied where the injury block writes a table.
+SMALL_CELL_MIN <- 10L
+COUNT_COLUMNS <- c("n_obs", "n_patients", "n_deaths", "n_extubations", "n_rrt", "n_competing",
+                   "patient_days", "patients_any", "patients_with_baseline", "patients_day0_baseline",
+                   "patients_ge2_obs", "deaths_ge2", "extubations_ge2", "plateau_subset_ge2",
+                   "rrt_before_index", "rrt_within_horizon", "esrd_censored_day0",
+                   "creatinine_days_removed_rrt", "nonpositive_set_missing", "lag_missing_rows",
+                   "movement_last_n")
+mask_small_counts <- function(df) {
+  for (col in intersect(COUNT_COLUMNS, names(df))) {
+    v <- suppressWarnings(as.numeric(df[[col]]))
+    hide <- !is.na(v) & v > 0 & v < SMALL_CELL_MIN
+    if (any(hide)) df[[col]][hide] <- NA
+  }
+  df
+}
+
 # Load the configuration
 config <- load_config()

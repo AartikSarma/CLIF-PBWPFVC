@@ -124,7 +124,7 @@ comparison <- size_terms %>%
   arrange(marker, adjustment, arm)
 stopifnot(all(comparison$n_patients >= 10L, na.rm = TRUE))
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
-write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
+write_csv(mask_small_counts(comparison), file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
 if (nrow(movement)) write_csv(movement %>% filter(model == "main"),
                               file.path(final_dir, paste0("jm_control_movement_", out_stub, ".csv")))
 

@@ -527,7 +527,7 @@ summary_tbl <- bind_rows(
          lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$period > 0L),
          site = site_name)
 print(as.data.frame(summary_tbl), row.names = FALSE)
-write_csv(summary_tbl, file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
+write_csv(mask_small_counts(summary_tbl), file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
 
 write_parquet(long, file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
 write_parquet(surv, file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))

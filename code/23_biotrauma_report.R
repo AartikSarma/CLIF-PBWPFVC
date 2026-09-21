@@ -67,9 +67,18 @@ manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv"
 # gates existed are gated the same way): longitudinal for the trajectory
 # contrasts and Q1, association for the death correction and Q2, hazard for Q3
 RHAT_GATE <- 1.1
-if (!any(manifest$status %in% c("converged", "rhat_fail")))
-  stop("nothing to report for ", out_tag, ": no fit ran (", paste(unique(paste0(manifest$marker, " ", manifest$status,
-       ifelse(is.na(manifest$reason), "", paste0(": ", manifest$reason)))), collapse = "; "), ")")
+# why each marker has no fit, from the manifest (skipped for too few patients or
+# deaths, or failed), for the messages below
+why_not <- function(m) {
+  r <- manifest %>% filter(marker %in% m) %>% distinct(marker, status, reason)
+  paste(paste0(r$marker, " ", r$status, ifelse(is.na(r$reason), "", paste0(" (", r$reason, ")"))), collapse = "; ")
+}
+# An arm where no fit ran (a small SF class, a thin control) is a skip, not an error:
+# say so and stop cleanly, so a runner over many arms carries on.
+if (!any(manifest$status %in% c("converged", "rhat_fail"))) {
+  message("nothing to report for ", out_tag, ": no fit ran: ", why_not(unique(manifest$marker)))
+  quit(save = "no", status = 0)
+}
 est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv")), show_col_types = FALSE)
 # The exposure gate: the longitudinal block also carries nuisance terms (the
 # baseline marker, the age spline) whose chains mix worse than the exposure
@@ -97,10 +106,16 @@ usable <- manifest %>% filter(status %in% c("converged", "rhat_fail"))
 # drawn from the tables afterwards, so they still show every marker.
 want_markers <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MARKERS", ""), ",")[[1]])
 if (length(want_markers) && nzchar(want_markers[1])) {
+  # a requested marker without a usable fit (skipped or failed in this arm) is named
+  # and left out; the others are reported
   missing <- setdiff(want_markers, unique(usable$marker))
-  if (length(missing)) stop("PBWPFVC_JM_MARKERS names markers with no fit in this manifest: ",
-                            paste(missing, collapse = ", "))
+  if (length(missing)) message("no usable fit in ", out_tag, " for: ", why_not(missing),
+                               if (!length(intersect(missing, manifest$marker))) " (not in the manifest)" else "")
   usable <- usable %>% filter(marker %in% want_markers)
+  if (!nrow(usable)) {
+    message("nothing to report for ", out_tag, " among ", paste(want_markers, collapse = ", "))
+    quit(save = "no", status = 0)
+  }
   message("restricted to markers: ", paste(want_markers, collapse = ", "))
 }
 RESTRICTED <- length(want_markers) && nzchar(want_markers[1])
@@ -115,7 +130,7 @@ report_write <- function(new, name) {
       new <- bind_rows(as_text(old), as_text(new))
     }
   }
-  if (nrow(new)) write_csv(new, path)
+  if (nrow(new)) write_csv(mask_small_counts(new), path)   # counts of 1-9 blanked (utils/config.R)
 }
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
 message("=== 23_biotrauma_report (", out_tag, "): ", nrow(usable), " fits, of which ",

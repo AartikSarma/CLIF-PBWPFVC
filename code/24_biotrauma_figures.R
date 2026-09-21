@@ -207,10 +207,12 @@ if (n_distinct(lc0$horizon_h) >= 3) {
               .groups = "drop")
   counts <- es %>% filter(model == "main") %>% distinct(marker, n_patients, n_deaths) %>%
     group_by(marker) %>% slice(1) %>% ungroup()
+  # a count suppressed as under 10 (mask_small_counts) reads "<10", not "NA"
+  show_count <- function(x) ifelse(is.na(x), "<10", formatC(x, big.mark = ",", format = "d"))
   row_label <- function(m) {
     paste0(marker_label(m),
-           sprintf("\nn = %s, deaths = %s", formatC(counts$n_patients[match(m, counts$marker)], big.mark = ",", format = "d"),
-                   formatC(counts$n_deaths[match(m, counts$marker)], big.mark = ",", format = "d")),
+           sprintf("\nn = %s, deaths = %s", show_count(counts$n_patients[match(m, counts$marker)]),
+                   show_count(counts$n_deaths[match(m, counts$marker)])),
            coalesce(failed$note[match(m, failed$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.
@@ -245,62 +247,102 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     geom_ribbon(aes(ymin = inj_lo, ymax = inj_hi), alpha = 0.12, colour = NA) +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    facet_grid(marker_lab ~ ., scales = "free_y") +
+    facet_grid(marker_lab ~ ., scales = "free_y", drop = FALSE) +   # a row for every marker in panel B
     scale_x_continuous(breaks = day_breaks) + shared +
     labs(title = "Ventilated: difference toward injury", subtitle = "above zero = more injury with a smaller lung",
          x = "days from the index", y = "log marker (log-odds for any vasopressor)")
-  # ---- the control cohorts, beside the ventilated rate. The rate is where the
-  #      argument lives: if small predicted lungs diverge without a ventilator, the
-  #      ventilated divergence is not about the breath. The controls are the
-  #      no-support cohort, unmatched, and matched on severity (29_run_controls.sh fits;
-  #      the arm appears when its tables exist). The noninvasive cohort is deliberately
-  #      NOT drawn: NIPPV delivers large, unlimited positive-pressure volumes, so it is
-  #      a strained group and cannot serve as a control. Controls are read from
-  #      final/controls/ of this site, or from PBWPFVC_FIG_CONTROLS_DIR; with another
-  #      PBWPFVC_FIG_DIR and no controls folder named, the ventilated arm shows alone.
+  # ---- panel B: the rate in every arm. The rate is where the argument lives: if small
+  #      predicted lungs diverge without a ventilator, the ventilated divergence is not
+  #      about the breath; if it grows with baseline hypoxaemia, it tracks the lung.
+  #      Arms, left to right:
+  #        No support, unmatched / matched  the negative control (final/controls/); the
+  #                                         matched arm is restricted to the ventilated
+  #                                         cohort's severity (29_run_figure4.sh).
+  #                                         PBWPFVC_FIG_SEV_TAG picks one matched arm when
+  #                                         several floor choices are on disk.
+  #        Ventilated, SF <class>           the ventilated cohort by baseline SF
+  #        Ventilated, all                  the ventilated cohort (panels A and C)
+  #      The noninvasive cohort is deliberately NOT drawn: NIPPV delivers large, unlimited
+  #      positive-pressure volumes, so it is a strained group and cannot be a control.
+  #      Creatinine takes each arm's dialysis-as-third-cause fit when PBWPFVC_JM_WITH_RRT=1
+  #      and that fit exists. Controls are read from final/controls/ of this site, or from
+  #      PBWPFVC_FIG_CONTROLS_DIR; with another PBWPFVC_FIG_DIR and none named, no controls.
   ctrl_dir <- Sys.getenv("PBWPFVC_FIG_CONTROLS_DIR",
                          if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) "" else file.path(config$final_root, "controls"))
-  ctrl_stub <- function(cohort) paste0(MOD_FORM, "_", h_suffix, "_", site_name, "_", cohort, ".csv")
-  ctrl_rate <- tibble()
-  if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
-    for (cohort in "nosupport") {
-      found <- list.files(ctrl_dir, pattern = paste0("^jm_estimates_.*", ctrl_stub(cohort), "$"))
-      restriction <- sub(paste0(ctrl_stub(cohort), "$"), "", sub("^jm_estimates_", "", found))
-      keep <- grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)?$", restriction, perl = TRUE)   # unrestricted and matched only
-      for (k in which(keep)) {
-        arm_label <- paste0("No support,\n", if (nzchar(restriction[k])) "matched" else "unmatched",
-                            if (nzchar(restriction[k]) && sum(nzchar(restriction[keep])) > 1)
-                              paste0("\n", sub("_$", "", restriction[k])) else "")
-        ctrl_rate <- bind_rows(ctrl_rate, read_csv(file.path(ctrl_dir, found[k]), show_col_types = FALSE) %>%
-          filter(block == "longitudinal", model == "main", marker %in% present,
-                 term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
-          transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
-                    s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-                    rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE, arm = arm_label, strain_rank = 1))
-      }
+  fig_sev_tag <- Sys.getenv("PBWPFVC_FIG_SEV_TAG", "")
+  rate_rows <- function(est) est %>%
+    filter(block == "longitudinal", model == "main", marker %in% present,
+           term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
+    transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
+              s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
+              rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
+  # one arm's estimates; its dialysis-as-third-cause twin replaces the RRT markers' rows
+  read_arm <- function(folder, restriction, site_tag) {
+    stub <- paste0(MOD_FORM, "_", h_suffix, "_", site_tag, ".csv")
+    est <- read_if(file.path(folder, paste0("jm_estimates_", restriction, stub)))
+    if (is.null(est)) return(NULL)
+    if (length(RRT_MARKERS)) {
+      twin <- read_if(file.path(folder, paste0("jm_estimates_rrtcause_", restriction, stub)))
+      if (!is.null(twin)) est <- bind_rows(est %>% filter(!marker %in% RRT_MARKERS) %>% mutate(across(everything(), as.character)),
+                                           twin %>% filter(marker %in% RRT_MARKERS) %>% mutate(across(everything(), as.character))) %>%
+        type_convert(guess_integer = TRUE, na = c("", "NA"))
     }
+    est
   }
-  rate_arms <- bind_rows(ctrl_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = "Ventilated", strain_rank = 4)) %>%
-    mutate(strain_rank = if_else(grepl("\nmatched", arm, fixed = TRUE), 2, strain_rank),   # not "unmatched"
-           arm = factor(arm, unique(arm[order(strain_rank, arm)])),
+  restrictions_in <- function(folder, site_tag) {
+    stub <- paste0(MOD_FORM, "_", h_suffix, "_", site_tag, ".csv")
+    found <- list.files(folder, pattern = paste0("^jm_estimates_.*", stub, "$"))
+    setdiff(sub(paste0(stub, "$"), "", sub("^jm_estimates_", "", found)), NA)
+  }
+  arms <- list()
+  if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
+    ctrl_site <- paste0(site_name, "_nosupport")
+    r <- restrictions_in(ctrl_dir, ctrl_site)
+    matched <- r[grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)$", r, perl = TRUE)]
+    if (nzchar(fig_sev_tag)) matched <- intersect(matched, fig_sev_tag)
+    if ("" %in% r) arms[["unmatched"]] <- list(folder = ctrl_dir, restriction = "", site = ctrl_site,
+                                              label = "No support,\nunmatched", rank = 1)
+    for (k in seq_along(matched))
+      arms[[paste0("matched", k)]] <- list(folder = ctrl_dir, restriction = matched[k], site = ctrl_site, rank = 2,
+                                           label = paste0("No support,\nmatched", if (length(matched) > 1) paste0("\n", sub("_$", "", matched[k])) else ""))
+  }
+  sf_found <- restrictions_in(fig_dir, site_name)
+  sf_found <- sf_found[grepl("^sf[0-9.]+to[0-9.]+_$", sf_found)]
+  sf_lo <- as.numeric(str_match(sf_found, "^sf([0-9.]+)to")[, 2])
+  sf_hi <- as.numeric(str_match(sf_found, "to([0-9.]+)_$")[, 2])
+  for (k in order(-sf_lo)) {                                          # mildest hypoxaemia first
+    arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 3 + match(k, order(-sf_lo)) / 10,
+                                label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("<= ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
+  }
+  arm_rate <- map_dfr(arms, function(a) {
+    est <- read_arm(a$folder, a$restriction, a$site)
+    if (is.null(est)) return(NULL)
+    rate_rows(est) %>% mutate(arm = a$label, strain_rank = a$rank)
+  })
+  all_label <- if (nrow(arm_rate)) "Ventilated,\nall" else "Ventilated"
+  rate_arms <- bind_rows(arm_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = all_label, strain_rank = 9)) %>%
+    mutate(arm = factor(arm, unique(arm[order(strain_rank)])),
            marker_lab = factor(row_label(marker), row_order))
-  if (nrow(ctrl_rate)) message("24_biotrauma_figures: control arms in the rate panel: ",
-                                paste(unique(gsub("\n", " ", as.character(ctrl_rate$arm))), collapse = "; "))
+  if (nrow(arm_rate)) message("24_biotrauma_figures: arms in the rate panel: ",
+                              paste(gsub("\n", " ", levels(rate_arms$arm)), collapse = "; "))
+  has_ctrl <- any(grepl("^No support", levels(rate_arms$arm)))
   pm_b <- ggplot(rate_arms, aes(arm, e, colour = adjustment)) +
     geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
     geom_linerange(aes(ymin = l, ymax = h), linewidth = 0.8, position = position_dodge(width = 0.55)) +
     geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.55)) +
     facet_grid(marker_lab ~ ., scales = "free_y") + shared +
     guides(colour = "none") +
-    labs(title = if (nrow(ctrl_rate)) "Rate per day, by cohort" else "Rate per day",
-         subtitle = if (nrow(ctrl_rate)) "controls: no respiratory support" else "adjusted vs unadjusted",
+    labs(title = if (nrow(arm_rate)) "Rate per day, by cohort" else "Rate per day",
+         subtitle = paste(c(if (has_ctrl) "controls: no respiratory support",
+                            if (length(sf_found)) "ventilated by baseline SF",
+                            if (!nrow(arm_rate)) "adjusted vs unadjusted"), collapse = "; "),
          x = NULL, y = "change per day toward injury")
   pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
     geom_hline(yintercept = 0.5, colour = "grey55") +
     geom_hline(yintercept = c(0.025, 0.975), linetype = 3, colour = "grey70") +
     geom_line(aes(linetype = ok), linewidth = 0.9) +
     geom_point(aes(shape = ok), size = 1.6) +
-    facet_grid(marker_lab ~ .) +
+    facet_grid(marker_lab ~ ., drop = FALSE) +
     scale_x_continuous(breaks = day_breaks) +
     scale_y_continuous(limits = c(0, 1), breaks = c(0, 0.5, 1)) + shared +
     theme(strip.text.y = element_text(angle = 0, hjust = 0)) +
