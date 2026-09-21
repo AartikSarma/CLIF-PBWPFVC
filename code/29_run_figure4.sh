@@ -10,9 +10,9 @@
 #             as a third competing cause; ESRD censored at day 0), vasopressor dose on
 #             pressor days, oxygen saturation index
 #   arms      ventilated, all patients           (panels A, B and C)
-#             ventilated, by baseline SF 235-315, 115-235 and <=115   (panel B)
 #             no respiratory support, unmatched  (panel B, the negative control)
 #             no respiratory support, matched to the ventilated cohort's severity
+#             optional: ventilated by baseline SF class (SF_BANDS; off by default)
 #   each fit adjusted and unadjusted for age, sex and race
 #
 # Steps, each logged to output/{site}_output/logs/figure4_{stamp}/:
@@ -34,10 +34,15 @@
 # Usage (from anywhere; the script moves to the repo root):
 #   caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 #   bash code/29_run_figure4.sh --dry-run
-# Knobs (environment): ITER BURNIN CHAINS THIN (6000 / 1500 / 3 / 5), PAR (fits at a
-#   time, 1; raise to 2 once one fit is seen to fit in memory), MARKERS, CONTROL_MARKERS,
-#   CREATININE (1; 0 skips it), SF_BANDS (set empty to skip the strata), SEV_MIN,
-#   FORCE_BUILD. Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
+# Site default (2026-09-21): 26 fits at 2000 / 500 iterations, four at a time. At
+# MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
+# hazard blocks did not converge at any length tried.
+# Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
+#   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
+#   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
+#   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
+#   site runs SF_BANDS="235,315 115,235 0,115"), SEV_MIN, FORCE_BUILD, FORCE_PANEL.
+#   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -45,9 +50,9 @@ cd "$(dirname "$0")/.." || exit 1
 MARKERS=${MARKERS:-osi,pressor_dose,platelets,bilirubin}   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
 CREATININE=${CREATININE:-1}
-SF_BANDS=${SF_BANDS-"235,315 115,235 0,115"}
+SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
 SEV_MIN=${SEV_MIN:-}
-ITER=${ITER:-6000}; BURNIN=${BURNIN:-1500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-1}
+ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-4}
 FORCE_BUILD=${FORCE_BUILD:-0}
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
@@ -62,7 +67,7 @@ unset PBWPFVC_COHORT
 export PBWPFVC_SITE_NAME=$BASE_SITE
 export PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 PBWPFVC_JM_MODIFIER=pfvc PBWPFVC_JM_MODELS=main
 export PBWPFVC_JM_ITER=$ITER PBWPFVC_JM_BURNIN=$BURNIN PBWPFVC_JM_CHAINS=$CHAINS PBWPFVC_JM_THIN=$THIN PBWPFVC_JM_PAR=$PAR
-echo "site ${BASE_SITE}; markers ${MARKERS}$([[ $CREATININE == 1 ]] && echo ",creatinine"); controls ${CONTROL_MARKERS}; SF bands '${SF_BANDS}'; chains ${ITER}/${BURNIN} x ${CHAINS}"
+echo "site ${BASE_SITE}; markers ${MARKERS}$([[ $CREATININE == 1 ]] && echo ",creatinine"); controls ${CONTROL_MARKERS}; SF bands '${SF_BANDS:-none}'; chains ${ITER}/${BURNIN} x ${CHAINS}"
 [[ $DRY == 0 ]] && echo "logs -> $LOG_DIR"
 
 FAILED=()

@@ -150,7 +150,7 @@ Rscript code/00_run_pipeline.R --stages all
 |---|---|---|
 | `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
 | `cross_sectional` | `04`, `05` | minutes |
-| `injury` | `29_run_figure4.sh`: every analysis behind figure 4 and the figure itself (see below) | many hours |
+| `injury` | `29_run_figure4.sh`: every analysis behind figure 4 and the figure itself (see below) | a few hours |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
 what this runner has always done, so existing site instructions still work.
@@ -163,16 +163,19 @@ what this runner has always done, so existing site instructions still work.
   the oxygen saturation index, each over the first 7 days, adjusted and unadjusted.
   Creatinine ends at renal replacement of any kind, continuous or intermittent, which
   is modelled as a third competing event; patients with ESRD are censored at day 0.
-- **Arms:** all ventilated patients; ventilated patients by baseline SF (235-315,
-  115-235, 115 or less); and the negative control, patients with no respiratory
-  support, unmatched and matched to the ventilated cohort's severity.
+- **Arms:** all ventilated patients, and the negative control, patients with no
+  respiratory support, unmatched and matched to the ventilated cohort's severity.
+  The ventilated cohort by baseline SF class is optional:
+  `SF_BANDS="235,315 115,235 0,115"`.
 - **Matching:** each marker's severity floor is set automatically at the ventilated
   cohort's median anchor score. `SEV_MIN` overrides it.
 
 It builds the control cohort when missing, reuses finished fits, carries on past a
-failed step and lists the failures at the end. Expect it to take many hours at the
-default chain length (`ITER=6000 BURNIN=1500`); `PAR=2` runs two fits at once where
-memory allows. `bash code/29_run_figure4.sh --dry-run` lists every step.
+failed step and lists the failures at the end. By default it runs 26 fits at 2,000
+iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
+7,000-patient site at 15-25 GB of memory, so four at once can need 60-100 GB: lower
+`PAR` on a smaller machine. `ITER` and `BURNIN` lengthen the chains.
+`bash code/29_run_figure4.sh --dry-run` lists every step.
 
 ```bash
 caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
