@@ -143,6 +143,8 @@ population_row <- function(ld) {
   # median dose and every contrast is reported there
   if ("vtpbw_c" %in% names(ld))    row$vtpbw_c    <- 0
   if ("log_y0" %in% names(ld))     row$log_y0     <- median(pt$log_y0)
+  # the dose part's baseline: a patient on a pressor at day 0, at the median day-0 dose
+  if ("on_y0" %in% names(ld)) { row$on_y0 <- 1; row$log_y0 <- median(pt$log_y0[pt$on_y0 == 1]) }
   if ("ers_pfvc_0" %in% names(ld)) row$ers_pfvc_0 <- median(pt$ers_pfvc_0, na.rm = TRUE)
   row
 }
@@ -178,7 +180,9 @@ for (i in seq_len(nrow(usable))) {
   # patients still observed (descriptive, survivor-selected, not a model quantity). A
   # control cohort whose marker does not move cannot show a divergence by lung size,
   # so this is read BEFORE its divergence term. Days with under 10 patients are dropped.
+  # (the dose part has a change from baseline only for patients on a pressor at day 0)
   movement_rows[[length(movement_rows) + 1L]] <- ld %>%
+    filter(if ("on_y0" %in% names(ld)) on_y0 == 1 else TRUE) %>%
     mutate(change = if (binary) NA_real_ else if (BASELINE_FORM == "offset") log_y else log_y - log_y0,
            day = floor(vent_day + 1e-9)) %>%
     filter(day >= 1) %>%

@@ -50,18 +50,17 @@ tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") 
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))
 worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
-           ne_equiv_peak = "higher", ne_equiv = "higher", any_pressor = "higher",
+           ne_equiv_peak = "higher", pressor_dose = "higher", ne_equiv = "higher", any_pressor = "higher",
            osi = "higher", oi = "higher")
 lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio",
-         dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents, per kg;\nlevel partly carries height)", ne_equiv = "NE-equivalents",
+         dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents per kg,\nzero days included)",
+         pressor_dose = "Vasopressor dose\n(NE-equivalents per kg,\ndays on a pressor)", ne_equiv = "NE-equivalents",
          any_pressor = "Any vasopressor (log-odds)",
          osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
-# The vasopressor dose is per kg of one weight per patient. The weight cancels exactly
-# in the rate over days. In the level it cancels only in proportion to the baseline
-# coefficient: the model adjusts for the day-0 dose, also per kg, so (1 - b) of log
-# weight, and with it 2 log height, stays in the level (b = 0.52 at MIMIC). The row
-# label says so; the level is drawn (user, 2026-09-21).
+# Vasopressor dose is per kg, the clinician's dosing scale (heavier patients need
+# more drug in absolute terms, which is why it is dosed per kg), so, like VT/PBW,
+# it is read on that scale without a size caveat (user, 2026-09-21).
 RRT_MARKERS <- character(0)   # markers taken from the dialysis-as-third-cause run
 marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")",
                                    if_else(m %in% RRT_MARKERS, "\ndialysis modelled as a third cause", ""))
@@ -210,8 +209,8 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     group_by(marker) %>% slice(1) %>% ungroup()
   row_label <- function(m) {
     paste0(marker_label(m),
-           sprintf("\nn = %s, deaths = %s", format(counts$n_patients[match(m, counts$marker)], big.mark = ","),
-                   format(counts$n_deaths[match(m, counts$marker)], big.mark = ",")),
+           sprintf("\nn = %s, deaths = %s", formatC(counts$n_patients[match(m, counts$marker)], big.mark = ",", format = "d"),
+                   formatC(counts$n_deaths[match(m, counts$marker)], big.mark = ",", format = "d")),
            coalesce(failed$note[match(m, failed$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.

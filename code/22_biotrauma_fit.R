@@ -240,7 +240,17 @@ markers <- list(
   # its logit. Unit-invariant, so free of the per-kg height artefact that makes
   # the dose part (ne_equiv_peak) uninterpretable against PFVC. The two together
   # are the hurdle model, fitted as two joint models on the same cohort.
-  any_pressor   = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "pddiag",       offset = 0,    label = "Any vasopressor", binary = TRUE)
+  any_pressor   = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "pddiag",       offset = 0,    label = "Any vasopressor", binary = TRUE),
+  # The hurdle's dose part: log NE-equivalent dose (per kg, the clinician's dosing
+  # scale) on the days a pressor runs, with no offset. Zero days are not in this
+  # model; going on and off is the binary part's job (any_pressor), so the two
+  # together are the two-part model. The day-0 baseline can be zero for a patient
+  # who starts later, so it enters as two terms: on_y0 (a pressor running at day 0)
+  # and log_y0 (log day-0 dose when on, 0 when off). A patient needs two or more
+  # pressor days in the window to enter, as for every marker. Patients leave the
+  # dose part as they are weaned; the joint model corrects only for death and
+  # extubation, so the dose trajectory is that of patients still on pressors.
+  pressor_dose  = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0,    label = "Vasopressor dose, days on a pressor", positive = TRUE)
 )
 for (nm in names(markers)) markers[[nm]]$name <- nm   # the output name; any_pressor shares the dose column
 want_markers <- Sys.getenv("PBWPFVC_JM_MARKERS", "")
@@ -367,7 +377,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
     filter(period >= 1L, !is.na(.data[[mk$y]]), if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE,
-           !is.na(l_sf), !is.na(l_pressor)) %>%
+           !is.na(l_sf), !is.na(l_pressor),
+           if (isTRUE(mk$positive)) .data[[mk$y]] > 0 else TRUE) %>%   # the dose part: pressor days only
     mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
@@ -384,7 +395,14 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
   ld <- ld %>% mutate(age10_c = age10 - age_med)
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
-    mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else log(.data[[mk$y0]] + mk$offset))
+    mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else
+                    if (isTRUE(mk$positive)) if_else(.data[[mk$y0]] > 0, log(pmax(.data[[mk$y0]], 1e-12)), 0) else
+                    log(.data[[mk$y0]] + mk$offset))
+  if (isTRUE(mk$positive)) {
+    if (BASELINE_FORM == "offset") stop("marker ", mk$name, ": the offset baseline form needs a positive day-0 value, ",
+                                        "and the dose part's baseline is zero for patients who start later; use PBWPFVC_JM_BASELINE=free")
+    ld <- ld %>% mutate(on_y0 = as.numeric(.data[[mk$y0]] > 0))
+  }
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
   # applied by hand -- the response becomes log(y_t / y_0), the log percent change.
   if (!is.null(mk$y0) && BASELINE_FORM == "offset") ld <- ld %>% mutate(log_y = log_y - log_y0)
@@ -417,6 +435,11 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stop("this panel predates the RRT competing event: rebuild it with the current 21_biotrauma_panel.R")
   if (use_rrt) sd_ <- sd_ %>% mutate(event = event_rrt, event_day = event_day_rrt,
                                      event_time = event_time_rrt, event_factor = event_factor_rrt)
+  if (isTRUE(mk$positive)) {
+    on0 <- ld %>% distinct(hospitalization_id, on_y0)
+    stamp(sum(on0$on_y0 == 1), " of ", nrow(on0), " dose-part patients on a pressor at day 0",
+          if (n_distinct(on0$on_y0) == 1) "; the day-0 on/off term is constant and is left out of the model" else "")
+  }
   n_pts <- length(lv); n_deaths <- sum(sd_$event == 1L); n_extub <- sum(sd_$event == 2L)
   n_rrt <- if (use_rrt) sum(sd_$event == 3L) else NA_integer_
   stamp(nrow(ld), " rows, ", n_pts, " patients, ", n_deaths, " deaths, ", n_extub, " extubations",
@@ -436,7 +459,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"), "ldisc_c",
+  num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"), "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
@@ -489,6 +512,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
   rhs <- c(time_term, mod_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
+           if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
            lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
