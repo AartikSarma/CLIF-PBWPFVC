@@ -277,22 +277,37 @@ if (any(nonpositive_counts > 0))
           paste(sprintf("%s %d", names(nonpositive_counts), nonpositive_counts), collapse = ", "))
 
 # =============================================================================
-# 13a. RRT start day (CRRT table from script 01)
+# 13a. RRT start day: the first CRRT record or dialysis procedure (script 01)
 # =============================================================================
+# Renal replacement of any kind, continuous or intermittent, ends the creatinine
+# trajectory and is its competing event. A patient with end-stage renal disease is
+# on renal replacement before the index: censored at day 0, so no creatinine
+# trajectory at all (user, 2026-09-21).
 crrt_available <- readRDS(file.path(output_dir, "crrt_available.rds"))
+rrt_sources    <- readRDS(file.path(output_dir, "rrt_sources_available.rds"))
 if (!crrt_available)
-  message("*** This site has no crrt_therapy table: the creatinine trajectory is NOT censored at RRT start. ***")
-rrt <- read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>%
-  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  message("*** This site has no crrt_therapy table: CRRT does not censor the creatinine trajectory. ***")
+if (!rrt_sources[["dialysis"]])
+  message("*** This site has no patient_procedures table: intermittent dialysis does not censor the creatinine trajectory. ***")
+if (!rrt_sources[["esrd"]])
+  message("*** This site has no hospital_diagnosis table: ESRD patients are not identified. ***")
+esrd_ids <- read_parquet(file.path(output_dir, "cohort_esrd.parquet"))$hospitalization_id
+rrt <- bind_rows(read_parquet(file.path(output_dir, "cohort_crrt.parquet")) %>% select(hospitalization_id, recorded_dttm),
+                 read_parquet(file.path(output_dir, "cohort_dialysis.parquet")) %>% select(hospitalization_id, recorded_dttm)) %>%
   group_by(hospitalization_id) %>%
   summarise(rrt_start_dttm = min(recorded_dttm), .groups = "drop") %>%
-  inner_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+  right_join(base %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
   transmute(hospitalization_id,
             rrt_period = as.integer(floor(as.numeric(difftime(rrt_start_dttm, t0, units = "hours")) / STEP_H)),
-            rrt_day = rrt_period * STEP)
-message("CRRT: ", nrow(rrt), " patients with any record; ",
-        sum(rrt$rrt_day < 0), " already on CRRT at the index, ",
+            esrd = hospitalization_id %in% esrd_ids,
+            rrt_period = if_else(esrd, -1L, rrt_period),       # ESRD: on RRT before the index
+            rrt_day = rrt_period * STEP) %>%
+  filter(!is.na(rrt_period))
+message("RRT (CRRT or dialysis procedure, or ESRD): ", nrow(rrt), " patients; ",
+        sum(rrt$esrd), " with ESRD (censored at day 0), ",
+        sum(rrt$rrt_day < 0 & !rrt$esrd), " others already on RRT at the index, ",
         sum(rrt$rrt_day >= 0 & rrt$rrt_day <= JM_HORIZON), " start within the horizon")
+rrt <- rrt %>% select(-esrd)
 
 # =============================================================================
 # 13b. Survival table: death vs extubation within JM_HORIZON, tie = death
@@ -504,7 +519,8 @@ summary_tbl <- bind_rows(
          deaths_ge2 = sum(surv$event == 1L), extubations_ge2 = sum(surv$event == 2L),
          plateau_subset_ge2 = sum(!is.na(surv$ers_pfvc_0)))) %>%
   mutate(grid = JM_GRID, step_hours = STEP_H, horizon_days = JM_HORIZON,
-         crrt_available = crrt_available,
+         crrt_available = crrt_available, dialysis_procedures_available = rrt_sources[["dialysis"]],
+         esrd_diagnoses_available = rrt_sources[["esrd"]], esrd_censored_day0 = sum(surv$hospitalization_id %in% esrd_ids),
          rrt_before_index = sum(surv$rrt_before_index),
          rrt_within_horizon = sum(!is.na(surv$rrt_day) & surv$rrt_day >= 0 & surv$rrt_day <= JM_HORIZON),
          creatinine_days_removed_rrt = sum(long$creat_censored_rrt),

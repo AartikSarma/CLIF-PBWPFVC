@@ -18,6 +18,10 @@
 #   vasopressor trend from day 0 to day 2 (rising or falling by 0.05 or more, stable,
 #     none), excluding ESRD
 #
+# Since 2026-09-21 the panel censors ESRD patients at day 0 and treats any dialysis
+# procedure as the start of RRT, so on a current panel the ESRD row is empty and the
+# dialysis row shows the trajectory before dialysis only.
+#
 # Expected if creatinine works: it rises more with higher and rising pressor
 # requirements. If it falls or stays flat even there, the marker (or the panel) is
 # not measuring kidney injury, and the null divergence says nothing.

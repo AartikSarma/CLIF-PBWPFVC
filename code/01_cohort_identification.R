@@ -109,11 +109,44 @@ clif_crrt <- if (crrt_available) {
     mutate(recorded_dttm = as.POSIXct(character()), crrt_mode_category = character())
 }
 
+# Intermittent dialysis and chronic dialysis dependence. Renal replacement of any
+# kind ends the creatinine trajectory and is its competing event (user, 2026-09-21),
+# and crrt_therapy covers only continuous therapy. Intermittent haemodialysis, SLED
+# and other dialysis come from patient_procedures (the procedure's billed time is its
+# start); end-stage renal disease from hospital_diagnosis, and an ESRD patient is on
+# renal replacement before the index, so has no creatinine trajectory at all. Both
+# tables are optional in CLIF; an absent one is reported, as for crrt_therapy.
+DIALYSIS_PROCEDURE_CODES <- c("90935", "90937", "90945", "90947",      # CPT: haemodialysis; dialysis other than HD
+                              "5A1D70Z", "5A1D80Z", "5A1D90Z")        # ICD-10-PCS: intermittent, prolonged intermittent, continuous
+ESRD_DIAGNOSIS_CODES     <- c("N185", "N186", "Z992",                  # ICD-10-CM: CKD 5, ESRD, dialysis dependence
+                              "5855", "5856", "V4511")                 # ICD-9-CM equivalents
+optional_clif <- function(tbl) file.exists(file.path(tables_path, paste0("clif_", tbl, ".", file_type)))
+dialysis_available <- optional_clif("patient_procedures")
+esrd_available     <- optional_clif("hospital_diagnosis")
+clif_dialysis <- if (dialysis_available) {
+  open_clif("patient_procedures") %>%
+    filter(procedure_code %in% DIALYSIS_PROCEDURE_CODES) %>%
+    select(hospitalization_id, recorded_dttm = procedure_billed_dttm, procedure_code) %>% collect()
+} else {
+  message("*** No patient_procedures table at ", tables_path, ": intermittent dialysis cannot censor creatinine. ***")
+  clif_hospitalization %>% slice(0) %>% select(hospitalization_id) %>%
+    mutate(recorded_dttm = as.POSIXct(character()), procedure_code = character())
+}
+clif_esrd <- if (esrd_available) {
+  open_clif("hospital_diagnosis") %>% select(hospitalization_id, diagnosis_code) %>% collect() %>%
+    filter(toupper(gsub(".", "", diagnosis_code, fixed = TRUE)) %in% ESRD_DIAGNOSIS_CODES) %>%
+    distinct(hospitalization_id)
+} else {
+  message("*** No hospital_diagnosis table at ", tables_path, ": ESRD patients cannot be identified. ***")
+  clif_hospitalization %>% slice(0) %>% select(hospitalization_id)
+}
+
 message("Loaded: patient=", nrow(clif_patient), " hosp=", nrow(clif_hospitalization),
         " adt=", nrow(clif_adt), " resp=", nrow(clif_respiratory_support))
 message("Loaded (category-filtered): vitals=", nrow(clif_vitals), " labs=", nrow(clif_labs),
         " meds=", nrow(clif_meds), " assessments=", nrow(clif_assessments),
-        " crrt=", nrow(clif_crrt))
+        " crrt=", nrow(clif_crrt), " dialysis procedures=", nrow(clif_dialysis),
+        " ESRD hospitalizations=", nrow(clif_esrd))
 
 # Fail LOUDLY if any CORE table loaded empty. arrow::open_dataset() does NOT error on an
 # unreachable/stale parquet path -- it opens a 0-row dataset and collect() succeeds -- so
@@ -377,6 +410,12 @@ attr(cohort_crrt, "crrt_available") <- crrt_available
 message("CRRT extracted: ", nrow(cohort_crrt), " rows, ",
         n_distinct(cohort_crrt$hospitalization_id), " hospitalizations",
         if (!crrt_available) " (table absent at this site)")
+cohort_dialysis <- clif_dialysis %>%
+  filter(hospitalization_id %in% eligible_hospitalizations, !is.na(recorded_dttm))
+cohort_esrd <- clif_esrd %>% filter(hospitalization_id %in% eligible_hospitalizations)
+message("Dialysis procedures extracted: ", nrow(cohort_dialysis), " rows, ",
+        n_distinct(cohort_dialysis$hospitalization_id), " hospitalizations; ESRD: ",
+        nrow(cohort_esrd), " hospitalizations")
 
 # =============================================================================
 # Merge demographics
@@ -550,6 +589,9 @@ write_parquet(cohort_meds, file.path(output_dir, "cohort_meds.parquet"))
 write_parquet(cohort_assessments, file.path(output_dir, "cohort_assessments.parquet"))
 write_parquet(cohort_crrt, file.path(output_dir, "cohort_crrt.parquet"))
 saveRDS(crrt_available, file.path(output_dir, "crrt_available.rds"))
+write_parquet(cohort_dialysis, file.path(output_dir, "cohort_dialysis.parquet"))
+write_parquet(cohort_esrd, file.path(output_dir, "cohort_esrd.parquet"))
+saveRDS(c(dialysis = dialysis_available, esrd = esrd_available), file.path(output_dir, "rrt_sources_available.rds"))
 write_parquet(cohort_heights, file.path(output_dir, "cohort_heights.parquet"))
 write_parquet(cohort_weights, file.path(output_dir, "cohort_weights.parquet"))
 
