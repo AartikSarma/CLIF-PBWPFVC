@@ -296,16 +296,19 @@ for (nm in names(pooled)) {
 #     site and pooled. Adjusted, main model, the daily panel, PFVC units only: the
 #     VT/PFVC divergence is on its own scale and gets its own row of panels.
 DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day", vtpfvc = canonical_term("vtpfvc_c:vent_day"))
-fig4_rows <- function(d, quantity, keep = TRUE) {
+# the panel label is taken from the calling environment (.env): the stacked placebo
+# tables carry their own `quantity` column (before / after / change), which would
+# otherwise shadow the argument and leave those rows without a panel
+fig4_rows <- function(d, panel_label, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, adjustment == "adjusted", grepl("d$", panel_h)) %>%
-    transmute(marker, unit, quantity, site = anon(site), estimate, lo = estimate - 1.96 * se,
-              hi = estimate + 1.96 * se, is_pooled = FALSE)
+    transmute(marker, unit, quantity = .env$panel_label, site = anon(site), estimate,
+              lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, is_pooled = FALSE)
 }
-fig4_pooled <- function(d, quantity, keep = TRUE) {
+fig4_pooled <- function(d, panel_label, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, adjustment == "adjusted", grepl("d$", panel_h)) %>%
-    transmute(marker, unit, quantity, site = "Pooled", estimate = pooled, lo, hi, is_pooled = TRUE)
+    transmute(marker, unit, quantity = .env$panel_label, site = "Pooled", estimate = pooled, lo, hi, is_pooled = TRUE)
 }
 fd4 <- bind_rows(
   fig4_rows(es, "divergence, ventilated", es$term == DIVERGENCE[["pfvc"]] & es$model == "main"),
@@ -322,7 +325,7 @@ if (!is.null(fd4) && nrow(fd4)) {
            quantity = factor(quantity, c("divergence, ventilated", "difference in differences",
                                          "placebo, before intubation", "stacked, change at intubation")))
   worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", pressor_dose = "higher",
-             osi = "higher", any_pressor = "higher", sf = "lower", dp = "higher")
+             ne_equiv_peak = "higher", osi = "higher", any_pressor = "higher", sf = "lower", dp = "higher")
   p4 <- ggplot(fd4, aes(estimate, site, shape = is_pooled)) +
     geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
     geom_pointrange(aes(xmin = lo, xmax = hi), colour = okabe[1]) +
