@@ -30,9 +30,8 @@
 #   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm
 #   6 figure    27_control_comparison.R (with the difference-in-differences), then
-#               28_pre_period_placebo.R (the pre-trend check, PLACEBO_MARKERS: platelets,
-#               creatinine, bilirubin), then 24_biotrauma_figures.R: figure 4 and the
-#               checks figure (biotrauma_fig_checks_*: placebo and DiD)
+#               24_biotrauma_figures.R: figure 4 and the checks figure
+#               (biotrauma_fig_checks_*: the DiD)
 #   7 VT/PFVC   the companion: every marker against VT/PFVC at the same VT/PBW, creatinine
 #               with dialysis as a third cause (VTPFVC_MARKERS; empty skips), tagged vtpfvc
 # Fits already on disk with the same chain settings are reused, so a rerun after a
@@ -52,7 +51,7 @@
 #   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
 #   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
-#   site runs SF_BANDS="235,315 115,235 0,115"), VTPFVC_MARKERS, PLACEBO_MARKERS, FORCE_BUILD, FORCE_PANEL.
+#   site runs SF_BANDS="235,315 115,235 0,115"), VTPFVC_MARKERS, FORCE_BUILD, FORCE_PANEL.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 set -uo pipefail
@@ -62,7 +61,6 @@ MARKERS=${MARKERS:-osi,pressor_dose,platelets,bilirubin}   # creatinine runs on 
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
 CREATININE=${CREATININE:-1}
 VTPFVC_MARKERS=${VTPFVC_MARKERS-$MARKERS}   # the VT/PFVC companion (step 7): every marker; set empty to skip
-PLACEBO_MARKERS=${PLACEBO_MARKERS:-platelets,creatinine,bilirubin}   # the pre-intubation placebo (labs only)
 SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-4}
 FORCE_BUILD=${FORCE_BUILD:-0}
@@ -180,19 +178,13 @@ for BAND in $SF_BANDS; do fit_arm "ventilated_sf${BAND/,/to}" imv "$MARKERS" PBW
 # ---- 6 comparison table and the figure
 FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi"
 run_step comparison with_cohort imv Rscript code/27_control_comparison.R
-# the pre-trend check of the difference-in-differences: the lung-size divergence in the days
-# before intubation, beside the joint model's post-intubation rate (labs only; a mixed model).
-# Before the figure, which draws it with the DiD (biotrauma_fig_checks_*).
-if [[ " ${FAILED[*]-} " != *" panel_imv "* ]]; then
-  run_step placebo with_cohort imv env PBWPFVC_JM_MARKERS="$PLACEBO_MARKERS" Rscript code/28_pre_period_placebo.R
-fi
 run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
   Rscript code/24_biotrauma_figures.R
 
 # ---- 7 companion: the same question told the reader's way round (22_biotrauma_fit.R,
 #      form vtpfvc): at the same mean VT/PBW, does a patient receiving more VT/PFVC (percent
 #      of predicted FVC, patient mean, centred) diverge? Ventilated only (the controls and the
-#      pre-intubation days have no tidal volume, so there is no VT/PFVC DiD or placebo), after
+#      control has no tidal volume, so there is no VT/PFVC DiD), after
 #      figure 4 so it cannot delay it; tagged vtpfvc. Creatinine is fitted as in figure 4, with
 #      dialysis as a third competing cause. VTPFVC_MARKERS="" skips the step.
 if [[ -n "$VTPFVC_MARKERS" && " ${FAILED[*]-} " != *" panel_imv "* ]]; then
