@@ -506,6 +506,53 @@ message("Longitudinal table: ", nrow(long), " patient-periods, ",
         sum(long$creat_censored_rrt))
 
 # =============================================================================
+# 13c2. Pre-intubation panel: the placebo pre-period (daily grid, ventilated cohort)
+# =============================================================================
+# If the divergence by predicted lung size is the ventilator's, it should be absent
+# before intubation: the difference-in-differences pre-trend check
+# (28_pre_period_placebo.R). The clock here starts at the FIRST invasive-ventilation
+# record of the stay, not at the index time point, which can fall hours after
+# intubation: a pre-period must hold no ventilated hours. Day -1 is the 24 hours
+# before intubation, day -PRE_DAYS the earliest kept. Labs only (daily min platelets,
+# max creatinine and bilirubin, as in the post-index panel): SF and pressors before
+# intubation belong to another regime. Written apart from jm_long, whose consumers all
+# assume non-negative periods. Patients with a pre-period are those intubated after a
+# day or more in hospital, a subgroup of the cohort: the summary counts them first.
+PRE_DAYS <- as.integer(Sys.getenv("PBWPFVC_JM_PRE_DAYS", "7"))
+BUILD_PRE <- JM_GRID == "daily" && config$cohort == "imv"
+pre_counts <- NULL
+if (BUILD_PRE) {
+  first_imv <- read_parquet(file.path(output_dir, "resp_support_waterfall_clean.parquet"),
+                            col_select = c("hospitalization_id", "recorded_dttm", "device_category")) %>%
+    filter(tolower(device_category) == "imv", hospitalization_id %in% surv$hospitalization_id) %>%
+    group_by(hospitalization_id) %>% summarise(first_imv_dttm = min(recorded_dttm), .groups = "drop")
+  imv_to_index_h <- first_imv %>% inner_join(surv %>% select(hospitalization_id, t0), by = "hospitalization_id") %>%
+    transmute(hours = as.numeric(difftime(t0, first_imv_dttm, units = "hours")))
+  pre <- read_parquet(file.path(output_dir, "cohort_labs_clean.parquet")) %>%
+    filter(lab_category %in% c("creatinine", "platelet_count", "bilirubin_total"),
+           !is.na(lab_value_numeric), lab_value_numeric > 0) %>%     # log markers: a non-positive value is missing
+    inner_join(first_imv, by = "hospitalization_id") %>%
+    filter(lab_result_dttm < first_imv_dttm) %>%
+    mutate(vent_day = floor(as.numeric(difftime(lab_result_dttm, first_imv_dttm, units = "days")))) %>%
+    filter(vent_day >= -PRE_DAYS) %>%
+    group_by(hospitalization_id, vent_day) %>%
+    summarise(creatinine = { v <- lab_value_numeric[lab_category == "creatinine"];      if (length(v)) max(v) else NA_real_ },
+              platelets  = { v <- lab_value_numeric[lab_category == "platelet_count"];  if (length(v)) min(v) else NA_real_ },
+              bilirubin  = { v <- lab_value_numeric[lab_category == "bilirubin_total"]; if (length(v)) max(v) else NA_real_ },
+              .groups = "drop")
+  pre_counts <- map_dfr(c("creatinine", "platelets", "bilirubin"), function(m) {
+    per_pt <- pre %>% filter(!is.na(.data[[m]])) %>% count(hospitalization_id)
+    tibble(marker = m, patient_days_pre = sum(per_pt$n),
+           patients_pre_ge1 = nrow(per_pt), patients_pre_ge2 = sum(per_pt$n >= 2L))
+  })
+  message("Pre-intubation panel (", PRE_DAYS, " days before the first IMV record): ",
+          paste(sprintf("%s %d patients with 2+ days", pre_counts$marker, pre_counts$patients_pre_ge2), collapse = "; "),
+          "; first IMV to index, median ", round(median(imv_to_index_h$hours), 1), " h (",
+          sum(imv_to_index_h$hours < 0), " patients with the index before the first IMV record)")
+  write_parquet(pre, file.path(output_dir, paste0("jm_pre_", h_suffix, ".parquet")))
+}
+
+# =============================================================================
 # 13d. Aggregate summary (deliverable) and persistence
 # =============================================================================
 markers <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "ne_equiv_peak", "oi", "osi")
@@ -542,6 +589,10 @@ summary_tbl <- bind_rows(
          creatinine_days_removed_rrt = sum(long$creat_censored_rrt),
          lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$period > 0L),
          site = site_name)
+if (!is.null(pre_counts))   # the pre-intubation coverage, per lab marker (placebo pre-period)
+  summary_tbl <- summary_tbl %>% left_join(pre_counts, by = "marker") %>%
+    mutate(pre_days = PRE_DAYS,
+           first_imv_to_index_h_median = median(imv_to_index_h$hours))
 print(as.data.frame(summary_tbl), row.names = FALSE)
 write_csv(mask_small_counts(summary_tbl), file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
 

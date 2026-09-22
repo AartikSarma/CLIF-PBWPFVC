@@ -114,9 +114,13 @@ COUNT_COLUMNS <- c("n_obs", "n_patients", "n_deaths", "n_extubations", "n_rrt", 
                    "patients_ge2_obs", "deaths_ge2", "extubations_ge2", "plateau_subset_ge2",
                    "rrt_before_index", "rrt_within_horizon", "esrd_censored_day0",
                    "creatinine_days_removed_rrt", "nonpositive_set_missing", "lag_missing_rows",
-                   "movement_last_n")
+                   "movement_last_n", "patients_pre_ge1", "patients_pre_ge2")
+# A count column is one named in COUNT_COLUMNS or one of them with a suffix
+# ("n_patients_ventilated" in the difference-in-differences table), so a table that
+# widens counts by arm cannot slip past the mask.
 mask_small_counts <- function(df) {
-  for (col in intersect(COUNT_COLUMNS, names(df))) {
+  is_count <- vapply(names(df), function(nm) any(nm == COUNT_COLUMNS | startsWith(nm, paste0(COUNT_COLUMNS, "_"))), logical(1))
+  for (col in names(df)[is_count]) {
     v <- suppressWarnings(as.numeric(df[[col]]))
     hide <- !is.na(v) & v > 0 & v < SMALL_CELL_MIN
     if (any(hide)) df[[col]][hide] <- NA
