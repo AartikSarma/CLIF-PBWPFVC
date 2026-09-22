@@ -110,8 +110,11 @@ fit_arm () {      # arm name, cohort, marker list, then extra environment assign
 build_cohort () { # cohort, folder holding its derived tables
   local cohort=$1 derived=$2
   # a cohort built before dialysis and ESRD entered the RRT definition (2026-09-21) lacks
-  # rrt_sources_available.rds, and its panel cannot be built: rebuild it
-  if [[ $FORCE_BUILD == 0 && -f "$derived/analysis_cross_sectional.parquet" && -f "$derived/rrt_sources_available.rds" ]]; then
+  # rrt_sources_available.rds, and its panel cannot be built: rebuild it. A control built
+  # before it was indexed at ICU admission (same day) lacks cohort_icu_stays.parquet.
+  local icu_ok=1
+  [[ $cohort == nosupport && ! -f "$derived/cohort_icu_stays.parquet" ]] && icu_ok=0
+  if [[ $FORCE_BUILD == 0 && $icu_ok == 1 && -f "$derived/analysis_cross_sectional.parquet" && -f "$derived/rrt_sources_available.rds" ]]; then
     echo "[$(date +%H:%M:%S)] ${cohort}: cohort already built, scripts 01-03 skipped (FORCE_BUILD=1 rebuilds)"; return 0
   fi
   for script in 01_cohort_identification 02_quality_checks 03_variable_derivation; do

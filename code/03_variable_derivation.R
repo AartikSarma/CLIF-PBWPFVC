@@ -840,10 +840,72 @@ write_parquet(analysis_with_completeness,
 # the control keeps the hypoxemia gate (acute hypoxemic respiratory failure on
 # HFNC/NIV) and has no lung-protective band to apply
 # the no-support control has no hypoxemia gate either (its patients are, by and
-# large, not hypoxemic): the index is the first row with SF and SOFA observed
+# large, not hypoxemic): a qualifying row is a room-air / nasal-cannula row with SF
+# and SOFA observed, and the index is set at ICU admission (below)
 qualifying_timepoints <- analysis_with_completeness %>%
   filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8),
          config$cohort == "nosupport" | sf_ratio < SF_HYPOXEMIA_THRESHOLD)
+
+# ---- the no-support control is indexed at ICU ADMISSION (2026-09-21)
+# The ventilated cohort's clock starts at intubation (the index is a median 4 h after
+# the first IMV record at MIMIC). The control's used to start at the stay's first
+# qualifying row, which can be the ED or the ward on arrival, days before the ICU stay
+# that qualified the hospitalization: a week from intubation was compared with a week
+# from hospital arrival. The index is now the first qualifying row within
+# CONTROL_ICU_WINDOW_H hours after an ICU admission, with no advanced support (HFNC,
+# NIV, IMV) before it: ICU entry is the event, as intubation is, and "no support" is
+# defined where it matters. The 24-hour escalation landmark below then runs from this
+# index. control_index_timing_{site}.csv (final/controls/) reports where the previous
+# rule's index fell relative to the ICU, and how many patients each rule keeps.
+if (config$cohort == "nosupport") {
+  CONTROL_ICU_WINDOW_H <- 6
+  icu_stays <- read_parquet(file.path(output_dir, "cohort_icu_stays.parquet"))
+  inside_icu <- function(ids, times) {   # does each (patient, time) fall inside one of that stay's ICU episodes?
+    tibble(hospitalization_id = ids, t = times, row_id = seq_along(ids)) %>%
+      left_join(icu_stays, by = "hospitalization_id", relationship = "many-to-many") %>%
+      group_by(row_id) %>%
+      summarise(inside = any(!is.na(in_dttm) & t >= in_dttm & (is.na(out_dttm) | t <= out_dttm)), .groups = "drop") %>%
+      arrange(row_id) %>% pull(inside)
+  }
+  first_icu <- icu_stays %>% group_by(hospitalization_id) %>% summarise(first_icu_in = min(in_dttm), .groups = "drop")
+  # the previous rule's index, for the timing table
+  previous_index <- qualifying_timepoints %>%
+    group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    select(hospitalization_id, t_index = recorded_dttm) %>%
+    left_join(first_icu, by = "hospitalization_id") %>%
+    mutate(in_icu = inside_icu(hospitalization_id, t_index),
+           hours_to_first_icu = as.numeric(difftime(first_icu_in, t_index, units = "hours")))
+  first_advanced <- resp_waterfall %>%
+    filter(tolower(device_category) %in% SUPPORT_DEVICES | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
+    group_by(hospitalization_id) %>% summarise(first_adv = min(recorded_dttm), .groups = "drop")
+  icu_index <- qualifying_timepoints %>%
+    inner_join(icu_stays %>% select(hospitalization_id, icu_in = in_dttm), by = "hospitalization_id",
+               relationship = "many-to-many") %>%
+    filter(recorded_dttm >= icu_in, recorded_dttm <= icu_in + lubridate::hours(CONTROL_ICU_WINDOW_H)) %>%
+    left_join(first_advanced, by = "hospitalization_id") %>%
+    filter(is.na(first_adv) | first_adv > recorded_dttm) %>%      # no advanced support before the index
+    group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    select(-icu_in, -first_adv)
+  pct <- function(k, n) if (n > 0) round(100 * k / n, 1) else NA_real_
+  n_icu_inside <- sum(inside_icu(icu_index$hospitalization_id, icu_index$recorded_dttm))
+  timing <- tibble(
+    rule = c("previous: first qualifying row of the stay",
+             paste0("current: first qualifying row within ", CONTROL_ICU_WINDOW_H, " h of an ICU admission, no advanced support before it")),
+    n_patients = c(nrow(previous_index), nrow(icu_index)),
+    n_patients_index_in_icu = c(sum(previous_index$in_icu), n_icu_inside),
+    pct_index_in_icu = c(pct(sum(previous_index$in_icu), nrow(previous_index)), pct(n_icu_inside, nrow(icu_index))),
+    n_patients_index_gt24h_before_icu = c(sum(previous_index$hours_to_first_icu > 24, na.rm = TRUE), 0L),
+    hours_index_to_first_icu_q25 = c(quantile(previous_index$hours_to_first_icu, 0.25, na.rm = TRUE), NA),
+    hours_index_to_first_icu_median = c(median(previous_index$hours_to_first_icu, na.rm = TRUE), NA),
+    hours_index_to_first_icu_q75 = c(quantile(previous_index$hours_to_first_icu, 0.75, na.rm = TRUE), NA),
+    note = "counts before the 24-hour escalation landmark; negative hours = index after the first ICU admission",
+    site = site_name)
+  write_csv(mask_small_counts(timing), file.path(final_dir, paste0("control_index_timing_", site_name, ".csv")))
+  message("No-support index: previous rule ", nrow(previous_index), " patients, ", pct(sum(previous_index$in_icu), nrow(previous_index)),
+          "% of indices inside the ICU (median ", round(median(previous_index$hours_to_first_icu, na.rm = TRUE), 1),
+          " h to the first ICU admission); ICU-admission rule keeps ", nrow(icu_index), " patients")
+  qualifying_timepoints <- icu_index
+}
 
 message("Patients with >=1 complete-data IMV timepoint: ",
         n_distinct(analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]))

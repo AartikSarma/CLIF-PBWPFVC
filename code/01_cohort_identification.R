@@ -594,6 +594,11 @@ write_parquet(cohort_esrd, file.path(output_dir, "cohort_esrd.parquet"))
 saveRDS(c(dialysis = dialysis_available, esrd = esrd_available), file.path(output_dir, "rrt_sources_available.rds"))
 write_parquet(cohort_heights, file.path(output_dir, "cohort_heights.parquet"))
 write_parquet(cohort_weights, file.path(output_dir, "cohort_weights.parquet"))
+# the cohort's ICU stays: the no-support control is indexed at ICU admission (script 03)
+cohort_icu_stays <- clif_adt %>%
+  filter(tolower(location_category) == "icu", hospitalization_id %in% eligible_hospitalizations, !is.na(in_dttm)) %>%
+  select(hospitalization_id, in_dttm, out_dttm)
+write_parquet(cohort_icu_stays, file.path(output_dir, "cohort_icu_stays.parquet"))
 
 # Partial attrition log (steps 1-3). Script 03 reads this back, appends the
 # analytic-filter steps 4-7, and writes the complete log to final/.
