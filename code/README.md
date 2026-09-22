@@ -48,6 +48,11 @@ to change; that stops once sites have returned `final/` folders.
   cp -R output/UCSF_output/final/injury  results/fig4/UCSF/
   PBWPFVC_RESULTS_ROOT=results/fig4 Rscript code/pooling/pooled_biotrauma.R
   ```
+- `supplement/` holds standalone supplementary analyses, run by hand and not by the
+  pipeline; each is prefixed by the block it supports and writes to `final/supplement/`.
+  `xsec_dp_vtpfvc_additive.R` asks whether driving pressure is a sufficient surrogate
+  for strain: driving pressure and VT/PFVC as additive predictors of mortality, and
+  whether age shifts the balance between them.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
@@ -58,8 +63,8 @@ to change; that stops once sites have returned `final/` folders.
 
 ## Where aggregates go
 
-`final/` is sorted by block: `cross_sectional/` (`03`-`05`), `injury/` (`21`-`27`)
-and `controls/`. A script never builds the path itself: it calls
+`final/` is sorted by block: `cross_sectional/` (`03`-`05`), `injury/` (`21`-`27`),
+`supplement/` and `controls/`. A script never builds the path itself: it calls
 `final_dir_for("<block>")` from `utils/config.R`.
 
 ## Cohorts and where files go
