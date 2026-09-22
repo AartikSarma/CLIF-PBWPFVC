@@ -39,6 +39,15 @@
 # The age-modification rungs need age as a main effect, so their unadjusted arm
 # keeps age (the modifier) and drops sex and race.
 #
+# Age as a main effect enters two ways, and every model is fitted both ways
+# (column age_adjustment): linear, and a 4-df natural spline. The spline matters
+# because VT/PFVC carries the GLI equations' curved age terms; with age linear, a
+# VT/PFVC x age product can absorb curvature in mortality by age rather than a
+# change in the VT/PFVC effect. The modification itself stays linear in age
+# (dp_c:age_c, vt_c:age_c), so a VT/PFVC x age term that survives the spline is a
+# change in slope, not unmodelled age. Rungs without age are identical in the two
+# forms in the unadjusted arm.
+#
 # Predictors are centred logs (dp_c = log DP - mean, vt_c = log VT/PFVC - mean)
 # and age_c = age/10 - 6, so a main effect in a model with interactions is the
 # effect at the mean DP, the mean VT/PFVC and age 60. Ratios are reported per SD
@@ -164,7 +173,10 @@ message("Correlation of log DP with log VT/PFVC: ",
 # =============================================================================
 
 base_covariates <- "vtpbw + bmi + sofa_total + sf10"
-demographic_covariates <- "age_c + sex_category + race_category"
+# The age main effect, by age_adjustment. "AGE" in a rung (and in the demographic
+# set) is replaced by it; the age modification terms stay linear in age_c.
+AGE_MAIN_EFFECT <- c(linear = "age_c", spline = "ns(age_c, 4)")
+demographic_covariates <- "AGE + sex_category + race_category"
 
 rungs <- c(
   dp         = "dp_c",
@@ -174,11 +186,11 @@ rungs <- c(
   espec      = "espec_c + vt_c",
   dp_ns      = "ns(dp_c, 4)",
   dp_ns_vt   = "ns(dp_c, 4) + vt_c",
-  age_main   = "dp_c + vt_c + age_c",
-  dp_x_age   = "dp_c * age_c + vt_c",
-  vt_x_age   = "dp_c + vt_c * age_c",
-  both_x_age = "(dp_c + vt_c) * age_c",
-  full       = "(dp_c + vt_c) * age_c + dp_c:vt_c",
+  age_main   = "dp_c + vt_c + AGE",
+  dp_x_age   = "dp_c + vt_c + AGE + dp_c:age_c",
+  vt_x_age   = "dp_c + vt_c + AGE + vt_c:age_c",
+  both_x_age = "dp_c + vt_c + AGE + dp_c:age_c + vt_c:age_c",
+  full       = "dp_c + vt_c + AGE + dp_c:age_c + vt_c:age_c + dp_c:vt_c",
   age_band   = "age_band + dp_c:age_band + vt_c:age_band"
 )
 
@@ -197,10 +209,16 @@ lrt_specs <- tribble(
   "nonadditivity_given_age",      "both_x_age", "full",       "DP x VT/PFVC product, with both age interactions in"
 )
 
-# Age enters the unadjusted arm only where a rung needs it as the modifier.
-rung_formula <- function(outcome_lhs, rung, adjusted) {
+# Age enters the unadjusted arm only where a rung needs it as the modifier. The
+# band rung's linear form keeps its bands alone (as first run); its spline form adds
+# the spline within them.
+rung_formula <- function(outcome_lhs, rung, adjusted, age_adjustment) {
   covariates <- if (adjusted) paste(base_covariates, "+", demographic_covariates) else base_covariates
-  as.formula(paste(outcome_lhs, "~", rungs[[rung]], "+", covariates))
+  rhs <- rungs[[rung]]
+  if (rung == "age_band" && age_adjustment == "spline") rhs <- paste(rhs, "+ AGE")
+  formula_text <- str_replace_all(paste(outcome_lhs, "~", rhs, "+", covariates),
+                                  fixed("AGE"), AGE_MAIN_EFFECT[[age_adjustment]])
+  as.formula(formula_text)
 }
 
 # Any warning (non-convergence, separation, an infinite coefficient) stops the run,
@@ -210,26 +228,30 @@ fit_without_warnings <- function(expr, label) {
     stop("Model '", label, "' warned: ", conditionMessage(w), call. = FALSE))
 }
 
-fit_rungs <- function(outcome_model, adjusted) {
+fit_rungs <- function(outcome_model, adjusted, age_adjustment) {
   adjustment <- if (adjusted) "adjusted" else "unadjusted"
   imap(rungs, function(rhs, rung) {
-    label <- paste(outcome_model, adjustment, rung, sep = " / ")
+    label <- paste(outcome_model, adjustment, paste(age_adjustment, "age"), rung, sep = " / ")
     if (outcome_model == "logistic") {
-      model <- fit_without_warnings(glm(rung_formula("deceased", rung, adjusted),
+      model <- fit_without_warnings(glm(rung_formula("deceased", rung, adjusted, age_adjustment),
                                         data = complete_mechanics, family = binomial), label)
       if (!model$converged) stop("Model '", label, "' did not converge", call. = FALSE)
     } else {
-      model <- fit_without_warnings(coxph(rung_formula("Surv(surv_time, event)", rung, adjusted),
+      model <- fit_without_warnings(coxph(rung_formula("Surv(surv_time, event)", rung, adjusted, age_adjustment),
                                           data = survival_mechanics), label)
     }
+    if (anyNA(coef(model))) stop("Model '", label, "' has aliased coefficients", call. = FALSE)
     model
   })
 }
 
-model_grid <- crossing(outcome_model = c("logistic", "cox"), adjusted = c(TRUE, FALSE))
-fitted_rungs <- pmap(model_grid, fit_rungs)
-names(fitted_rungs) <- paste(model_grid$outcome_model,
-                             if_else(model_grid$adjusted, "adjusted", "unadjusted"), sep = "_")
+model_grid <- crossing(outcome_model = c("logistic", "cox"), adjusted = c(TRUE, FALSE),
+                       age_adjustment = names(AGE_MAIN_EFFECT)) %>%
+  mutate(adjustment = if_else(adjusted, "adjusted", "unadjusted"),
+         key = paste(outcome_model, adjustment, age_adjustment, sep = "_"))
+fitted_rungs <- pmap(select(model_grid, outcome_model, adjusted, age_adjustment), fit_rungs) %>%
+  set_names(model_grid$key)
+grid_row <- function(key) as.list(model_grid[model_grid$key == key, ])
 
 # =============================================================================
 # Estimates: exposure terms only (the adjustment covariates are not reported)
@@ -251,8 +273,8 @@ cohort_counts <- function(outcome_model) {
 }
 
 estimates <- imap_dfr(fitted_rungs, function(models, key) {
-  outcome_model <- str_extract(key, "^[a-z]+")
-  adjustment <- str_remove(key, "^[a-z]+_")
+  meta <- grid_row(key)
+  outcome_model <- meta$outcome_model
   counts <- cohort_counts(outcome_model)
   imap_dfr(models, function(model, rung) {
     coefficient_table <- summary(model)$coefficients
@@ -272,7 +294,8 @@ estimates <- imap_dfr(fitted_rungs, function(models, key) {
   }) %>%
     mutate(site = site_name,
            outcome = if (outcome_model == "logistic") "in-hospital death" else "60-day death",
-           outcome_model = outcome_model, adjustment = adjustment,
+           outcome_model = outcome_model, adjustment = meta$adjustment,
+           age_adjustment = meta$age_adjustment,
            n_patients = counts[["n_patients"]], n_deaths = counts[["n_deaths"]], .before = 1)
 })
 
@@ -291,16 +314,16 @@ lrt_p <- function(smaller, larger) {
 }
 
 lrt_table <- imap_dfr(fitted_rungs, function(models, key) {
-  outcome_model <- str_extract(key, "^[a-z]+")
-  counts <- cohort_counts(outcome_model)
+  meta <- grid_row(key)
+  counts <- cohort_counts(meta$outcome_model)
   lrt_specs %>%
     mutate(result = map2(smaller, larger, ~ lrt_p(models[[.x]], models[[.y]])),
            chisq = map_dbl(result, "chisq"), df = map_dbl(result, "df"), p = map_dbl(result, "p"),
            aic_smaller = map_dbl(smaller, ~ AIC(models[[.x]])),
            aic_larger  = map_dbl(larger,  ~ AIC(models[[.x]]))) %>%
     select(-result) %>%
-    mutate(site = site_name, outcome_model = outcome_model,
-           adjustment = str_remove(key, "^[a-z]+_"),
+    mutate(site = site_name, outcome_model = meta$outcome_model,
+           adjustment = meta$adjustment, age_adjustment = meta$age_adjustment,
            n_patients = counts[["n_patients"]], n_deaths = counts[["n_deaths"]], .before = 1)
 })
 
@@ -341,13 +364,16 @@ band_counts <- bind_rows(
     mutate(outcome_model = "cox"))
 
 age_slopes <- imap_dfr(fitted_rungs, function(models, key) {
-  outcome_model <- str_extract(key, "^[a-z]+")
-  adjustment <- str_remove(key, "^[a-z]+_")
+  meta <- grid_row(key)
+  outcome_model <- meta$outcome_model
+  adjustment <- meta$adjustment
+  age_adjustment <- meta$age_adjustment
   continuous <- bind_rows(slope_at_age(models$both_x_age, "dp_c", AGE_CURVE_GRID),
                           slope_at_age(models$both_x_age, "vt_c", AGE_CURVE_GRID)) %>%
     mutate(age_form = "continuous (linear interaction)", age_band = NA_character_)
   band <- estimates %>%
-    filter(outcome_model == !!outcome_model, adjustment == !!adjustment, rung == "age_band") %>%
+    filter(outcome_model == !!outcome_model, adjustment == !!adjustment,
+           age_adjustment == !!age_adjustment, rung == "age_band") %>%
     transmute(predictor = str_extract(term, "dp_c|vt_c"),
               age_band = str_remove(str_remove(term, ":?(dp_c|vt_c):?"), "^age_band"),
               ratio_per_sd, ratio_lo, ratio_hi, p) %>%
@@ -356,6 +382,7 @@ age_slopes <- imap_dfr(fitted_rungs, function(models, key) {
     mutate(age_form = "age band (cell means)")
   bind_rows(continuous, band) %>%
     mutate(site = site_name, outcome_model = outcome_model, adjustment = adjustment,
+           age_adjustment = age_adjustment,
            predictor = recode(predictor, dp_c = "Driving pressure", vt_c = "VT/PFVC"), .before = 1)
 })
 
@@ -400,45 +427,53 @@ write_csv(mask_small_counts(espec_by_age),
           file.path(final_dir, paste0("dp_vtpfvc_additive_espec_age_", site_name, ".csv")))
 
 lrt_table %>% filter(outcome_model == "logistic") %>%
-  select(adjustment, test, chisq, df, p) %>%
+  select(adjustment, age_adjustment, test, chisq, df, p) %>%
   mutate(across(c(chisq, p), ~ signif(.x, 3))) %>%
+  arrange(adjustment, age_adjustment) %>%
   print(n = Inf)
 
 # =============================================================================
-# Figure (demographic-adjusted logistic models)
+# Figure (logistic models)
 # =============================================================================
 
 predictor_colours <- c("Driving pressure" = OKABE_ITO[["dp"]], "VT/PFVC" = OKABE_ITO[["vt"]])
+age_adjustment_labels <- c(linear = "age linear", spline = "age spline (4 df)")
 
 slopes_panel <- age_slopes %>%
-  filter(outcome_model == "logistic", adjustment == "adjusted", age_form != "age band (cell means)") %>%
-  ggplot(aes(age, ratio_per_sd, colour = predictor, fill = predictor)) +
+  filter(outcome_model == "logistic", age_form != "age band (cell means)") %>%
+  mutate(age_adjustment = age_adjustment_labels[age_adjustment]) %>%
+  ggplot(aes(age, ratio_per_sd, colour = predictor, fill = predictor, linetype = age_adjustment)) +
   geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
-  geom_ribbon(aes(ymin = ratio_lo, ymax = ratio_hi), alpha = 0.15, colour = NA) +
+  geom_ribbon(aes(ymin = ratio_lo, ymax = ratio_hi, group = interaction(predictor, age_adjustment)),
+              alpha = 0.10, colour = NA) +
   geom_line(linewidth = 0.9) +
+  facet_wrap(~ adjustment) +
   scale_colour_manual(values = predictor_colours) + scale_fill_manual(values = predictor_colours) +
+  scale_linetype_manual(values = c("age linear" = "dashed", "age spline (4 df)" = "solid")) +
   scale_y_log10() +
   labs(title = "A. Each predictor, the other held fixed, by age",
-       x = "Age (years)", y = "Odds ratio per SD (log scale)", colour = NULL, fill = NULL) +
+       x = "Age (years)", y = "Odds ratio per SD (log scale)", colour = NULL, fill = NULL, linetype = NULL) +
   theme_minimal(base_size = 11) + theme(legend.position = "bottom")
 
 band_panel <- age_slopes %>%
-  filter(outcome_model == "logistic", adjustment == "adjusted", age_form == "age band (cell means)",
+  filter(outcome_model == "logistic", age_form == "age band (cell means)",
          n_deaths >= SMALL_CELL_MIN) %>%
-  mutate(age_band = factor(age_band, levels = AGE_BAND_LABELS)) %>%
+  mutate(age_band = factor(age_band, levels = AGE_BAND_LABELS),
+         age_adjustment = age_adjustment_labels[age_adjustment]) %>%
   ggplot(aes(ratio_per_sd, age_band, colour = predictor)) +
   geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
   geom_pointrange(aes(xmin = ratio_lo, xmax = ratio_hi), position = position_dodge(width = 0.5)) +
+  facet_grid(~ adjustment + age_adjustment) +
   scale_colour_manual(values = predictor_colours) + scale_x_log10() +
   labs(title = "B. Within age bands", x = "Odds ratio per SD (log scale)", y = "Age band",
        colour = NULL) +
   theme_minimal(base_size = 11) + theme(legend.position = "bottom")
 
 # Predicted in-hospital mortality across DP at three VT/PFVC levels, one facet per
-# age band at that band's median age, from the full adjusted model. Other covariates
-# at the reference profile (male, White, median VT/PBW, BMI, SOFA, SF). DP is drawn
-# only over its 5th-95th percentile within the band.
-full_adjusted <- fitted_rungs$logistic_adjusted$full
+# age band at that band's median age, from the full adjusted model with age as a
+# spline. Other covariates at the reference profile (male, White, median VT/PBW,
+# BMI, SOFA, SF). DP is drawn only over its 5th-95th percentile within the band.
+full_adjusted <- fitted_rungs$logistic_adjusted_spline$full
 vtpfvc_levels <- quantile(complete_mechanics$vtpfvc, c(0.25, 0.5, 0.75))
 reference_profile <- tibble(
   vtpbw = median(complete_mechanics$vtpbw), bmi = median(complete_mechanics$bmi),
@@ -483,13 +518,13 @@ espec_panel <- ggplot() +
        x = "Age (years)", y = "DP / (VT/PFVC)\n(cmH2O per % predicted FVC)") +
   theme_minimal(base_size = 11)
 
-figure <- (slopes_panel | band_panel) / risk_panel / espec_panel +
-  plot_layout(heights = c(1, 1, 0.8)) +
+figure <- slopes_panel / band_panel / risk_panel / espec_panel +
+  plot_layout(heights = c(1, 1, 1, 0.8)) +
   plot_annotation(
     title = paste0("Driving pressure and VT/PFVC as additive predictors of mortality (", site_name, ")"),
-    subtitle = paste("Logistic models, demographic-adjusted; VT/PBW, BMI, SOFA and SF ratio held fixed.",
-                     "Band estimates (B) and curves (C) from the age-modified models."))
+    subtitle = paste("Logistic models; VT/PBW, BMI, SOFA and SF ratio held fixed. A-B: both adjustment sets, age linear and spline.",
+                     "C: demographic-adjusted, age spline."))
 ggsave(file.path(final_dir, paste0("dp_vtpfvc_additive_", site_name, ".pdf")),
-       figure, width = 11, height = 12)
+       figure, width = 12, height = 15)
 
 message("Wrote dp_vtpfvc_additive_* to ", final_dir)
