@@ -24,6 +24,13 @@
 # model (log Espec + log VT/PFVC) is reported beside it so the coefficients read
 # physiologically.
 #
+# The rival reading. A single plateau pressure is a noisy measure of the true
+# driving pressure (and set PEEP is not total PEEP), so its coefficient is
+# attenuated and VT/PFVC, computed from a formula without that noise, can absorb
+# signal DP lost. The spline rung does not remove this. An age gradient in the
+# balance between the two is harder to manufacture that way, unless the plateau's
+# error itself changes with age.
+#
 # Every model adjusts for VT/PBW (the delivered dose; DP models must), BMI (DP
 # includes the chest wall), SOFA and SF ratio, the covariates of scripts 04-05.
 # With VT/PBW held, the remaining variation in VT/PFVC is the PBW/PFVC discordance,
@@ -409,8 +416,6 @@ slopes_panel <- age_slopes %>%
   geom_hline(yintercept = 1, linetype = "dashed", colour = "grey50") +
   geom_ribbon(aes(ymin = ratio_lo, ymax = ratio_hi), alpha = 0.15, colour = NA) +
   geom_line(linewidth = 0.9) +
-  geom_rug(data = complete_mechanics, aes(x = age_at_admission), inherit.aes = FALSE,
-           alpha = 0.05, sides = "b") +
   scale_colour_manual(values = predictor_colours) + scale_fill_manual(values = predictor_colours) +
   scale_y_log10() +
   labs(title = "A. Each predictor, the other held fixed, by age",
