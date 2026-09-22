@@ -63,7 +63,8 @@ the height and ventilator data needed to compute PBW, PFVC, and delivered tidal
 volume. Detailed inclusion/exclusion criteria and attrition are produced by
 `01_cohort_identification.R` and logged to the cohort attrition table. The control
 cohort for figure 4 is built the same way: patients who never received advanced
-respiratory support (`nosupport`), analysed unmatched and matched on severity. A
+respiratory support (`nosupport`), with its divergence read at the ventilated cohort's
+severity. A
 noninvasive cohort (`niv`) can be built on request, but it is not a control: NIPPV
 delivers large, unlimited positive-pressure volumes.
 
@@ -164,14 +165,16 @@ what this runner has always done, so existing site instructions still work.
   Creatinine ends at renal replacement of any kind, continuous or intermittent, which
   is modelled as a third competing event; patients with ESRD are censored at day 0.
 - **Arms:** all ventilated patients, and the negative control, patients with no
-  respiratory support, unmatched and matched to the ventilated cohort's severity.
-  The ventilated cohort by baseline SF class is optional:
+  respiratory support. The ventilated cohort by baseline SF class is optional:
   `SF_BANDS="235,315 115,235 0,115"`.
-- **Matching:** each marker's severity floor is set automatically at the ventilated
-  cohort's median anchor score. `SEV_MIN` overrides it.
+- **Severity:** the control is standardised, not matched. Severity cannot confound a
+  PFVC fixed by height, age, sex and race, but it could modify the divergence, so the
+  control keeps every patient, its divergence varies with the marker's severity
+  anchor, and it is read at the ventilated cohort's mean anchor. The severity x
+  divergence term tests whether sicker controls diverge faster.
 
 It builds the control cohort when missing, reuses finished fits, carries on past a
-failed step and lists the failures at the end. By default it runs 26 fits at 2,000
+failed step and lists the failures at the end. By default it runs 18 fits at 2,000
 iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
 7,000-patient site at 15-25 GB of memory, so four at once can need 60-100 GB: lower
 `PAR` on a smaller machine. `ITER` and `BURNIN` lengthen the chains.

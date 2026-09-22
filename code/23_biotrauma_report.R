@@ -161,6 +161,8 @@ population_row <- function(ld) {
   # the dose part's baseline: a patient on a pressor at day 0, at the median day-0 dose
   if ("on_y0" %in% names(ld)) { row$on_y0 <- 1; row$log_y0 <- median(pt$log_y0[pt$on_y0 == 1]) }
   if ("ers_pfvc_0" %in% names(ld)) row$ers_pfvc_0 <- median(pt$ers_pfvc_0, na.rm = TRUE)
+  # the severity-standardised control: zero is the ventilated cohort's mean anchor
+  if ("sev_anchor_c" %in% names(ld)) row$sev_anchor_c <- 0
   row
 }
 

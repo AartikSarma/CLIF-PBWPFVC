@@ -122,6 +122,36 @@ sev_sfx_for <- function(marker) { v <- sev_floor_for(marker); if (is.na(v)) "" e
 sev_tag <- if (!nzchar(SEV_SPEC)) "" else if (SEV_BY_MARKER)
   paste0("sev_", paste0(names(sev_floors), sev_floors, collapse = "_"), "_") else paste0("sev", SEV_SPEC, "_")
 
+# Severity standardisation of the control (PBWPFVC_JM_SEV_CENTER = "creatinine=2.61,
+# platelets=3.05,..."; 2026-09-21, replacing the floor above in figure 4). The
+# objection to an unmatched control is effect modification, not confounding: PFVC is
+# fixed by height, age, sex and race, so illness cannot move it, but a smaller lung
+# might show in the trajectory only under physiological stress, and a healthier
+# control could be null for that reason alone. So the control keeps EVERY patient and
+# its divergence is allowed to vary with the marker's own anchor, which is centred at
+# the VENTILATED cohort's mean anchor (22_biotrauma_fit.R, section 13f):
+#   log_pfvc_sd:vent_day             the control's rate at the ventilated severity;
+#                                    linear in the anchor, so this is also the rate
+#                                    averaged over the ventilated anchor distribution
+#   log_pfvc_sd:vent_day:sev_anchor_c  does the rate grow with severity? (the test of
+#                                    the objection itself)
+# The centre enters the cache names, so a new ventilated cohort refits the control.
+SEV_CENTER_SPEC <- trimws(Sys.getenv("PBWPFVC_JM_SEV_CENTER", ""))
+sev_centers <- if (nzchar(SEV_CENTER_SPEC)) {
+  pairs <- strsplit(trimws(strsplit(SEV_CENTER_SPEC, ",")[[1]]), "=")
+  centers <- setNames(suppressWarnings(as.numeric(vapply(pairs, `[`, "", 2))), trimws(vapply(pairs, `[`, "", 1)))
+  if (anyNA(centers) || any(!nzchar(names(centers)))) stop("PBWPFVC_JM_SEV_CENTER must be 'marker=number,...'; got '", SEV_CENTER_SPEC, "'")
+  centers
+} else numeric()
+if (nzchar(SEV_CENTER_SPEC) && nzchar(SEV_SPEC)) stop("PBWPFVC_JM_SEV_CENTER and PBWPFVC_JM_SEV_MIN are alternatives: set one")
+sev_center_for <- function(marker) {
+  if (!nzchar(SEV_CENTER_SPEC)) return(NA_real_)
+  if (!marker %in% names(sev_centers)) stop("PBWPFVC_JM_SEV_CENTER has no centre for ", marker)
+  sev_centers[[marker]]
+}
+sev_center_sfx_for <- function(marker) { v <- sev_center_for(marker); if (is.na(v)) "" else sprintf("_sevstd%.3f", v) }
+sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
+
 # Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo < SF <= hi on
 # the index day. The strata in use are "235,315", "115,235" and "0,115" (user-specified,
 # 2026-09-18; 315 and 235 are the Rice 2007 SF equivalents of P/F 300 and 200).
@@ -132,5 +162,5 @@ if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) ||
 sf_sfx <- if (nzchar(SF_BAND)) paste0("_sf", sf_band_limits[1], "to", sf_band_limits[2]) else ""
 sf_tag <- if (nzchar(SF_BAND)) paste0("sf", sf_band_limits[1], "to", sf_band_limits[2], "_") else ""
 # both restrictions, in the order every script uses
-restrict_tag <- paste0(sev_tag, sf_tag)
-restrict_sfx_for <- function(marker) paste0(sev_sfx_for(marker), sf_sfx)
+restrict_tag <- paste0(sev_tag, sev_center_tag, sf_tag)
+restrict_sfx_for <- function(marker) paste0(sev_sfx_for(marker), sev_center_sfx_for(marker), sf_sfx)

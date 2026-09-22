@@ -255,11 +255,10 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   #      predicted lungs diverge without a ventilator, the ventilated divergence is not
   #      about the breath; if it grows with baseline hypoxaemia, it tracks the lung.
   #      Arms, left to right:
-  #        No support, unmatched / matched  the negative control (final/controls/); the
-  #                                         matched arm is restricted to the ventilated
-  #                                         cohort's severity (29_run_figure4.sh).
-  #                                         PBWPFVC_FIG_SEV_TAG picks one matched arm when
-  #                                         several floor choices are on disk.
+  #        No support                       the negative control (final/controls/): every
+  #                                         patient, the rate read at the ventilated
+  #                                         cohort's mean severity anchor (the sevstd_
+  #                                         tables; PBWPFVC_JM_SEV_CENTER, 29_run_figure4.sh)
   #        Ventilated, SF <class>           the ventilated cohort by baseline SF
   #        Ventilated, all                  the ventilated cohort (panels A and C)
   #      The noninvasive cohort is deliberately NOT drawn: NIPPV delivers large, unlimited
@@ -269,7 +268,6 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   #      PBWPFVC_FIG_CONTROLS_DIR; with another PBWPFVC_FIG_DIR and none named, no controls.
   ctrl_dir <- Sys.getenv("PBWPFVC_FIG_CONTROLS_DIR",
                          if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) "" else file.path(config$final_root, "controls"))
-  fig_sev_tag <- Sys.getenv("PBWPFVC_FIG_SEV_TAG", "")
   rate_rows <- function(est) est %>%
     filter(block == "longitudinal", model == "main", marker %in% present,
            term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
@@ -297,14 +295,11 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   arms <- list()
   if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
     ctrl_site <- paste0(site_name, "_nosupport")
-    r <- restrictions_in(ctrl_dir, ctrl_site)
-    matched <- r[grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)$", r, perl = TRUE)]
-    if (nzchar(fig_sev_tag)) matched <- intersect(matched, fig_sev_tag)
-    if ("" %in% r) arms[["unmatched"]] <- list(folder = ctrl_dir, restriction = "", site = ctrl_site,
-                                              label = "No support,\nunmatched", rank = 1)
-    for (k in seq_along(matched))
-      arms[[paste0("matched", k)]] <- list(folder = ctrl_dir, restriction = matched[k], site = ctrl_site, rank = 2,
-                                           label = paste0("No support,\nmatched", if (length(matched) > 1) paste0("\n", sub("_$", "", matched[k])) else ""))
+    # only the severity-standardised control: floors and the unstandardised control are
+    # retired designs, and their tables on disk must not reach the figure
+    if ("sevstd_" %in% restrictions_in(ctrl_dir, ctrl_site))
+      arms[["control"]] <- list(folder = ctrl_dir, restriction = "sevstd_", site = ctrl_site,
+                                label = "No support,\nat ventilated\nseverity", rank = 1)
   }
   sf_found <- restrictions_in(fig_dir, site_name)
   sf_found <- sf_found[grepl("^sf[0-9.]+to[0-9.]+_$", sf_found)]

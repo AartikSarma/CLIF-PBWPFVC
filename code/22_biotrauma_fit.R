@@ -171,7 +171,7 @@ N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
                "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd", "^ch_", "vent_day:ch_",
-               "^vtpfvc_c", "vent_day:vtpfvc_c", "vtpfvc_idx:strata\\(strata\\)death",
+               "^vtpfvc_c", "vent_day:vtpfvc_c", "vtpfvc_idx:strata\\(strata\\)death", "sev_anchor_c",
                "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
                "vtpbw_idx:strata\\(strata\\)death")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
@@ -324,6 +324,25 @@ if (nrow(severity_anchor)) {
   message("Severity anchor by marker (index-day SOFA components, own component left out; bands of 10 or more):")
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
                         select(marker, anchor, sev_anchor_from, sev_anchor_to, n_patients, pct, pct_at_or_above_from)), row.names = FALSE)
+}
+# The ventilated cohort's mean anchor per marker, among patients with that marker's
+# baseline: the centre the control's severity-modified divergence is read at
+# (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R). 29_run_figure4.sh passes it on.
+if (config$cohort == "imv") {
+  anchor_mean <- map_dfr(markers, function(mk) {
+    anchor_values <- anchor_of(surv_all %>% filter(!is.na(.data[[mk$y0]])), mk$name)
+    anchor_values <- anchor_values[!is.na(anchor_values)]
+    if (length(anchor_values) < 10L) return(NULL)
+    tibble(marker = mk$name, anchor_mean = mean(anchor_values), anchor_sd = sd(anchor_values),
+           n_patients = length(anchor_values), anchor = anchor_label(mk$name))
+  }) %>% mutate(cohort = config$cohort, site = site_name)
+  mean_path <- file.path(final_dir, paste0("jm_severity_anchor_mean_", h_suffix, "_", site_name, ".csv"))
+  if (nrow(anchor_mean)) {
+    written_now <- anchor_mean$marker   # outside filter(): the file has an anchor_mean column
+    if (file.exists(mean_path))
+      anchor_mean <- bind_rows(read_csv(mean_path, show_col_types = FALSE) %>% filter(!marker %in% written_now), anchor_mean)
+    write_csv(anchor_mean, mean_path)
+  }
 }
 if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
   message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
@@ -484,6 +503,17 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE,
            if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE,
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
+  # severity standardisation (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R): the marker's
+  # own anchor, centred at the ventilated cohort's mean, so log_pfvc_sd:vent_day is
+  # the rate at the ventilated severity
+  sev_center <- sev_center_for(mk$name)
+  if (!is.na(sev_center)) {
+    if (MOD_FORM != "pfvc") stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc form")
+    ld <- ld %>%
+      inner_join(tibble(hospitalization_id = surv_all$hospitalization_id,
+                        sev_anchor_c = anchor_of(surv_all, mk$name) - sev_center), by = "hospitalization_id") %>%
+      filter(!is.na(sev_anchor_c))
+  }
   # centred age for the dose x age interaction: uncentred, the interaction and the
   # dose main effect are collinear (age10 has a large mean relative to its spread)
   age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
@@ -567,7 +597,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"), "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
-                          "l_log_sf", "l_pressor", "np_sofa", if (mk$y %in% PRESSURE_MARKERS) "bmi",
+                          "l_log_sf", "l_pressor", "np_sofa", "sev_anchor_c", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10", "ers_pfvc_0"), names(ld))
   if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
@@ -615,7 +645,14 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # time: linear over the 48-hour grid (the plausible shape there); a 3-df
   # natural spline over the 7-day daily grid
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
-  rhs <- c(time_term, mod_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
+  # the severity terms: the anchor's own level and trend, and its modification of the
+  # size level and of the divergence (the three-way term is the test)
+  sev_terms <- if (!is.na(sev_center)) c("sev_anchor_c", "sev_anchor_c:vent_day",
+                                         "log_pfvc_sd:sev_anchor_c", "log_pfvc_sd:vent_day:sev_anchor_c")
+  if (!is.na(sev_center))
+    stamp(sprintf("severity-standardised: anchor (%s) centred at the ventilated mean %.2f; this cohort's mean %.2f",
+                  anchor_label(mk$name), sev_center, mean(distinct(ld, hospitalization_id, sev_anchor_c)$sev_anchor_c) + sev_center))
+  rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
            if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
@@ -866,7 +903,8 @@ manifest <- map_dfr(results, function(r)
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,
          sev_floor = vapply(marker, sev_floor_for, numeric(1)),
-         sev_anchor = if_else(is.na(sev_floor), NA_character_, vapply(marker, anchor_label, character(1))),
+         sev_center = vapply(marker, sev_center_for, numeric(1)),
+         sev_anchor = if_else(is.na(sev_floor) & is.na(sev_center), NA_character_, vapply(marker, anchor_label, character(1))),
          # "115 to 235", not "115,235": a CSV reader takes the comma for a thousands separator
          sf_band = if (nzchar(SF_BAND)) paste(sf_band_limits, collapse = " to ") else NA_character_, site = site_name)
 estimates  <- map_dfr(results, "estimates")

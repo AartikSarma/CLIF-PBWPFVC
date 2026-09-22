@@ -11,11 +11,14 @@
 #
 #   ventilated                 the analytic cohort
 #   ventilated, SF band        the same, within a baseline SF class (PBWPFVC_JM_SF_BAND)
-#   ventilated, anchor floor   the same, above the severity floor (PBWPFVC_JM_SEV_MIN)
-#   no support                 the negative control: no positive pressure, no strain
-#   no support, anchor floor   the control restricted to the ventilated severity range
-#   noninvasive                NOT a control: uncontrolled tidal volumes, so a point on
-#                              the strain gradient between the other two
+#   no support                 the negative control: no positive pressure, no strain.
+#                              Every patient is kept, and the divergence is read at
+#                              the ventilated cohort's severity (PBWPFVC_JM_SEV_CENTER,
+#                              the "sevstd_" tables); the severity x divergence term
+#                              says whether sicker controls diverge faster.
+# These are the arms 29_run_figure4.sh fits. Tables from designs it no longer runs
+# (severity floors, the unstandardised control, the noninvasive cohort, which is not a
+# control) are ignored even when present on disk, so an old run cannot add an arm.
 #
 # A control arm is informative only if its marker MOVES. The movement panel (mean
 # change from baseline by day, from jm_movement_*) is therefore read before the
@@ -51,35 +54,27 @@ RHAT_GATE <- 1.1
 final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
-cohort_folders <- tibble(cohort = c("imv", "niv", "nosupport"),
-                         cohort_label = c("Ventilated", "Noninvasive", "No support"),
-                         site = c(base_site, paste0(base_site, "_niv"), paste0(base_site, "_nosupport")))
+# the arm tags of the current design, per cohort (regular expressions on the restriction tag)
+cohort_folders <- tibble(cohort = c("imv", "nosupport"),
+                         cohort_label = c("Ventilated", "No support, at ventilated severity"),
+                         site = c(base_site, paste0(base_site, "_nosupport")),
+                         arm_pattern = c("^(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_$"))
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")
-arms <- pmap_dfr(cohort_folders, function(cohort, cohort_label, site) {
+arms <- pmap_dfr(cohort_folders, function(cohort, cohort_label, site, arm_pattern) {
   folder <- if (cohort == "imv") final_dir else file.path(config$final_root, "controls")
   found <- list.files(folder, pattern = paste0("^jm_estimates_.*", file_stub(site), "$"))
   restriction <- sub(paste0(file_stub(site), "$"), "", sub("^jm_estimates_", "", found))
-  # only the cohort-restriction tags; the rrtcause_ and offset_ variants are other analyses
-  is_arm <- grepl("^(sev[0-9.]+_|sev(_[a-z_]+?[0-9.]+)+_)?(sf[0-9.]+to[0-9.]+_)?$", restriction, perl = TRUE)
-  tibble(cohort, cohort_label, site, folder, restriction = restriction[is_arm])
+  # the rrtcause_ and offset_ variants are other analyses, not arms
+  tibble(cohort, cohort_label, site, folder, restriction = restriction[grepl(arm_pattern, restriction)])
 })
 if (!nrow(arms)) stop("no jm_estimates_*", MOD_FORM, "_", h_suffix, "_* tables found for ", base_site)
 arms <- arms %>%
-  mutate(sev_only = sub("sf[0-9.]+to[0-9.]+_$", "", restriction),      # the SF band is labelled separately
-         sev_part = if_else(grepl("^sev_", restriction),
-                            # per-marker floors, "sev_bilirubin1_platelets2_" -> "bilirubin >= 1, platelets >= 2"
-                            sev_only %>% str_remove("^sev_") %>%
-                              str_replace_all("([a-z_]+?)([0-9.]+)(_|$)", "\\1 >= \\2, ") %>% str_remove(", $"),
-                            paste0("anchor >= ", str_match(restriction, "^sev([0-9.]+)_")[, 2])),
-         sev_part = if_else(grepl("^sev", restriction), sev_part, NA_character_),
-         sf_part  = str_match(restriction, "sf([0-9.]+)to([0-9.]+)_")[, 2:3, drop = FALSE] %>%
+  mutate(sf_part  = str_match(restriction, "sf([0-9.]+)to([0-9.]+)_")[, 2:3, drop = FALSE] %>%
            apply(1, function(limits) if (anyNA(limits)) NA_character_ else
              if (as.numeric(limits[1]) == 0) paste0("SF <= ", limits[2]) else paste0("SF ", limits[1], "-", limits[2])),
-         arm = paste0(cohort_label,
-                      if_else(is.na(sf_part), "", paste0(", ", sf_part)),
-                      if_else(is.na(sev_part), "", paste0(", matched (", sev_part, ")"))))
+         arm = paste0(cohort_label, if_else(is.na(sf_part), "", paste0(", ", sf_part))))
 message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site, "): ", nrow(arms), " arms ===")
 message(paste0("  ", arms$arm, collapse = "\n"))
 
@@ -106,9 +101,15 @@ manifest  <- each_arm("manifest")
 movement  <- each_arm("movement")
 
 # ---- the comparison table: divergence and level per SD of log PFVC, with what qualifies them
+# sev_modification = the control's log_pfvc_sd:vent_day:sev_anchor_c: the change in the
+# divergence per point of the severity anchor (NA in arms without it)
+components <- function(term) vapply(strsplit(term, ":"), function(p) paste(sort(p), collapse = ":"), character(1))
+term_quantity <- c(log_pfvc_sd = "level", "log_pfvc_sd:vent_day" = "divergence",
+                   "log_pfvc_sd:sev_anchor_c:vent_day" = "sev_modification")
 size_terms <- estimates %>%
-  filter(model == "main", block == "longitudinal", term %in% c("log_pfvc_sd", "log_pfvc_sd:vent_day")) %>%
-  mutate(quantity = if_else(term == "log_pfvc_sd", "level", "divergence")) %>%
+  filter(model == "main", block == "longitudinal") %>%
+  mutate(quantity = unname(term_quantity[components(term)])) %>%
+  filter(!is.na(quantity)) %>%
   select(arm, cohort, marker, adjustment, any_of("creatinine_model"), quantity, estimate, lo, hi, rhat) %>%
   pivot_wider(names_from = quantity, values_from = c(estimate, lo, hi, rhat), names_glue = "{quantity}_{.value}")
 # Movement is summarised over ALL days, not the last one: platelets fall and recover
@@ -127,7 +128,7 @@ last_movement <- if (nrow(movement)) movement %>%
 comparison <- size_terms %>%
   left_join(manifest %>% filter(model == "main") %>%
               select(arm, marker, adjustment, n_patients, n_deaths, n_competing = n_extubations, status,
-                     hazard_rhat, any_of(c("sev_floor", "sev_anchor", "sf_band", "n_iter"))),
+                     hazard_rhat, any_of(c("sev_center", "sev_anchor", "sf_band", "n_iter"))),
             by = c("arm", "marker", "adjustment")) %>%
   left_join(last_movement, by = c("arm", "marker", "adjustment")) %>%
   mutate(divergence_converged = divergence_rhat <= RHAT_GATE,
@@ -144,6 +145,9 @@ print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
                       transmute(marker, arm, n_patients, n_deaths, divergence = signif(divergence_estimate, 3),
                                 lo = signif(divergence_lo, 3), hi = signif(divergence_hi, 3),
                                 rhat = round(divergence_rhat, 2), hazard_rhat = round(hazard_rhat, 2),
+                                sev_mod = if ("sev_modification_estimate" %in% names(comparison)) signif(sev_modification_estimate, 3) else NA_real_,
+                                sev_mod_lo = if ("sev_modification_lo" %in% names(comparison)) signif(sev_modification_lo, 3) else NA_real_,
+                                sev_mod_hi = if ("sev_modification_hi" %in% names(comparison)) signif(sev_modification_hi, 3) else NA_real_,
                                 peak_change = signif(movement_peak_mean_change, 3), peak_day = movement_peak_day,
                                 mean_abs_change = signif(movement_mean_abs_change, 3))), row.names = FALSE)
 

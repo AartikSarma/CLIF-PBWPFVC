@@ -10,18 +10,24 @@
 #             as a third competing cause; ESRD censored at day 0), vasopressor dose on
 #             pressor days, oxygen saturation index
 #   arms      ventilated, all patients           (panels A, B and C)
-#             no respiratory support, unmatched  (panel B, the negative control)
-#             no respiratory support, matched to the ventilated cohort's severity
+#             no respiratory support             (panel B, the negative control): every
+#                                                patient, the divergence read at the
+#                                                ventilated cohort's mean severity
 #             optional: ventilated by baseline SF class (SF_BANDS; off by default)
+#   The control is standardised, not matched (2026-09-21): severity cannot confound a
+#   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
+#   control's divergence varies with its severity anchor and is read at the ventilated
+#   mean (20_biotrauma_grid.R, PBWPFVC_JM_SEV_CENTER). No control patient is discarded,
+#   and the severity x divergence term tests whether sicker controls diverge faster.
 #   each fit adjusted and unadjusted for age, sex and race
 #
 # Steps, each logged to output/{site}_output/logs/figure4_{stamp}/:
 #   1 build     scripts 01-03 for the ventilated cohort and the no-support cohort,
 #               each only if its derived tables are missing (FORCE_BUILD=1 rebuilds)
 #   2 panels    the 7-day panel of both cohorts
-#   3 anchors   the severity-anchor distributions (final/injury/jm_severity_anchor_*)
-#   4 floors    each control marker's severity floor = the ventilated cohort's median
-#               anchor score (SEV_MIN overrides, e.g. "creatinine=2,platelets=3,...")
+#   3 anchors   the severity-anchor distributions of both cohorts, and the ventilated
+#               mean anchor per marker (final/injury/jm_severity_anchor_mean_*)
+#   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm
 #   6 figure    27_control_comparison.R, then 24_biotrauma_figures.R
 # Fits already on disk with the same chain settings are reused, so a rerun after a
@@ -34,14 +40,14 @@
 # Usage (from anywhere; the script moves to the repo root):
 #   caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 #   bash code/29_run_figure4.sh --dry-run
-# Site default (2026-09-21): 26 fits at 2000 / 500 iterations, four at a time. At
+# Site default (2026-09-21): 18 fits at 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
 # hazard blocks did not converge at any length tried.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
 #   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
 #   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
-#   site runs SF_BANDS="235,315 115,235 0,115"), SEV_MIN, FORCE_BUILD, FORCE_PANEL.
+#   site runs SF_BANDS="235,315 115,235 0,115"), FORCE_BUILD, FORCE_PANEL.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 set -uo pipefail
@@ -51,7 +57,6 @@ MARKERS=${MARKERS:-osi,pressor_dose,platelets,bilirubin}   # creatinine runs on 
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
 CREATININE=${CREATININE:-1}
 SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
-SEV_MIN=${SEV_MIN:-}
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-4}
 FORCE_BUILD=${FORCE_BUILD:-0}
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
@@ -138,51 +143,34 @@ ANCHOR_MARKERS="creatinine,${CONTROL_MARKERS}"
 run_step anchors_ventilated with_cohort imv       env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" Rscript code/22_biotrauma_fit.R
 run_step anchors_nosupport  with_cohort nosupport env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" Rscript code/22_biotrauma_fit.R
 
-# ---- 4 floors: the ventilated median anchor score per marker, unless SEV_MIN is given
-FLOOR_FILE="${LOG_DIR}/severity_floors.txt"
+# ---- 4 centres: the ventilated cohort's mean anchor per control marker, where each
+#      control fit reads its divergence (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R)
+CENTER_FILE="$ROOT/final/injury/jm_severity_anchor_mean_7d_${BASE_SITE}.csv"
 if [[ $DRY == 1 ]]; then
-  echo "[dry] floors: ventilated median of final/injury/jm_severity_anchor_7d_${BASE_SITE}.csv per marker (${ANCHOR_MARKERS}), unless SEV_MIN"
-  SEV_SPEC="creatinine=M,platelets=M,..."; SEV_TAG="sev_..._"
+  echo "[dry] centres: ventilated mean anchor per marker (${ANCHOR_MARKERS}) from ${CENTER_FILE}"
+  SEV_CENTER="creatinine=M,platelets=M,..."
 else
-  SEV_MIN="$SEV_MIN" ANCHOR_MARKERS="$ANCHOR_MARKERS" FLOOR_FILE="$FLOOR_FILE" \
-    ANCHOR_FILE="$ROOT/final/injury/jm_severity_anchor_7d_${BASE_SITE}.csv" Rscript -e '
-    suppressMessages(library(readr))
-    markers <- strsplit(Sys.getenv("ANCHOR_MARKERS"), ",")[[1]]
-    spec <- Sys.getenv("SEV_MIN")
-    if (!nzchar(spec)) {
-      a <- read_csv(Sys.getenv("ANCHOR_FILE"), show_col_types = FALSE)
-      # the median band: the highest band at or above which half the ventilated patients sit
-      floors <- vapply(markers, function(m) {
-        d <- a[a$marker == m, ]
-        if (!nrow(d)) stop("no anchor distribution for ", m, " in ", Sys.getenv("ANCHOR_FILE"))
-        max(d$sev_anchor_from[d$pct_at_or_above_from >= 50])
-      }, numeric(1))
-      spec <- paste0(names(floors), "=", floors, collapse = ",")
-    }
-    pairs <- strsplit(strsplit(spec, ",")[[1]], "=")
-    floors <- setNames(as.numeric(vapply(pairs, `[`, "", 2)), vapply(pairs, `[`, "", 1))
-    floors <- floors[order(names(floors))]
-    tag <- paste0("sev_", paste0(names(floors), floors, collapse = "_"), "_")
-    writeLines(c(spec, tag), Sys.getenv("FLOOR_FILE"))' > "${LOG_DIR}/floors.log" 2>&1
-  if [[ ! -s "$FLOOR_FILE" ]]; then
-    echo "floors could not be set (see ${LOG_DIR}/floors.log); the matched control arm is skipped"; FAILED+=("floors")
-    SEV_SPEC=""; SEV_TAG=""
+  # the file is written by anchors_ventilated; one "marker=mean" pair per control marker
+  SEV_CENTER=$(awk -F, -v want=",${ANCHOR_MARKERS}," 'NR > 1 && index(want, "," $1 ",") { printf "%s%s=%.4f", sep, $1, $2; sep = "," }' "$CENTER_FILE" 2>/dev/null)
+  n_found=$(tr ',' '\n' <<< "$SEV_CENTER" | grep -c '=')
+  n_want=$(tr ',' '\n' <<< "$ANCHOR_MARKERS" | grep -c .)
+  if [[ $n_found != "$n_want" ]]; then
+    echo "severity centres missing for some of ${ANCHOR_MARKERS} (found '${SEV_CENTER}' in ${CENTER_FILE}); the control arm is skipped"
+    FAILED+=("centres"); SEV_CENTER=""
   else
-    SEV_SPEC=$(sed -n 1p "$FLOOR_FILE"); SEV_TAG=$(sed -n 2p "$FLOOR_FILE")
-    echo "[$(date +%H:%M:%S)] severity floors (ventilated median anchor${SEV_MIN:+, from SEV_MIN}): ${SEV_SPEC}"
+    echo "[$(date +%H:%M:%S)] severity centres (ventilated mean anchor): ${SEV_CENTER}"
   fi
 fi
 
 # ---- 5 fits, arm by arm
 fit_arm ventilated imv "$MARKERS"
 for BAND in $SF_BANDS; do fit_arm "ventilated_sf${BAND/,/to}" imv "$MARKERS" PBWPFVC_JM_SF_BAND="$BAND"; done
-fit_arm nosupport nosupport "$CONTROL_MARKERS"
-[[ -n "$SEV_SPEC" ]] && fit_arm nosupport_matched nosupport "$CONTROL_MARKERS" PBWPFVC_JM_SEV_MIN="$SEV_SPEC"
+[[ -n "$SEV_CENTER" ]] && fit_arm nosupport nosupport "$CONTROL_MARKERS" PBWPFVC_JM_SEV_CENTER="$SEV_CENTER"
 
 # ---- 6 comparison table and the figure
 FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi"
 run_step comparison with_cohort imv Rscript code/27_control_comparison.R
-run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" PBWPFVC_FIG_SEV_TAG="$SEV_TAG" \
+run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
   Rscript code/24_biotrauma_figures.R
 
 if [[ $DRY == 0 ]]; then
