@@ -174,7 +174,9 @@ what this runner has always done, so existing site instructions still work.
   divergence term tests whether sicker controls diverge faster.
 
 It builds the control cohort when missing, reuses finished fits, carries on past a
-failed step and lists the failures at the end. By default it runs 18 fits at 2,000
+failed step and lists the failures at the end. After the figure it fits one companion, platelets against VT/PFVC at the same
+VT/PBW (`VTPFVC_MARKERS`, empty skips it; tables and figure tagged `vtpfvc`).
+By default it runs 20 fits at 2,000
 iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
 7,000-patient site at 15-25 GB of memory, so four at once can need 60-100 GB: lower
 `PAR` on a smaller machine. `ITER` and `BURNIN` lengthen the chains.
