@@ -475,64 +475,19 @@ if (nrow(ap)) {
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_pressor_", tag, ".pdf")), p4, width = 9, height = 3.5)
 }
 
-# ---- 5. the checks behind figure 4's causal reading (pfvc form, unrestricted run)
-#   A  before vs after intubation: the lung-size divergence in the week before the first
-#      IMV record (28_pre_period_placebo.R, a mixed model) beside the joint model's rate
-#      after it. If the ventilator drives the divergence, the pre-period is flat.
-#   B  ventilated vs no support: the ventilated rate, the no-support control read at the
+# ---- 5. the check behind figure 4's causal reading (pfvc form, unrestricted run):
+#      ventilated vs no support: the ventilated rate, the no-support control read at the
 #      ventilated severity, and their difference (27_control_comparison.R), all on the
 #      ventilated cohort's unit (per SD of its log PFVC).
-# Both panels are drawn toward injury: above zero = a smaller predicted lung does worse.
-# A marker whose estimates are missing is left out of its panel, not drawn as zero.
+# Drawn toward injury: above zero = a smaller predicted lung does worse.
+# A marker whose estimates are missing is left out of the panel, not drawn as zero.
 if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
   did_tbl <- read_if(file.path(fig_dir, paste0("jm_control_did_pfvc_", h_suffix, "_", site_name, ".csv")))
-  pre_tbl <- read_if(file.path(fig_dir, paste0("jm_pre_placebo_", h_suffix, "_", site_name, ".csv")))
   toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
   check_order <- intersect(c("platelets", "bilirubin", "creatinine", "pressor_dose"),
-                           unique(c(did_tbl$marker, pre_tbl$marker)))
+                           unique(did_tbl$marker))
   check_label <- function(m) factor(lab[m], lab[check_order])
   checks <- list()
-  if (!is.null(pre_tbl) && any(pre_tbl$status == "fitted")) {
-    pre_rows <- pre_tbl %>% filter(status == "fitted") %>%
-      transmute(marker, adjustment, s = toward_injury(marker), ok = TRUE,
-                period = "before intubation\n(7 days, mixed model)", e = pre_estimate, l = pre_lo, h = pre_hi) %>%
-      bind_rows(pre_tbl %>% filter(status == "fitted", !is.na(post_estimate)) %>%
-                  transmute(marker, adjustment, s = toward_injury(marker), ok = is.finite(post_rhat) & post_rhat <= 1.1,
-                            period = "after intubation\n(joint model)", e = post_estimate, l = post_lo, h = post_hi)) %>%
-      mutate(e = s * e, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h),
-             period = factor(period, c("before intubation\n(7 days, mixed model)", "after intubation\n(joint model)")),
-             marker_lab = check_label(marker))
-    checks$pre <- ggplot(pre_rows, aes(period, e, colour = adjustment)) +
-      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
-      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
-      geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.5)) +
-      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
-      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-      scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
-      labs(title = "Before and after intubation",
-           subtitle = paste0("before: patients with 2+ lab days in the week before intubation; after: the ventilated cohort.",
-                             "\nA pre-period at zero says the divergence starts with ventilation"),
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
-  }
-  stk_tbl <- read_if(file.path(fig_dir, paste0("jm_pre_stacked_", h_suffix, "_", site_name, ".csv")))
-  if (!is.null(stk_tbl) && any(stk_tbl$status == "fitted")) {
-    stk_rows <- stk_tbl %>% filter(status == "fitted") %>%
-      rename(l = lo, h = hi) %>%   # flipped from the originals: mutate() would compute hi from the new lo
-      mutate(s = toward_injury(marker), e = s * estimate, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h),
-             quantity = factor(recode(quantity, before = "before\nintubation", after = "after\nintubation",
-                                      change = "change at\nintubation"),
-                               c("before\nintubation", "after\nintubation", "change at\nintubation")),
-             marker_lab = check_label(marker))
-    checks$stacked <- ggplot(stk_rows, aes(quantity, e, colour = adjustment)) +
-      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
-      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
-      geom_point(size = 2.2, position = position_dodge(width = 0.5)) +
-      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
-      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-      labs(title = "The same patients before and after intubation (stacked mixed model)",
-           subtitle = "patients with 2+ lab days on each side; the change at intubation is the within-patient test",
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
-  }
   if (!is.null(did_tbl) && nrow(did_tbl)) {
     did_rows <- did_tbl %>%
       transmute(marker, adjustment, s = toward_injury(marker),
@@ -566,6 +521,6 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
              theme(legend.position = "top", axis.text.x = element_text(size = 8)),
            width = 3 + 2.6 * max(1, length(check_order)), height = 1.5 + 3.6 * length(checks))
     message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
-  } else message("24_biotrauma_figures: no DiD or placebo tables for ", site_name, "; checks figure skipped")
+  } else message("24_biotrauma_figures: no DiD table for ", site_name, "; checks figure skipped")
 }
 message("24_biotrauma_figures: ", n_distinct(est$marker), " markers, ", n_distinct(est$estimator), " estimators -> ", fig_dir)

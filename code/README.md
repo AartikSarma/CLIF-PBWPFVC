@@ -30,7 +30,6 @@ to change; that stops once sites have returned `final/` folders.
 | `25_injury_at_horizon.R` | figure 4, robustness | Fixed-horizon comparator among survivors: what the joint model is compared against | `injury_` |
 | `26_quick_lme.R` | figure 4, robustness | The longitudinal submodel alone, without the death correction | `quick_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control) | `jm_control_comparison_`, `jm_control_movement_`, `jm_control_did_` |
-| `28_pre_period_placebo.R` | figure 4 | The pre-trend check: the lung-size divergence in the days before the first IMV record (panel `jm_pre_7d`, from `21`), beside the joint model's post-intubation rate, and the stacked within-patient model (the change in divergence at intubation, same patients); a runner step | `jm_pre_placebo_`, `jm_pre_stacked_` |
 | `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity | |
 | `29_run_biotrauma.sh` | figure 4, robustness | Runner for the 48-hour fits and the comparators 25 and 26; not in the pipeline | |
 
