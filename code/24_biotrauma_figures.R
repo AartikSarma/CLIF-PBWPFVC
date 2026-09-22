@@ -297,9 +297,19 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     ctrl_site <- paste0(site_name, "_nosupport")
     # only the severity-standardised control: floors and the unstandardised control are
     # retired designs, and their tables on disk must not reach the figure
-    if ("sevstd_" %in% restrictions_in(ctrl_dir, ctrl_site))
-      arms[["control"]] <- list(folder = ctrl_dir, restriction = "sevstd_", site = ctrl_site,
-                                label = "No support,\nat ventilated\nseverity", rank = 1)
+    # its rate is per SD of log PFVC in the CONTROL's panel; on the figure it is put on
+    # the ventilated cohort's unit (the SDs from 22_biotrauma_fit.R's jm_scale_* tables),
+    # and without both SDs the control is not drawn
+    scale_v <- read_if(file.path(fig_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
+    scale_c <- read_if(file.path(ctrl_dir, paste0("jm_scale_", h_suffix, "_", ctrl_site, ".csv")))
+    if ("sevstd_" %in% restrictions_in(ctrl_dir, ctrl_site)) {
+      if (is.null(scale_v) || is.null(scale_c) || SIZE_EX != "log_pfvc_sd")
+        message("24_biotrauma_figures: control arm not drawn: its unit cannot be put on the ventilated cohort's ",
+                "(jm_scale_* missing, or the form is not pfvc)")
+      else arms[["control"]] <- list(folder = ctrl_dir, restriction = "sevstd_", site = ctrl_site,
+                                     label = "No support,\nat ventilated\nseverity", rank = 1,
+                                     unit_factor = scale_v$sd_log_pfvc / scale_c$sd_log_pfvc)
+    }
   }
   sf_found <- restrictions_in(fig_dir, site_name)
   sf_found <- sf_found[grepl("^sf[0-9.]+to[0-9.]+_$", sf_found)]
@@ -312,7 +322,9 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   arm_rate <- map_dfr(arms, function(a) {
     est <- read_arm(a$folder, a$restriction, a$site)
     if (is.null(est)) return(NULL)
-    rate_rows(est) %>% mutate(arm = a$label, strain_rank = a$rank)
+    f <- if (is.null(a$unit_factor)) 1 else a$unit_factor   # the ventilated cohort's unit
+    rate_rows(est %>% mutate(estimate = estimate * f, lo = lo * f, hi = hi * f)) %>%
+      mutate(arm = a$label, strain_rank = a$rank)
   })
   all_label <- if (nrow(arm_rate)) "Ventilated,\nall" else "Ventilated"
   rate_arms <- bind_rows(arm_rate, rate %>% select(-marker_lab, -s) %>% mutate(arm = all_label, strain_rank = 9)) %>%
@@ -461,5 +473,80 @@ if (nrow(ap)) {
          x = paste0("odds ratio ", unit_lower, " (log scale)"), y = NULL) +
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_pressor_", tag, ".pdf")), p4, width = 9, height = 3.5)
+}
+
+# ---- 5. the checks behind figure 4's causal reading (pfvc form, unrestricted run)
+#   A  before vs after intubation: the lung-size divergence in the week before the first
+#      IMV record (28_pre_period_placebo.R, a mixed model) beside the joint model's rate
+#      after it. If the ventilator drives the divergence, the pre-period is flat.
+#   B  ventilated vs no support: the ventilated rate, the no-support control read at the
+#      ventilated severity, and their difference (27_control_comparison.R), all on the
+#      ventilated cohort's unit (per SD of its log PFVC).
+# Both panels are drawn toward injury: above zero = a smaller predicted lung does worse.
+# A marker whose estimates are missing is left out of its panel, not drawn as zero.
+if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
+  did_tbl <- read_if(file.path(fig_dir, paste0("jm_control_did_pfvc_", h_suffix, "_", site_name, ".csv")))
+  pre_tbl <- read_if(file.path(fig_dir, paste0("jm_pre_placebo_", h_suffix, "_", site_name, ".csv")))
+  toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
+  check_order <- intersect(c("platelets", "bilirubin", "creatinine", "pressor_dose"),
+                           unique(c(did_tbl$marker, pre_tbl$marker)))
+  check_label <- function(m) factor(lab[m], lab[check_order])
+  checks <- list()
+  if (!is.null(pre_tbl) && any(pre_tbl$status == "fitted")) {
+    pre_rows <- pre_tbl %>% filter(status == "fitted") %>%
+      transmute(marker, adjustment, s = toward_injury(marker), ok = TRUE,
+                period = "before intubation\n(7 days, mixed model)", e = pre_estimate, l = pre_lo, h = pre_hi) %>%
+      bind_rows(pre_tbl %>% filter(status == "fitted", !is.na(post_estimate)) %>%
+                  transmute(marker, adjustment, s = toward_injury(marker), ok = is.finite(post_rhat) & post_rhat <= 1.1,
+                            period = "after intubation\n(joint model)", e = post_estimate, l = post_lo, h = post_hi)) %>%
+      mutate(e = s * e, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h),
+             period = factor(period, c("before intubation\n(7 days, mixed model)", "after intubation\n(joint model)")),
+             marker_lab = check_label(marker))
+    checks$pre <- ggplot(pre_rows, aes(period, e, colour = adjustment)) +
+      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
+      geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.5)) +
+      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
+      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+      scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
+      labs(title = "Before and after intubation",
+           subtitle = paste0("before: patients with 2+ lab days in the week before intubation; after: the ventilated cohort.",
+                             "\nA pre-period at zero says the divergence starts with ventilation"),
+           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+  }
+  if (!is.null(did_tbl) && nrow(did_tbl)) {
+    did_rows <- did_tbl %>%
+      transmute(marker, adjustment, s = toward_injury(marker),
+                v_e = divergence_estimate_ventilated, v_sd = divergence_sd_ventilated, v_ok = divergence_rhat_ventilated <= 1.1,
+                c_e = divergence_estimate_control, c_sd = divergence_sd_control, c_ok = divergence_rhat_control <= 1.1,
+                d_e = did_estimate, d_lo = did_lo, d_hi = did_hi, d_ok = both_converged) %>%
+      { bind_rows(
+          transmute(., marker, adjustment, s, arm = "ventilated", e = v_e, l = v_e - 1.96 * v_sd, h = v_e + 1.96 * v_sd, ok = v_ok),
+          transmute(., marker, adjustment, s, arm = "no support\n(at ventilated severity)", e = c_e, l = c_e - 1.96 * c_sd, h = c_e + 1.96 * c_sd, ok = c_ok),
+          transmute(., marker, adjustment, s, arm = "difference\n(ventilated - no support)", e = d_e, l = d_lo, h = d_hi, ok = d_ok)) } %>%
+      mutate(e = s * e, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h), ok = coalesce(ok, FALSE),
+             arm = factor(arm, c("ventilated", "no support\n(at ventilated severity)", "difference\n(ventilated - no support)")),
+             marker_lab = check_label(marker))
+    checks$did <- ggplot(did_rows, aes(arm, e, colour = adjustment)) +
+      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
+      geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.5)) +
+      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
+      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+      scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
+      labs(title = "With and without a ventilator (difference-in-differences)",
+           subtitle = "the control keeps every patient and is read at the ventilated cohort's severity and unit",
+           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+  }
+  if (length(checks)) {
+    ggsave(file.path(fig_dir, paste0("biotrauma_fig_checks_", tag, ".pdf")),
+           wrap_plots(checks, ncol = 1) +
+             plot_annotation(tag_levels = "A",
+                             title = paste0(site_name, ": is the lung-size divergence the ventilator's?"),
+                             subtitle = "95% intervals; hollow points did not converge (R-hat > 1.1)") &
+             theme(legend.position = "top", axis.text.x = element_text(size = 8)),
+           width = 3 + 2.6 * max(1, length(check_order)), height = 1.5 + 3.6 * length(checks))
+    message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
+  } else message("24_biotrauma_figures: no DiD or placebo tables for ", site_name, "; checks figure skipped")
 }
 message("24_biotrauma_figures: ", n_distinct(est$marker), " markers, ", n_distinct(est$estimator), " estimators -> ", fig_dir)

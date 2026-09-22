@@ -30,8 +30,9 @@
 #   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm
 #   6 figure    27_control_comparison.R (with the difference-in-differences), then
-#               24_biotrauma_figures.R, then 28_pre_period_placebo.R (the pre-trend
-#               check, PLACEBO_MARKERS: platelets, creatinine, bilirubin)
+#               28_pre_period_placebo.R (the pre-trend check, PLACEBO_MARKERS: platelets,
+#               creatinine, bilirubin), then 24_biotrauma_figures.R: figure 4 and the
+#               checks figure (biotrauma_fig_checks_*: placebo and DiD)
 #   7 VT/PFVC   the companion: every marker against VT/PFVC at the same VT/PBW, creatinine
 #               with dialysis as a third cause (VTPFVC_MARKERS; empty skips), tagged vtpfvc
 # Fits already on disk with the same chain settings are reused, so a rerun after a
@@ -179,13 +180,14 @@ for BAND in $SF_BANDS; do fit_arm "ventilated_sf${BAND/,/to}" imv "$MARKERS" PBW
 # ---- 6 comparison table and the figure
 FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi"
 run_step comparison with_cohort imv Rscript code/27_control_comparison.R
-run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
-  Rscript code/24_biotrauma_figures.R
 # the pre-trend check of the difference-in-differences: the lung-size divergence in the days
-# before intubation, beside the joint model's post-intubation rate (labs only; a mixed model)
+# before intubation, beside the joint model's post-intubation rate (labs only; a mixed model).
+# Before the figure, which draws it with the DiD (biotrauma_fig_checks_*).
 if [[ " ${FAILED[*]-} " != *" panel_imv "* ]]; then
   run_step placebo with_cohort imv env PBWPFVC_JM_MARKERS="$PLACEBO_MARKERS" Rscript code/28_pre_period_placebo.R
 fi
+run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
+  Rscript code/24_biotrauma_figures.R
 
 # ---- 7 companion: the same question told the reader's way round (22_biotrauma_fit.R,
 #      form vtpfvc): at the same mean VT/PBW, does a patient receiving more VT/PFVC (percent

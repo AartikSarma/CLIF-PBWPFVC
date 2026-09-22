@@ -151,9 +151,27 @@ if (nrow(movement)) write_csv(movement %>% filter(model == "main"),
 # would shape the marker's trajectory equally in both cohorts at equal severity.
 # The cohorts are different patients, so their posteriors are independent and the
 # difference's SD is the root sum of squares (normal approximation to the posterior).
+# Units: each cohort's rate is per SD of log PFVC in ITS OWN panel (22 writes the SDs
+# to jm_scale_*), so the control's rate is put on the ventilated cohort's unit before
+# the subtraction: per ventilated SD = per control SD x (SD ventilated / SD control).
+# Without both SDs there is no difference-in-differences, never one that assumes them equal.
+did_path <- file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv"))
+scale_vent <- file.path(final_dir, paste0("jm_scale_", h_suffix, "_", base_site, ".csv"))
+scale_ctrl <- file.path(config$final_root, "controls", paste0("jm_scale_", h_suffix, "_", base_site, "_nosupport.csv"))
+to_vent_sd <- if (file.exists(scale_vent) && file.exists(scale_ctrl))
+  read_csv(scale_vent, show_col_types = FALSE)$sd_log_pfvc / read_csv(scale_ctrl, show_col_types = FALSE)$sd_log_pfvc else NA_real_
+if (is.na(to_vent_sd)) {
+  message("--- no difference-in-differences: the SD of log PFVC is missing for ",
+          paste(c(if (!file.exists(scale_vent)) "the ventilated cohort", if (!file.exists(scale_ctrl)) "the control"), collapse = " and "),
+          " (rerun 22_biotrauma_fit.R, e.g. its anchor step, for that cohort)")
+  unlink(did_path)
+}
 did <- comparison %>%
-  filter(arm %in% c("Ventilated", "No support, at ventilated severity")) %>%
-  mutate(side = if_else(cohort == "imv", "ventilated", "control")) %>%
+  filter(!is.na(to_vent_sd), arm %in% c("Ventilated", "No support, at ventilated severity")) %>%
+  mutate(side = if_else(cohort == "imv", "ventilated", "control"),
+         # the control on the ventilated cohort's unit (the ventilated rows are multiplied by 1)
+         unit_factor = if_else(side == "control", to_vent_sd, 1),
+         divergence_estimate = divergence_estimate * unit_factor, divergence_sd = divergence_sd * unit_factor) %>%
   select(marker, adjustment, side, divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model")) %>%
   pivot_wider(names_from = side, values_from = c(divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model"))) %>%
   filter(!is.na(divergence_estimate_ventilated), !is.na(divergence_estimate_control)) %>%
@@ -162,9 +180,10 @@ did <- comparison %>%
          did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
          p_did_gt0 = pnorm(did_estimate / did_sd),
          both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
-         unit = "log marker per day per SD of log PFVC", form = MOD_FORM, panel = h_suffix, site = base_site)
+         control_to_ventilated_sd = to_vent_sd,
+         unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
 if (nrow(did)) {
-  write_csv(mask_small_counts(did), file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv")))
+  write_csv(mask_small_counts(did), did_path)
   message("--- difference-in-differences: ventilated minus no-support divergence (log marker per day per SD of log PFVC)")
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),

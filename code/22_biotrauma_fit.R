@@ -344,6 +344,16 @@ if (config$cohort == "imv") {
     write_csv(anchor_mean, mean_path)
   }
 }
+# The unit of every PFVC estimate: log_pfvc_sd is log PFVC standardised within THIS
+# cohort's panel (21_biotrauma_panel.R), so a rate "per SD" is in this cohort's own
+# unit. The SD goes to an aggregate table so the control can be put on the ventilated
+# cohort's unit (27_control_comparison.R, 24_biotrauma_figures.R) and the sites on a
+# common one in pooling.
+scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = sd(surv_all$log_pfvc, na.rm = TRUE),
+                    mean_log_pfvc = mean(surv_all$log_pfvc, na.rm = TRUE),
+                    n_patients = sum(!is.na(surv_all$log_pfvc)), horizon_days = JM_HORIZON, site = site_name)
+stopifnot(abs(sd(surv_all$log_pfvc_sd, na.rm = TRUE) - 1) < 1e-8)   # log_pfvc_sd is the standardised log_pfvc
+write_csv(mask_small_counts(scale_tbl), file.path(final_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
 if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
   message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
   quit(save = "no", status = 0)
