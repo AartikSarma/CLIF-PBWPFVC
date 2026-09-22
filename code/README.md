@@ -38,6 +38,16 @@ to change; that stops once sites have returned `final/` folders.
 
 - `pooling/` holds the coordinator's cross-site pooling. It is never run at a site.
   `pooled_biotrauma.R` is tracked; `pooled_estimates.R` is kept local and gitignored.
+  Figure 4's estimates pool per 0.1 log units of PFVC, converted from each site's own
+  SD with that site's `jm_scale_{h}_{site}.csv`, by common-effect inverse variance
+  (two or three sites cannot support a random-effects variance), gated at rhat <= 1.1:
+
+  ```bash
+  mkdir -p results_fig4/MIMIC results_fig4/UCSF
+  cp -R output/MIMIC_output/final/injury results_fig4/MIMIC/
+  cp -R output/UCSF_output/final/injury  results_fig4/UCSF/
+  PBWPFVC_RESULTS_ROOT=results_fig4 Rscript code/pooling/pooled_biotrauma.R
+  ```
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
