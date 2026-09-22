@@ -514,25 +514,6 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
                              "\nA pre-period at zero says the divergence starts with ventilation"),
            x = NULL, y = "change per day toward injury\nper SD of log PFVC")
   }
-  stk_tbl <- read_if(file.path(fig_dir, paste0("jm_pre_stacked_", h_suffix, "_", site_name, ".csv")))
-  if (!is.null(stk_tbl) && any(stk_tbl$status == "fitted")) {
-    stk_rows <- stk_tbl %>% filter(status == "fitted") %>%
-      rename(l = lo, h = hi) %>%   # flipped from the originals: mutate() would compute hi from the new lo
-      mutate(s = toward_injury(marker), e = s * estimate, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h),
-             quantity = factor(recode(quantity, before = "before\nintubation", after = "after\nintubation",
-                                      change = "change at\nintubation"),
-                               c("before\nintubation", "after\nintubation", "change at\nintubation")),
-             marker_lab = check_label(marker))
-    checks$stacked <- ggplot(stk_rows, aes(quantity, e, colour = adjustment)) +
-      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
-      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
-      geom_point(size = 2.2, position = position_dodge(width = 0.5)) +
-      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
-      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-      labs(title = "The same patients before and after intubation (stacked mixed model)",
-           subtitle = "patients with 2+ lab days on each side; the change at intubation is the within-patient test",
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
-  }
   if (!is.null(did_tbl) && nrow(did_tbl)) {
     did_rows <- did_tbl %>%
       transmute(marker, adjustment, s = toward_injury(marker),

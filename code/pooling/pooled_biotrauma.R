@@ -46,8 +46,6 @@
 #   jm_pre_placebo_*       the pre-intubation placebo: the divergence in the days
 #                          before the first IMV record, beside the joint model's
 #                          post-intubation rate, pooled as separate periods
-#   jm_pre_stacked_*       the stacked within-patient placebo: before, after and
-#                          the change at intubation in the same patients
 # Joint-model tables are keyed by the panel horizon in the file tag (24h/48h/72h)
 # as well as the contrast horizon, so one site's three panels are never pooled as
 # three sites. Every pooled row carries k, I2, tau2 and the per-site estimates it
@@ -239,9 +237,9 @@ for (fam in c("quick_dose_channels", "quick_sf_channels")) {
 }
 
 # --- 7. the figure-4 causal supports: the difference-in-differences against the
-#        no-support control, and the pre-intubation placebo (two-sample and
-#        stacked within-patient). All three are per SD of log PFVC per day in the
-#        ventilated cohort's units, so all three are converted by to_log_units.
+#        no-support control and the pre-intubation placebo. Both are per SD of log
+#        PFVC per day in the ventilated cohort's units, so both are converted by
+#        to_log_units.
 did <- read_family("^jm_control_did_.*\\.csv$")
 if (nrow(did)) {
   did <- did %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_control_did", "pfvc"),
@@ -276,29 +274,18 @@ if (nrow(pl)) {
     mutate(scale = "divergence by lung size, log marker per day")
 }
 
-st <- read_family("^jm_pre_stacked_.*\\.csv$")
-if (nrow(st)) {
-  st <- st %>% filter(status == "fitted") %>%
-    transmute(site, marker, adjustment, quantity, estimate, se,
-              panel_h = jm_panel(file, "jm_pre_stacked")) %>%
-    to_log_units(per_sd = TRUE, other_unit = NA_character_)
-  if (nrow(st)) pooled$pre_stacked <- pool_by(st, marker, adjustment, quantity, unit, panel_h) %>%
-    mutate(scale = "within-patient divergence, log marker per day; change = after - before")
-}
-
 # --- write
 for (nm in names(pooled)) {
   write_csv(pooled[[nm]], file.path(out_dir, paste0("pooled_biotrauma_", nm, ".csv")))
   message(nm, ": ", nrow(pooled[[nm]]), " pooled rows")
 }
 
-# --- figure 4 pooled: the divergence and the three supports that test it, site by
+# --- figure 4 pooled: the divergence and the two supports that test it, site by
 #     site and pooled. Adjusted, main model, the daily panel, PFVC units only: the
 #     VT/PFVC divergence is on its own scale and gets its own row of panels.
 DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day", vtpfvc = canonical_term("vtpfvc_c:vent_day"))
-# the panel label is taken from the calling environment (.env): the stacked placebo
-# tables carry their own `quantity` column (before / after / change), which would
-# otherwise shadow the argument and leave those rows without a panel
+# the panel label is read from the calling environment (.env) so that no table column
+# of the same name can shadow it
 fig4_rows <- function(d, panel_label, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, adjustment == "adjusted", grepl("d$", panel_h)) %>%
@@ -316,14 +303,12 @@ fd4 <- bind_rows(
               pooled$longitudinal_terms$term == DIVERGENCE[["pfvc"]] & pooled$longitudinal_terms$model == "main"),
   fig4_rows(did, "difference in differences"), fig4_pooled(pooled$control_did, "difference in differences"),
   fig4_rows(pl, "placebo, before intubation", pl$period == "pre-intubation"),
-  fig4_pooled(pooled$pre_placebo, "placebo, before intubation", pooled$pre_placebo$period == "pre-intubation"),
-  fig4_rows(st, "stacked, change at intubation", st$quantity == "change"),
-  fig4_pooled(pooled$pre_stacked, "stacked, change at intubation", pooled$pre_stacked$quantity == "change"))
+  fig4_pooled(pooled$pre_placebo, "placebo, before intubation", pooled$pre_placebo$period == "pre-intubation"))
 if (!is.null(fd4) && nrow(fd4)) {
   fd4 <- fd4 %>% filter(startsWith(unit, "per ")) %>%
     mutate(site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")),
            quantity = factor(quantity, c("divergence, ventilated", "difference in differences",
-                                         "placebo, before intubation", "stacked, change at intubation")))
+                                         "placebo, before intubation")))
   worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", pressor_dose = "higher",
              ne_equiv_peak = "higher", osi = "higher", any_pressor = "higher", sf = "lower", dp = "higher")
   p4 <- ggplot(fd4, aes(estimate, site, shape = is_pooled)) +
