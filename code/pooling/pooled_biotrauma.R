@@ -152,7 +152,7 @@ to_log_units <- function(d, per_sd, other_unit) {
            unit = case_when(!.per_sd ~ .other_unit,
                             !is.na(sd_log_pfvc) ~ paste0("per ", PER_LOG_PFVC, " log PFVC"),
                             TRUE ~ "per site SD of log PFVC (not harmonised)"),
-           across(any_of(c("estimate", "se")), ~ .x * scale_factor)) %>%
+           across(any_of(c("estimate", "se", "lo", "hi")), ~ .x * scale_factor)) %>%
     select(-.per_sd, -.other_unit)
 }
 
@@ -192,9 +192,13 @@ if (nrow(es)) {
   es <- es %>% mutate(term = canonical_term(term)) %>% filter(block == "longitudinal", term %in% key) %>%
     mutate(se = sd, grid = if ("grid" %in% names(es)) grid else NA_character_,
            form = jm_form(file, "jm_estimates", "disc"), panel_h = jm_panel(file, "jm_estimates"))
-  # a site enters only if its own chain converged for that term
-  dropped <- sum(!is.na(es$rhat) & es$rhat > RHAT_MAX)
-  if (dropped) message("longitudinal terms: ", dropped, " site-rows dropped for rhat > ", RHAT_MAX)
+  # a site enters only if its own chain converged for that term; the dropped rows
+  # are named, not counted, so a reader can see which marker lost which site
+  dropped <- es %>% filter(!is.na(rhat), rhat > RHAT_MAX) %>%
+    transmute(what = paste0(site, " ", marker, " ", adjustment, " ", term, " (", form, " ", panel_h,
+                            ", rhat ", round(rhat, 2), ")"))
+  if (nrow(dropped)) message("longitudinal terms dropped for rhat > ", RHAT_MAX, ":\n  ",
+                             paste(dropped$what, collapse = "\n  "))
   es <- es %>% filter(is.na(rhat) | rhat <= RHAT_MAX) %>%
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
@@ -244,7 +248,9 @@ if (nrow(did)) {
                            panel_h = jm_panel(file, "jm_control_did"),
                            estimate = did_estimate, se = did_sd, both_converged)
   if (any(!did$both_converged))
-    message("difference in differences: ", sum(!did$both_converged), " site-rows dropped, an arm did not converge")
+    message("difference in differences dropped, an arm did not converge:\n  ",
+            did %>% filter(!both_converged) %>%
+              transmute(what = paste(site, marker, adjustment)) %>% pull(what) %>% paste(collapse = "\n  "))
   did <- did %>% filter(both_converged) %>%
     to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
@@ -261,8 +267,9 @@ if (nrow(pl)) {
                 transmute(., site, marker, adjustment, panel_h, period = "post-intubation",
                           estimate = post_estimate, se = (post_hi - post_lo) / 3.92, rhat = post_rhat)) }
   if (any(!is.na(pl$rhat) & pl$rhat > RHAT_MAX))
-    message("placebo: ", sum(!is.na(pl$rhat) & pl$rhat > RHAT_MAX),
-            " post-intubation site-rows dropped for rhat > ", RHAT_MAX)
+    message("placebo, post-intubation rows dropped for rhat > ", RHAT_MAX, ":\n  ",
+            pl %>% filter(!is.na(rhat), rhat > RHAT_MAX) %>%
+              transmute(what = paste(site, marker, adjustment, round(rhat, 2))) %>% pull(what) %>% paste(collapse = "\n  "))
   pl <- pl %>% filter(is.na(rhat) | rhat <= RHAT_MAX) %>%
     to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(pl)) pooled$pre_placebo <- pool_by(pl, marker, adjustment, period, unit, panel_h) %>%
