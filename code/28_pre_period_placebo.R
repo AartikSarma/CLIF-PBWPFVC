@@ -20,9 +20,10 @@
 # the outcome; no ventilator terms, because none exist before intubation. Nothing
 # dies or is extubated before intubation, so no joint model is needed.
 #
-# The post-intubation rate beside it is the longitudinal model alone from the shape
-# check (22_biotrauma_fit.R, PBWPFVC_JM_SHAPE_ONLY=1, jm_shape_*), the same kind of
-# model, when that table exists. It is estimated on the whole cohort, while the
+# The post-intubation rate beside it is figure 4's own estimate, the joint model's
+# log_pfvc_sd:vent_day (jm_estimates_pfvc_*, creatinine from its dialysis-as-third-cause
+# twin), when those tables exist; at MIMIC it matched the longitudinal model alone to
+# the fourth decimal for platelets, so the two are comparable. It is estimated on the whole cohort, while the
 # pre-period sample is only the patients intubated after a day or more in hospital:
 # the within-patient version (the pre and post rows of the same patients stacked,
 # with a divergence x post-intubation term) is the follow-on.
@@ -54,17 +55,20 @@ pre  <- read_parquet(pre_path)
 surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
 PRE_DAYS <- -min(pre$vent_day, 0)
 
-# the post-intubation rate from the shape check, where it has been run (the same model class)
+# the post-intubation rate: figure 4's own estimate, the joint model's log_pfvc_sd:vent_day
 # (creatinine from its dialysis-as-third-cause twin, as figure 4 reads it)
-read_shape <- function(tag) {
-  path <- file.path(final_dir, paste0("jm_shape_", tag, "pfvc_", h_suffix, "_", site_name, ".csv"))
+read_post <- function(tag) {
+  path <- file.path(final_dir, paste0("jm_estimates_", tag, "pfvc_", h_suffix, "_", site_name, ".csv"))
   if (!file.exists(path)) return(NULL)
-  read_csv(path, show_col_types = FALSE) %>% filter(shape == "linear", quantity == "rate", segment == "all") %>%
-    transmute(marker, adjustment, post_estimate = estimate, post_lo = lo, post_hi = hi, post_n_patients = n_patients)
+  read_csv(path, show_col_types = FALSE) %>%
+    filter(block == "longitudinal", model == "main",
+           vapply(strsplit(term, ":"), setequal, logical(1), c("log_pfvc_sd", "vent_day"))) %>%
+    transmute(marker, adjustment, post_estimate = estimate, post_lo = lo, post_hi = hi, post_rhat = rhat,
+              post_n_patients = n_patients)
 }
-shape_main <- read_shape(""); shape_rrt <- read_shape("rrtcause_")
-post_rates <- bind_rows(if (!is.null(shape_main)) shape_main %>% filter(!(marker == "creatinine" & !is.null(shape_rrt))),
-                        if (!is.null(shape_rrt)) shape_rrt %>% filter(marker == "creatinine"))
+post_main <- read_post(""); post_rrt <- read_post("rrtcause_")
+post_rates <- bind_rows(if (!is.null(post_main)) post_main %>% filter(!(marker == "creatinine" & !is.null(post_rrt))),
+                        if (!is.null(post_rrt)) post_rrt %>% filter(marker == "creatinine"))
 if (!nrow(post_rates)) post_rates <- NULL
 
 rows <- map_dfr(MARKERS, function(m) {
@@ -102,7 +106,7 @@ rows <- map_dfr(MARKERS, function(m) {
 if (!is.null(post_rates)) rows <- rows %>% left_join(post_rates, by = c("marker", "adjustment"))
 
 message("\nPre-intubation divergence (placebo) beside the post-intubation rate",
-        if (is.null(post_rates)) " (no shape-check table: run 22 with PBWPFVC_JM_SHAPE_ONLY=1 for the post rate)" else "")
+        if (is.null(post_rates)) " (no joint-model estimates yet: run the figure 4 fits for the post rate)" else "")
 print(as.data.frame(rows %>% select(any_of(c("marker", "adjustment", "status", "pre_estimate", "pre_lo", "pre_hi", "pre_p",
                                              "post_estimate", "post_lo", "post_hi", "n_patients"))) %>%
                       mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
