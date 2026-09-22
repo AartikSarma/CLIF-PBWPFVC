@@ -110,8 +110,8 @@ size_terms <- estimates %>%
   filter(model == "main", block == "longitudinal") %>%
   mutate(quantity = unname(term_quantity[components(term)])) %>%
   filter(!is.na(quantity)) %>%
-  select(arm, cohort, marker, adjustment, any_of("creatinine_model"), quantity, estimate, lo, hi, rhat) %>%
-  pivot_wider(names_from = quantity, values_from = c(estimate, lo, hi, rhat), names_glue = "{quantity}_{.value}")
+  select(arm, cohort, marker, adjustment, any_of("creatinine_model"), quantity, estimate, sd, lo, hi, rhat) %>%
+  pivot_wider(names_from = quantity, values_from = c(estimate, sd, lo, hi, rhat), names_glue = "{quantity}_{.value}")
 # Movement is summarised over ALL days, not the last one: platelets fall and recover
 # inside a week, and a marker that moved and came back would read as still on day 7.
 last_movement <- if (nrow(movement)) movement %>%
@@ -139,6 +139,38 @@ out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
 write_csv(mask_small_counts(comparison), file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
 if (nrow(movement)) write_csv(movement %>% filter(model == "main"),
                               file.path(final_dir, paste0("jm_control_movement_", out_stub, ".csv")))
+
+# ---- the difference-in-differences: ventilated divergence minus control divergence
+# First difference: at a fixed VT/PBW the PBW formula, which omits age and race,
+# assigns the strain, so the divergence by predicted lung size is not chosen by
+# indication. Second difference: that lung-size variation also exists without a
+# ventilator, where it can act only through the patient (demographics, organ reserve);
+# the no-support control, read at the ventilated severity, estimates that path. The
+# difference is the divergence the ventilator adds, per SD of log PFVC per day.
+# Identifying assumption, the parallel-trends analogue: absent ventilation, lung size
+# would shape the marker's trajectory equally in both cohorts at equal severity.
+# The cohorts are different patients, so their posteriors are independent and the
+# difference's SD is the root sum of squares (normal approximation to the posterior).
+did <- comparison %>%
+  filter(arm %in% c("Ventilated", "No support, at ventilated severity")) %>%
+  mutate(side = if_else(cohort == "imv", "ventilated", "control")) %>%
+  select(marker, adjustment, side, divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model")) %>%
+  pivot_wider(names_from = side, values_from = c(divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model"))) %>%
+  filter(!is.na(divergence_estimate_ventilated), !is.na(divergence_estimate_control)) %>%
+  mutate(did_estimate = divergence_estimate_ventilated - divergence_estimate_control,
+         did_sd = sqrt(divergence_sd_ventilated^2 + divergence_sd_control^2),
+         did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
+         p_did_gt0 = pnorm(did_estimate / did_sd),
+         both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
+         unit = "log marker per day per SD of log PFVC", form = MOD_FORM, panel = h_suffix, site = base_site)
+if (nrow(did)) {
+  write_csv(mask_small_counts(did), file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv")))
+  message("--- difference-in-differences: ventilated minus no-support divergence (log marker per day per SD of log PFVC)")
+  print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
+                                        control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
+                                        lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
+                                        both_converged)), row.names = FALSE)
+} else message("--- no marker has both a ventilated and a severity-standardised control fit: no difference-in-differences")
 
 message("--- divergence per day per SD of log PFVC (log marker units), adjusted")
 print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
