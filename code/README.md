@@ -30,6 +30,7 @@ to change; that stops once sites have returned `final/` folders.
 | `25_injury_at_horizon.R` | figure 4, robustness | Fixed-horizon comparator among survivors: what the joint model is compared against | `injury_` |
 | `26_quick_lme.R` | figure 4, robustness | The longitudinal submodel alone, without the death correction | `quick_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control) | `jm_control_comparison_`, `jm_control_movement_`, `jm_control_did_` |
+| `28_height_fingerprint.R` | Claim 5c.2 | The height fingerprint: at a fixed VT/PBW, does the marker follow the ratio's sex-reversed height curve beyond a height function the sexes share? Platelets by default, on the 7-day panel; run for the no-support control first to get the DiD | `fingerprint_`, `fingerprint_ladder_`, `fingerprint_curves_`, `fingerprint_did_` |
 | `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity | |
 | `29_run_biotrauma.sh` | figure 4, robustness | Runner for the 48-hour fits and the comparators 25 and 26; not in the pipeline | |
 
@@ -62,7 +63,7 @@ to change; that stops once sites have returned `final/` folders.
 
 ## Where aggregates go
 
-`final/` is sorted by block: `cross_sectional/` (`03`-`05`), `injury/` (`21`-`27`),
+`final/` is sorted by block: `cross_sectional/` (`03`-`05`), `injury/` (`21`-`28`),
 `supplement/` and `controls/`. A script never builds the path itself: it calls
 `final_dir_for("<block>")` from `utils/config.R`.
 

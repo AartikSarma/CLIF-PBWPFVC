@@ -75,6 +75,28 @@ pfvc_channels <- function(d, expo = c("log_pfvc", "ldisc")) {
   }
   out %>% mutate(ch_sum = ch_height + ch_age + ch_sex + ch_race, ch_remainder = exact - ch_sum)
 }
+# The height fingerprint of log PBW/PFVC (28_height_fingerprint.R): the ratio's
+# height piece at each patient's OWN sex, with age and race at fixed reference
+# values. ch_height above holds sex at male, which erases what this term is for:
+# Devine PBW is a line with an intercept and GLI FVC a power law in height, so the
+# ratio is an inverted U in height that peaks near 166 cm in men and 183 cm in
+# women. GLI's log-height coefficient does not depend on age or race, so the
+# reference age and race move each sex's curve by a constant and nothing else;
+# the sex term of any model that uses the fingerprint absorbs that constant.
+# Returned in log units, relative to a 170 cm man.
+height_fingerprint <- function(height_cm, sex_category) {
+  bad_sex <- setdiff(unique(sex_category), c("Male", "Female"))
+  if (length(bad_sex)) stop("height_fingerprint(): GLI has two sex equations; got sex_category ",
+                            paste(bad_sex, collapse = ", "))
+  sex <- if_else(sex_category == "Female", 2L, 1L)
+  log_ratio <- function(h, sex) {
+    n <- length(h)
+    log(if_else(sex == 1L, 50, 45.5) + 2.3 * (h / 2.54 - 60)) -
+      log(rspiro::pred_GLI(age = rep(60, n), height = h / 100, gender = sex, ethnicity = rep(1L, n), param = "FVC"))
+  }
+  log_ratio(height_cm, sex) - log_ratio(170, 1L)
+}
+
 # Wald test that the four channel coefficients (or contrasts) are equal:
 # est is a length-4 vector, V its covariance; returns the chi-square p-value on 3 df
 channels_equal_p <- function(est, V) {
