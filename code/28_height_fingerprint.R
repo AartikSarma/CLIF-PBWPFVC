@@ -40,13 +40,18 @@
 #                    the ratio should act the same whichever input moved it. This is
 #                    the predicted value F:day is read against.
 #   identifying SD   the SD of F left after ns(height, k) and sex. The formula's
-#                    whole range is 0.05 to 0.07; the lever is much smaller, so the
-#                    table carries the minimum detectable effect (80% power,
-#                    two-sided 5%) beside the predicted value. One site is not
-#                    expected to detect it; pooling decides.
+#                    whole range is 0.05 to 0.07; the lever is much smaller (0.008
+#                    on synthetic data, about 5% of the whole ratio's SD, and the
+#                    same at k = 3, 4 and 5, so the limit is the formula, not the
+#                    smooth). The table therefore carries the minimum detectable
+#                    effect (80% power, two-sided 5%) beside the predicted value, so
+#                    a null can be read as uninformative rather than as a refutation.
+#                    The comparison is the ventilated arm's read; in a control the
+#                    predicted value is the control's own ratio rate.
 #   ladder           maximum-likelihood fits: shared only; shared + F (1 df at
-#                    level, 1 at rate); sex-specific free height curves (ns(height,
-#                    k) x sex, level and rate). Shared vs free asks whether there is
+#                    level, 1 at rate, and 2 more for F x anchor in a
+#                    severity-standardised control); sex-specific free height curves
+#                    (ns(height, k) x sex, level and rate). Shared vs free asks whether there is
 #                    any sex-specific height shape; free vs fingerprint (AIC, not
 #                    nested) asks whether the formula's shape is enough to describe
 #                    it. A direct height effect can make a sex-specific shape, but
@@ -234,7 +239,7 @@ for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
            d_aic = AIC(ml[[big]]) - AIC(ml[[small]]))
   }
   ladder[[length(ladder) + 1]] <- bind_rows(
-    lr("shared", "fingerprint", "the fingerprint adds to the shared height curve (level and rate)"),
+    lr("shared", "fingerprint", "the fingerprint adds to the shared height curve (level and rate; + F x anchor in a standardised control)"),
     lr("shared", "free", "any sex-specific height shape (level and rate)"),
     tibble(test = "free vs fingerprint: not nested, AIC only (< 0 favours the free curves)",
            small = "fingerprint", big = "free", lr = NA_real_, df = NA_real_, p = NA_real_,
