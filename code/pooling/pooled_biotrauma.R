@@ -43,6 +43,7 @@
 #   quick_sf_channels_*                             nested LR tables are not pooled)
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
+#   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF <= 315)
 #   fingerprint_*, fingerprint_did_*   the height fingerprint (28): the rate per log
 #                          unit of PBW/PFVC moved by height within sex, the whole
 #                          ratio's rate it is read against, and the DiD
@@ -252,6 +253,24 @@ if (nrow(did)) {
     to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
     mutate(scale = "ventilated minus no-support divergence, log marker per day")
+}
+
+# --- 7b. the same difference against the hypoxemic control (index-day SF <= 315,
+#         27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
+#         ventilation and not in hypoxemia. Its own file family, so it never mixes with
+#         figure 4's DiD; not drawn in the pooled figure 4.
+hdid <- read_family("^jm_hypoxemic_control_did_.*\\.csv$")
+if (nrow(hdid)) {
+  hdid <- hdid %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_hypoxemic_control_did", "pfvc"),
+                             panel_h = jm_panel(file, "jm_hypoxemic_control_did"),
+                             estimate = did_estimate, se = did_sd, both_converged)
+  if (any(!hdid$both_converged))
+    message("hypoxemic-control difference in differences dropped, an arm did not converge:\n  ",
+            hdid %>% filter(!both_converged) %>% transmute(what = paste(site, marker, adjustment)) %>%
+              pull(what) %>% paste(collapse = "\n  "))
+  hdid <- hdid %>% filter(both_converged) %>% to_log_units(per_sd = TRUE, other_unit = NA_character_)
+  if (nrow(hdid)) pooled$hypoxemic_control_did <- pool_by(hdid, marker, adjustment, unit, panel_h, form) %>%
+    mutate(scale = "ventilated minus hypoxemic no-support divergence, log marker per day")
 }
 
 # --- 8. the height fingerprint (28_height_fingerprint.R): the rate per log unit of

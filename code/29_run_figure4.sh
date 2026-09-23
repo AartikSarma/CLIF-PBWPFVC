@@ -13,6 +13,11 @@
 #             no respiratory support             (panel B, the negative control): every
 #                                                patient, the divergence read at the
 #                                                ventilated cohort's mean severity
+#             no support, hypoxemic on the index day (index-day SF <= 315, the ventilated
+#                                                cohort's own gate), read at the ventilated severity:
+#                                                the arms then differ in ventilation, not
+#                                                hypoxemia (27 writes its DiD separately;
+#                                                HYPOXEMIC_CONTROL_MARKERS, platelets by default)
 #             optional: ventilated by baseline SF class (SF_BANDS; off by default)
 #   The control is standardised, not matched (2026-09-21): severity cannot confound a
 #   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
@@ -51,7 +56,9 @@
 #   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
 #   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
-#   site runs SF_BANDS="235,315 115,235 0,115"), VTPFVC_MARKERS, FORCE_BUILD, FORCE_PANEL.
+#   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
+#   control arm, platelets by default, creatinine not fitted there; empty skips it),
+#   VTPFVC_MARKERS, FORCE_BUILD, FORCE_PANEL.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 set -uo pipefail
@@ -59,6 +66,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 MARKERS=${MARKERS:-osi,pressor_dose,platelets,bilirubin}   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
+HYPOXEMIC_CONTROL_MARKERS=${HYPOXEMIC_CONTROL_MARKERS-platelets}   # the hypoxemic control arm; set empty to skip
 CREATININE=${CREATININE:-1}
 VTPFVC_MARKERS=${VTPFVC_MARKERS-$MARKERS}   # the VT/PFVC companion (step 7): every marker; set empty to skip
 SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
@@ -174,6 +182,12 @@ fi
 fit_arm ventilated imv "$MARKERS"
 for BAND in $SF_BANDS; do fit_arm "ventilated_sf${BAND/,/to}" imv "$MARKERS" PBWPFVC_JM_SF_BAND="$BAND"; done
 [[ -n "$SEV_CENTER" ]] && fit_arm nosupport nosupport "$CONTROL_MARKERS" PBWPFVC_JM_SEV_CENTER="$SEV_CENTER"
+# the hypoxemic control: the same control, index-day SF <= 315, without the creatinine fits
+if [[ -n "$SEV_CENTER" && -n "$HYPOXEMIC_CONTROL_MARKERS" ]]; then
+  CREATININE_ALL_ARMS=$CREATININE; CREATININE=0
+  fit_arm nosupport_hypoxemic nosupport "$HYPOXEMIC_CONTROL_MARKERS" PBWPFVC_JM_SEV_CENTER="$SEV_CENTER" PBWPFVC_JM_SF_BAND="0,315"
+  CREATININE=$CREATININE_ALL_ARMS
+fi
 
 # ---- 6 comparison table and the figure
 FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi"

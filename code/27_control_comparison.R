@@ -16,6 +16,10 @@
 #                              the ventilated cohort's severity (PBWPFVC_JM_SEV_CENTER,
 #                              the "sevstd_" tables); the severity x divergence term
 #                              says whether sicker controls diverge faster.
+#   no support, SF <= 315      the same control restricted to patients hypoxemic on
+#                              the index day ("sevstd_sf0to315_" tables), so that it
+#                              differs from the ventilated cohort in ventilation and
+#                              not in hypoxemia; its DiD is written separately
 # These are the arms 29_run_figure4.sh fits. Tables from designs it no longer runs
 # (severity floors, the unstandardised control, the noninvasive cohort, which is not a
 # control) are ignored even when present on disk, so an old run cannot add an arm.
@@ -33,6 +37,8 @@
 #   jm_control_comparison_{form}_{tag}_{site}.csv
 #   jm_control_movement_{form}_{tag}_{site}.csv
 #   jm_control_comparison_{form}_{tag}_{site}.pdf
+#   jm_control_did_{form}_{h}_{site}.csv            ventilated minus the control
+#   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated minus the hypoxemic control
 #
 # Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 Rscript code/27_control_comparison.R
 # =============================================================================
@@ -58,7 +64,7 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#0
 cohort_folders <- tibble(cohort = c("imv", "nosupport"),
                          cohort_label = c("Ventilated", "No support, at ventilated severity"),
                          site = c(base_site, paste0(base_site, "_nosupport")),
-                         arm_pattern = c("^(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_$"))
+                         arm_pattern = c("^(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_(sf0to315_)?$"))
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")
@@ -166,8 +172,14 @@ if (is.na(to_vent_sd)) {
           " (rerun 22_biotrauma_fit.R, e.g. its anchor step, for that cohort)")
   unlink(did_path)
 }
-did <- comparison %>%
-  filter(!is.na(to_vent_sd), arm %in% c("Ventilated", "No support, at ventilated severity")) %>%
+# The same difference against any control arm: the primary one, and the hypoxemic
+# control (index-day SF <= 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
+# on the control fit, 2026-09-23). The ventilated cohort is hypoxemic by construction and
+# the whole control mostly is not, so the primary difference also contrasts hypoxemia;
+# against the hypoxemic control the arms differ in ventilation alone. Both use the
+# control's whole-panel SD of log PFVC (a restricted fit keeps it, 22_biotrauma_fit.R).
+did_against <- function(control_arm) comparison %>%
+  filter(!is.na(to_vent_sd), arm %in% c("Ventilated", control_arm)) %>%
   mutate(side = if_else(cohort == "imv", "ventilated", "control"),
          # the control on the ventilated cohort's unit (the ventilated rows are multiplied by 1)
          unit_factor = if_else(side == "control", to_vent_sd, 1),
@@ -180,8 +192,21 @@ did <- comparison %>%
          did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
          p_did_gt0 = pnorm(did_estimate / did_sd),
          both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
-         control_to_ventilated_sd = to_vent_sd,
+         control_to_ventilated_sd = to_vent_sd, control_arm = control_arm,
          unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
+did <- did_against("No support, at ventilated severity")
+HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF <= 315"
+hypoxemic_did_path <- file.path(final_dir, paste0("jm_hypoxemic_control_did_", out_stub, ".csv"))
+if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
+  hypoxemic_did <- did_against(HYPOXEMIC_CONTROL_ARM)
+  if (nrow(hypoxemic_did)) {
+    write_csv(mask_small_counts(hypoxemic_did), hypoxemic_did_path)
+    message("--- difference-in-differences against the hypoxemic control (index-day SF <= 315)")
+    print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
+                                                    control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
+                                                    lo = signif(did_lo, 3), hi = signif(did_hi, 3), both_converged)), row.names = FALSE)
+  }
+} else unlink(hypoxemic_did_path)
 if (nrow(did)) {
   write_csv(mask_small_counts(did), did_path)
   message("--- difference-in-differences: ventilated minus no-support divergence (log marker per day per SD of log PFVC)")

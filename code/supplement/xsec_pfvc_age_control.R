@@ -78,9 +78,14 @@
 #                                          SD of log PFVC (any support; invasive)
 #   pfvc_age_control_code_status_{site}.csv  patients and deaths by code status at the
 #                                          index and later limitation, per cohort
-# The contrast and the escalation hazard are fitted in three populations (column
-# population): everyone, full code at the index, and full code throughout; the
-# last two need the optional CLIF code_status table (section "Code status").
+#   pfvc_age_control_hypoxemia_{site}.csv  the hypoxemia pathway in the control: onset
+#                                          of hypoxemia by PFVC, and PFVC's death HR
+#                                          before and after hypoxemia (needs the 7-day
+#                                          control panel of 21_biotrauma_panel.R)
+# The contrast and the escalation hazard are fitted in five populations (column
+# population): everyone; full code at the index; full code throughout; hypoxemic at
+# the index (SF < 315, the ventilated cohort's own gate); hypoxemic and full code.
+# The full-code ones need the optional CLIF code_status table (section "Code status").
 #   pfvc_age_control_{site}.pdf
 # Usage: Rscript code/supplement/xsec_pfvc_age_control.R   (PBWPFVC_COHORT unset)
 # =============================================================================
@@ -101,6 +106,7 @@ final_dir <- final_dir_for("supplement")
 
 AGE_CURVE_GRID <- seq(20, 90, by = 10)
 MIN_DEATHS <- 10L
+SF_HYPOXEMIA_THRESHOLD <- 315   # script 03's index gate for the ventilated cohort
 COHORTS <- c("Ventilated", "No support")
 OKABE_ITO <- c(without_pfvc = "#E69F00", with_pfvc = "#0072B2")
 
@@ -269,11 +275,25 @@ if (HAS_CODE_STATUS) {
 both_cohorts <- both_cohorts %>%
   mutate(population_everyone = TRUE,
          population_full_code_at_index = code_status_at_index == "full code",
-         population_full_code_throughout = code_status_at_index == "full code" & !limited_later)
+         population_full_code_throughout = code_status_at_index == "full code" & !limited_later,
+         # Hypoxemic at the index: the ventilated cohort's own gate (script 03 selects its
+         # index at SF < 315), applied to the control, so the two arms differ in ventilation
+         # and not in hypoxemia (MIMIC and UCSF, 2026-09-23: the control's median SF was 323,
+         # so its contrast with the ventilated cohort also contrasted hypoxemia). The
+         # control's SF uses an estimated FiO2, so its gate is not measured quite as the
+         # ventilated cohort's is.
+         population_hypoxemic_at_index = sf_ratio < SF_HYPOXEMIA_THRESHOLD,
+         population_hypoxemic_full_code_at_index = population_hypoxemic_at_index & population_full_code_at_index)
 POPULATIONS <- c(everyone = "everyone",
                  full_code_at_index = "full code at the index",
-                 full_code_throughout = "full code throughout (conditions on the future)")
-if (!HAS_CODE_STATUS) POPULATIONS <- POPULATIONS["everyone"]
+                 full_code_throughout = "full code throughout (conditions on the future)",
+                 hypoxemic_at_index = "hypoxemic at the index (SF < 315)",
+                 hypoxemic_full_code_at_index = "hypoxemic and full code at the index")
+if (!HAS_CODE_STATUS) POPULATIONS <- POPULATIONS[c("everyone", "hypoxemic_at_index")]
+n_ventilated_not_hypoxemic <- sum(both_cohorts$cohort == "Ventilated" & !both_cohorts$population_hypoxemic_at_index)
+if (n_ventilated_not_hypoxemic > 0)
+  message("  ", n_ventilated_not_hypoxemic, " ventilated patients have an index SF of 315 or more ",
+          "(script 03 gates at SF < 315): they leave the hypoxemic populations")
 code_status_counts <- both_cohorts %>%
   group_by(cohort, code_status_at_index, limited_later) %>%
   summarise(n_patients = n(), n_deaths = sum(deceased == 1), .groups = "drop") %>%
@@ -493,6 +513,103 @@ escalation_hazard <- expand_grid(
          p = 2 * pnorm(-abs(log_hr / se)), cohort = "No support",
          scale = "cause-specific HR of escalation per SD of log PFVC", site = site_name)
 
+# =============================================================================
+# The hypoxemia pathway in the control
+# =============================================================================
+# Among control patients not hypoxemic on the index day (day-0 worst SF >= 315),
+# does a smaller predicted lung lead to hypoxemia, and does its association with
+# death sit after hypoxemia develops? Two fits per population (everyone, full code at
+# the index), adjusted and unadjusted:
+#   onset   cause-specific Cox for the first day with a worst SF < 315 (days 1-7);
+#           escalation, death and discharge censor
+#   death   cause-specific Cox for death before escalation, with hypoxemia as a
+#           time-varying state and its interaction with log PFVC: the PFVC ratio
+#           before hypoxemia, after it, and their ratio. Onset is dated at the start
+#           of the day whose worst SF first falls below 315.
+# Hypoxemia is observed only while the patient is unsupported and only to day 7 (the
+# figure-4 panel of 21_biotrauma_panel.R, daily worst SF on an estimated FiO2): a
+# patient escalated before any low SF, or hypoxemic after day 7, counts as never
+# hypoxemic. The death model is therefore read at 7 days, where the state is fully
+# observed, and at 60 days as a companion. Formal mediation is not identifiable:
+# PFVC is fixed by the demographics, and hypoxemia is also driven by the illness.
+# The panel is optional here: without it the section is skipped and announced.
+HYPOXEMIA_HORIZONS <- c(7, 60)
+control_panel_dir <- file.path(config$output_dir, "controls", "nosupport")
+HAS_CONTROL_PANEL <- all(file.exists(file.path(control_panel_dir, c("jm_long_7d.parquet", "jm_surv_7d.parquet"))))
+hypoxemia_pathway <- NULL
+if (HAS_CONTROL_PANEL) {
+  day0_sf <- read_parquet(file.path(control_panel_dir, "jm_surv_7d.parquet"), col_select = c("hospitalization_id", "sf_0"))
+  onset <- read_parquet(file.path(control_panel_dir, "jm_long_7d.parquet"), col_select = c("hospitalization_id", "vent_day", "sf")) %>%
+    filter(vent_day >= 1, !is.na(sf), sf < SF_HYPOXEMIA_THRESHOLD) %>%
+    group_by(hospitalization_id) %>% summarise(hypoxemia_day = min(vent_day), .groups = "drop")
+  hypoxemia_population <- function(population) population_data(population, "No support") %>%
+    inner_join(day0_sf, by = "hospitalization_id") %>%
+    filter(!is.na(sf_0), sf_0 >= SF_HYPOXEMIA_THRESHOLD) %>%
+    left_join(onset, by = "hospitalization_id") %>%
+    # onset counts only while the patient is still unsupported
+    mutate(hypoxemia_day = if_else(!is.na(escalation_day) & hypoxemia_day > escalation_day, NA_real_, hypoxemia_day))
+  covariate_rhs <- function(adjustment) paste(c("sf_z", "sofa_z", "ns(age_at_admission, 4)",
+                                                if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]]), collapse = " + ")
+  fit_onset <- function(population, adjustment) {
+    dat <- hypoxemia_population(population) %>%
+      mutate(censor_day = pmin(7, coalesce(escalation_day, Inf), coalesce(death_index_day, Inf), discharge_index_day),
+             event = as.integer(!is.na(hypoxemia_day) & hypoxemia_day <= censor_day),
+             end_day = pmax(if_else(event == 1L, hypoxemia_day, censor_day), 0.01))
+    row_head <- tibble(population = POPULATIONS[[population]], adjustment, analysis = "onset of hypoxemia (days 1-7)",
+                       horizon_days = 7, n_patients = nrow(dat), n_patients_hypoxemic = sum(dat$event))
+    if (sum(dat$event) < MIN_DEATHS) return(row_head %>% mutate(term = "PFVC", note = paste("skipped: fewer than", MIN_DEATHS, "onsets")))
+    fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", covariate_rhs(adjustment), "+ log_pfvc_z")), data = dat))
+    row_head %>% mutate(term = "PFVC", log_hr = unname(coef(fit)["log_pfvc_z"]),
+                        se = unname(sqrt(vcov(fit)["log_pfvc_z", "log_pfvc_z"])), note = NA_character_)
+  }
+  fit_death_by_state <- function(population, adjustment, horizon) {
+    dat <- hypoxemia_population(population) %>%
+      mutate(censor_day = pmin(horizon, coalesce(escalation_day, Inf), discharge_index_day),
+             death_day = death_index_day,
+             event = as.integer(!is.na(death_day) & death_day <= censor_day),
+             end_day = pmax(if_else(event == 1L, death_day, censor_day), 0.01),
+             hypoxemia_day = if_else(!is.na(hypoxemia_day) & hypoxemia_day < end_day, hypoxemia_day, NA_real_))
+    row_head <- tibble(population = POPULATIONS[[population]], adjustment,
+                       analysis = "death before escalation, by hypoxemic state", horizon_days = horizon,
+                       n_patients = nrow(dat), n_patients_hypoxemic = sum(!is.na(dat$hypoxemia_day)),
+                       n_deaths = sum(dat$event),
+                       n_deaths_after_hypoxemia = sum(dat$event == 1 & !is.na(dat$hypoxemia_day)))
+    if (row_head$n_deaths_after_hypoxemia < MIN_DEATHS || row_head$n_deaths - row_head$n_deaths_after_hypoxemia < MIN_DEATHS)
+      return(row_head %>% mutate(term = "PFVC before hypoxemia",
+                                 note = paste("skipped: fewer than", MIN_DEATHS, "deaths in a hypoxemic state")))
+    # split each patient's follow-up at hypoxemia onset (counting-process form)
+    split <- tmerge(dat %>% select(-death_day, -event, -censor_day),
+                    dat %>% select(hospitalization_id, follow_up_end = end_day, died = event),
+                    id = hospitalization_id, death = event(follow_up_end, died))
+    split <- tmerge(split, dat %>% filter(!is.na(hypoxemia_day)) %>% select(hospitalization_id, hypoxemia_day),
+                    id = hospitalization_id, hypoxemic = tdc(hypoxemia_day))
+    fit <- fit_strict(coxph(as.formula(paste("Surv(tstart, tstop, death) ~", covariate_rhs(adjustment),
+                                             "+ hypoxemic + log_pfvc_z + log_pfvc_z:hypoxemic")),
+                            data = split, cluster = hospitalization_id))
+    b <- coef(fit); V <- vcov(fit)
+    interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "hypoxemic"))]
+    after_b <- b[["log_pfvc_z"]] + b[[interaction_term]]
+    after_se <- sqrt(V["log_pfvc_z", "log_pfvc_z"] + V[interaction_term, interaction_term] + 2 * V["log_pfvc_z", interaction_term])
+    row_head %>% cross_join(tibble(
+      term = c("PFVC before hypoxemia", "PFVC after hypoxemia", "after / before (interaction)", "hypoxemic state"),
+      log_hr = c(b[["log_pfvc_z"]], after_b, b[[interaction_term]], b[["hypoxemic"]]),
+      se = c(sqrt(V["log_pfvc_z", "log_pfvc_z"]), after_se, sqrt(V[interaction_term, interaction_term]),
+             sqrt(V["hypoxemic", "hypoxemic"])))) %>%
+      mutate(note = NA_character_)
+  }
+  hypoxemia_populations <- intersect(c("everyone", "full_code_at_index"), names(POPULATIONS))
+  hypoxemia_pathway <- bind_rows(
+    expand_grid(population = hypoxemia_populations, adjustment = names(ADJUSTMENTS)) %>% pmap_dfr(fit_onset),
+    expand_grid(population = hypoxemia_populations, adjustment = names(ADJUSTMENTS), horizon = HYPOXEMIA_HORIZONS) %>%
+      pmap_dfr(fit_death_by_state)) %>%
+    mutate(hr = exp(log_hr), hr_lo = exp(log_hr - 1.96 * se), hr_hi = exp(log_hr + 1.96 * se),
+           p = 2 * pnorm(-abs(log_hr / se)), cohort = "No support, not hypoxemic on the index day",
+           scale = "cause-specific HR per SD of log PFVC (the hypoxemic-state row: HR for being hypoxemic)",
+           site = site_name)
+} else message("*** No 7-day control panel (jm_long_7d, jm_surv_7d) in ", control_panel_dir,
+               ": the hypoxemia pathway is skipped. Build it with PBWPFVC_COHORT=nosupport PBWPFVC_JM_GRID=daily ",
+               "PBWPFVC_JM_HORIZON=7 Rscript code/21_biotrauma_panel.R ***")
+
 # how far the control's standardised estimate extrapolates
 anchor_overlap <- both_cohorts %>% group_by(cohort) %>%
   summarise(anchor_mean = mean(anchor), anchor_sd = sd(anchor),
@@ -529,6 +646,16 @@ write_csv(mask_small_counts(escalation_paths),
           file.path(final_dir, paste0("pfvc_age_control_escalation_paths_", site_name, ".csv")))
 write_csv(mask_small_counts(escalation_hazard),
           file.path(final_dir, paste0("pfvc_age_control_escalation_hazard_", site_name, ".csv")))
+if (!is.null(hypoxemia_pathway)) {
+  message("\nThe hypoxemia pathway in the control (not hypoxemic on the index day), adjusted: ",
+          "onset of hypoxemia by PFVC, and PFVC's death HR before and after hypoxemia develops")
+  print(as.data.frame(hypoxemia_pathway %>% filter(adjustment == "adjusted") %>%
+                        select(population, analysis, horizon_days, term, hr, hr_lo, hr_hi, p,
+                               n_patients, n_patients_hypoxemic, any_of(c("n_deaths", "n_deaths_after_hypoxemia")), note) %>%
+                        mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+  write_csv(mask_small_counts(hypoxemia_pathway),
+            file.path(final_dir, paste0("pfvc_age_control_hypoxemia_", site_name, ".csv")))
+}
 
 # =============================================================================
 # Figure: the age curves by cohort, and the PFVC ratios across the outcome grid
