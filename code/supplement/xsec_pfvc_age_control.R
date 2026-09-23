@@ -38,11 +38,15 @@
 # of two rises, so it is unstable when the rise without PFVC is small (read the two
 # rises beside it).
 #
-# Sensitivity, 60-day death before escalation (cause-specific Cox). Script 03
-# removes control patients escalated to any advanced support within 24 hours of
-# the index; those escalated later stay in, and their in-hospital deaths can follow
-# ventilation, which lets strain into the control. Here death counts only before
-# escalation, and escalation censors.
+# The contrast is read across an outcome grid and two severity forms (described
+# at the contrast section below). The grid separates two explanations of MIMIC's
+# first run, where the control was null for in-hospital death but protective for
+# 60-day death before escalation: deaths after discharge (a reserve channel outside
+# the ventilator) and informative censoring at escalation. Script 03 removes
+# control patients escalated within 24 hours of the index; those escalated later
+# stay in, and their deaths can follow ventilation. The severity form reads the
+# control at the ventilated cohort's severity, as figure 4 does, because the
+# control is much less sick and a smaller lung may show only under stress.
 #
 # Log PFVC is per SD of the ventilated cohort, so both cohorts share one unit. A
 # model that warns (non-convergence, separation) stops the script: no model is
@@ -56,8 +60,11 @@
 #                                          likelihood-ratio p, share of the age
 #                                          gradient absorbed, counts
 #   pfvc_age_control_curves_{site}.csv     the age curves with and without log PFVC
-#   pfvc_age_control_contrast_{site}.csv   cohort x log PFVC: logistic and
-#                                          cause-specific Cox
+#   pfvc_age_control_contrast_{site}.csv   PFVC ratio per cohort and their difference,
+#                                          by outcome, severity form and adjustment,
+#                                          with the PFVC x anchor terms
+#   pfvc_age_control_anchor_{site}.csv     the severity anchor by cohort: how many
+#                                          controls reach the ventilated mean
 #   pfvc_age_control_{site}.pdf
 # Usage: Rscript code/supplement/xsec_pfvc_age_control.R   (PBWPFVC_COHORT unset)
 # =============================================================================
@@ -70,6 +77,7 @@ suppressPackageStartupMessages({
   library(patchwork)
 })
 
+options(width = 220)
 source("utils/config.R")
 if (config$cohort != "imv") stop("xsec_pfvc_age_control.R reads both cohorts itself: unset PBWPFVC_COHORT")
 site_name <- config$site_name
@@ -84,8 +92,9 @@ OKABE_ITO <- c(without_pfvc = "#E69F00", with_pfvc = "#0072B2")
 # Data: both cross-sectional cohorts, on shared columns
 # =============================================================================
 cohort_columns <- c("hospitalization_id", "recorded_dttm", "age_at_admission", "sex_category",
-                    "race_category", "pfvc", "sf_ratio", "sofa_total", "deceased",
-                    "mortality_event_60", "surv_time")
+                    "race_category", "pfvc", "sf_ratio", "sofa_total",
+                    "sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal",
+                    "deceased", "death_dttm", "discharge_dttm")
 control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_cross_sectional.parquet")
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
@@ -98,23 +107,27 @@ no_support <- read_parquet(control_file) %>%
 both_cohorts <- bind_rows(ventilated, no_support)
 
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable, so death is simulated
-# independently of every exposure (35% by day 60, time to death log-normal with
-# median 9 days), as the other supplement scripts do. The run exercises the machinery
-# and can show no real effect. Never runs at a real site.
+# independently of every exposure (35% by day 60, time from the index log-normal
+# with median 9 days; a simulated death is in hospital), as the other supplement
+# scripts do. The run exercises the machinery and can show no real effect. Never
+# runs at a real site.
 if (grepl("^synthetic_clif", site_name)) {
   message("*** SYNTHETIC SITE: simulated mortality (plumbing only; synthetic CLIF mortality is unreliable). ***")
   set.seed(20260615)
   simulated_death <- rbinom(nrow(both_cohorts), 1L, 0.35)
   simulated_day   <- pmin(pmax(rlnorm(nrow(both_cohorts), log(9), 0.95), 0.04), 60)
   both_cohorts <- both_cohorts %>%
-    mutate(deceased = simulated_death, mortality_event_60 = simulated_death,
-           surv_time = if_else(simulated_death == 1L, simulated_day, 60))
+    mutate(deceased = simulated_death,
+           death_dttm = if_else(simulated_death == 1L, recorded_dttm + simulated_day * 86400, as.POSIXct(NA)),
+           discharge_dttm = if_else(simulated_death == 1L, death_dttm, pmax(discharge_dttm, recorded_dttm)))
 }
 
+HORIZON_DAYS <- 60
+index_day <- function(dttm, index) as.numeric(difftime(dttm, index, units = "days"))
 ventilated_log_pfvc_sd <- sd(log(ventilated$pfvc[ventilated$pfvc > 0]), na.rm = TRUE)
 both_cohorts <- both_cohorts %>%
   filter(!is.na(pfvc), pfvc > 0, !is.na(sf_ratio), !is.na(sofa_total), !is.na(deceased),
-         !is.na(age_at_admission), !is.na(sex_category), !is.na(race_category)) %>%
+         !is.na(age_at_admission), !is.na(sex_category), !is.na(race_category), !is.na(discharge_dttm)) %>%
   group_by(cohort) %>%
   mutate(sf_z = as.numeric(scale(sf_ratio)), sofa_z = as.numeric(scale(sofa_total))) %>%
   ungroup() %>%
@@ -122,19 +135,27 @@ both_cohorts <- both_cohorts %>%
          sex_category  = factor(sex_category, levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          log_pfvc_z    = log(pfvc) / ventilated_log_pfvc_sd,
-         # The dose exists only under ventilation: (ventilated) x (VT/PBW - ventilated median),
-         # zero in the control. With the cohort main effect in the model, its slope is
-         # estimated from ventilated patients alone, and the zero never places a control
-         # patient on the dose scale; the centring moves only the ventilated intercept
-         # (to the median dose), not the PFVC terms or their cohort contrast.
-         vtpbw_ventilated = if_else(cohort == "Ventilated", vtpbw - median(vtpbw[cohort == "Ventilated"], na.rm = TRUE), 0),
-         escalation_day   = as.numeric(difftime(escalation_dttm, recorded_dttm, units = "days")))
-if (anyNA(both_cohorts$vtpbw_ventilated)) stop("ventilated patients without VT/PBW in the cross-sectional table")
+         # every clock starts at the index; 03's surv_time runs from hospital admission
+         death_index_day     = index_day(death_dttm, recorded_dttm),
+         discharge_index_day = index_day(discharge_dttm, recorded_dttm),
+         escalation_day      = index_day(escalation_dttm, recorded_dttm),
+         # figure 4's severity anchor: SOFA without its respiratory and neurological parts
+         anchor = sofa_cv_97 + sofa_coag + sofa_liver + sofa_renal)
+if (anyNA(both_cohorts$vtpbw[both_cohorts$cohort == "Ventilated"]))
+  stop("ventilated patients without VT/PBW in the cross-sectional table")
+if (anyNA(both_cohorts$anchor)) stop("patients without the SOFA components of the severity anchor")
+n_death_before_index <- sum(both_cohorts$death_index_day < 0, na.rm = TRUE)
+if (n_death_before_index > 0) stop(n_death_before_index, " deaths recorded before the index: check death_dttm")
+ventilated_mean_anchor <- mean(both_cohorts$anchor[both_cohorts$cohort == "Ventilated"])
+both_cohorts <- both_cohorts %>% mutate(anchor_c = anchor - ventilated_mean_anchor)
 
 cohort_counts <- both_cohorts %>% group_by(cohort) %>%
   summarise(n_patients = n(), n_deaths = sum(deceased == 1),
             n_escalated = sum(!is.na(escalation_day)), median_age = median(age_at_admission),
-            median_sf = median(sf_ratio), median_sofa = median(sofa_total), .groups = "drop")
+            median_sf = median(sf_ratio), median_sofa = median(sofa_total),
+            n_deaths_60d = sum(!is.na(death_index_day) & death_index_day <= HORIZON_DAYS),
+            n_deaths_after_discharge_60d = sum(deceased == 0 & !is.na(death_index_day) & death_index_day <= HORIZON_DAYS),
+            .groups = "drop")
 print(as.data.frame(cohort_counts), row.names = FALSE)
 if (any(cohort_counts$n_deaths < MIN_DEATHS) || nrow(cohort_counts) < 2)
   stop("each cohort needs at least ", MIN_DEATHS, " in-hospital deaths")
@@ -187,77 +208,152 @@ curves <- cohort_fits %>% mutate(curves = map(fit, "curves")) %>% select(-fit) %
 # =============================================================================
 # The contrast: the PFVC coefficient, no support minus ventilated
 # =============================================================================
-# Every covariate free by cohort, so each cohort keeps its own age curve and
-# severity slopes; the interaction row is the difference in the PFVC log-OR.
-contrast_rhs <- function(adjustment)
-  paste("vtpbw_ventilated + cohort * (sf_z + sofa_z + ns(age_at_admission, 4) +",
-        if (!is.na(ADJUSTMENTS[[adjustment]])) paste(ADJUSTMENTS[[adjustment]], "+") else "", "log_pfvc_z)")
-both_cohorts_cause_specific <- both_cohorts %>%
-  mutate(time_cause_specific  = pmax(if_else(!is.na(escalation_day), pmin(surv_time, escalation_day), surv_time), 0.01),
-         death_cause_specific = as.integer(mortality_event_60 == 1 & (is.na(escalation_day) | surv_time <= escalation_day)))
-contrast_rows <- function(fit, outcome, adjustment, ratio_label) {
-  co <- summary(fit)$coefficients
-  se_col <- if ("Std. Error" %in% colnames(co)) "Std. Error" else "se(coef)"
-  estimate_col <- if ("Estimate" %in% colnames(co)) "Estimate" else "coef"
-  terms <- c(ventilated = "log_pfvc_z", difference = "cohortNo support:log_pfvc_z")
-  b <- coef(fit)[terms]; V <- vcov(fit)[terms, terms]
-  # the control's own coefficient: ventilated + difference
-  control_b <- sum(b); control_se <- sqrt(sum(V))
-  tibble(quantity = c("ventilated", "no support minus ventilated", "no support"),
-         log_ratio = c(co[terms, estimate_col], control_b),
-         se = c(co[terms, se_col], control_se)) %>%
-    mutate(ratio = exp(log_ratio), ratio_lo = exp(log_ratio - 1.96 * se), ratio_hi = exp(log_ratio + 1.96 * se),
-           p = 2 * pnorm(-abs(log_ratio / se)), ratio_type = ratio_label,
-           outcome = outcome, adjustment = adjustment)
+# Each cohort is fitted on its own, which for the logistic model is the same as
+# one model with every covariate free by cohort, and for the Cox model also lets
+# each cohort keep its own baseline hazard. The difference is the no-support log
+# ratio minus the ventilated one, with the variances of independent samples.
+#
+# The outcome grid. Every clock starts at the index (intubation for the ventilated
+# cohort, ICU admission for the control); 03's surv_time runs from hospital
+# admission and is not used here. Four cause-specific Cox models, 60-day horizon:
+#   in-hospital death, all          censored at discharge
+#   in-hospital death, before escalation   censored at discharge and at escalation
+#   60-day death, all               includes deaths after discharge
+#   60-day death, before escalation  censored at escalation
+# The in-hospital logistic model of the age curves is kept beside them. If the
+# control's PFVC association moves with the outcome (in-hospital against 60-day),
+# deaths after discharge carry it, a reserve channel outside the ventilator; if it
+# moves with escalation censoring, the censoring is informative.
+#
+# The severity forms. "within cohort": SF and SOFA standardised inside each cohort,
+# adjustment only. "standardised to ventilated severity": as figure 4 does, the
+# anchor (SOFA cardiovascular + coagulation + liver + renal, leaving out the
+# respiratory component, which is computed from SF, and the neurological one, which
+# on the day of intubation scores sedation) is centred at the ventilated cohort's
+# mean and allowed to modify the PFVC term. The PFVC coefficient is then the
+# association at the ventilated mean severity, and the PFVC x anchor term tests
+# whether sicker patients show a stronger association. SF stays standardised within
+# cohort, because the control's FiO2 is estimated. The control's value at the
+# ventilated severity is an extrapolation where few controls are that sick: the
+# anchor table says how few.
+severity_rhs <- c(within = "sf_z + sofa_z", standardised = "sf_z + anchor_c + log_pfvc_z:anchor_c")
+SEVERITY_LABELS <- c(within = "within cohort", standardised = "standardised to ventilated severity")
+OUTCOMES <- tribble(
+  ~outcome_key,          ~outcome,                                    ~model,
+  "inhosp_logistic",     "in-hospital death (logistic)",               "logistic",
+  "inhosp_all",          "in-hospital death, all",                     "cox",
+  "inhosp_before_esc",   "in-hospital death, before escalation",       "cox",
+  "day60_all",           "60-day death, all",                          "cox",
+  "day60_before_esc",    "60-day death, before escalation",            "cox")
+outcome_data <- function(cohort_data, outcome_key) {
+  # time (days from the index) and event for each Cox outcome
+  censor_escalation <- grepl("before_esc", outcome_key)
+  in_hospital <- grepl("^inhosp", outcome_key)
+  # an in-hospital death is dated by death_dttm, or by discharge if that is missing;
+  # discharge censors survivors only (a death's timestamp can trail its discharge)
+  cohort_data %>% mutate(
+    death_day = if (in_hospital) if_else(deceased == 1, coalesce(death_index_day, discharge_index_day), NA_real_)
+                else death_index_day,
+    censor_day = pmin(HORIZON_DAYS,
+                      if (in_hospital) if_else(deceased == 1, Inf, discharge_index_day) else Inf,
+                      if (censor_escalation) coalesce(escalation_day, Inf) else Inf),
+    event = as.integer(!is.na(death_day) & death_day <= censor_day),
+    end_day = pmax(if_else(event == 1L, death_day, censor_day), 0.01))
 }
-contrast <- map_dfr(names(ADJUSTMENTS), function(adjustment) bind_rows(
-  contrast_rows(fit_strict(glm(as.formula(paste("deceased ~", contrast_rhs(adjustment))),
-                               family = binomial, data = both_cohorts)),
-                "in-hospital death", adjustment, "OR per SD of log PFVC"),
-  contrast_rows(fit_strict(coxph(as.formula(paste("Surv(time_cause_specific, death_cause_specific) ~", contrast_rhs(adjustment))),
-                                 data = both_cohorts_cause_specific)),
-                "60-day death before escalation (cause-specific)", adjustment, "HR per SD of log PFVC"))) %>%
-  cross_join(both_cohorts_cause_specific %>% summarise(n_patients = n(), n_deaths = sum(deceased == 1),
-                                                       n_deaths_before_escalation = sum(death_cause_specific))) %>%
-  mutate(site = site_name)
+fit_pfvc <- function(cohort_data, outcome_key, model, adjustment, severity) {
+  is_ventilated <- cohort_data$cohort[1] == "Ventilated"
+  rhs <- paste(c(if (is_ventilated) "vtpbw", severity_rhs[[severity]], "ns(age_at_admission, 4)",
+                 if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]], "log_pfvc_z"), collapse = " + ")
+  if (model == "logistic") {
+    fit <- fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = cohort_data))
+    events <- sum(cohort_data$deceased == 1)
+  } else {
+    dat <- outcome_data(cohort_data, outcome_key)
+    fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
+    events <- sum(dat$event)
+  }
+  b <- coef(fit); V <- vcov(fit)
+  interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "anchor_c"))]
+  terms <- c(pfvc = "log_pfvc_z", pfvc_x_anchor = if (length(interaction_term)) interaction_term)
+  tibble(term = names(terms), log_ratio = unname(b[terms]), se = unname(sqrt(diag(V)[terms])),
+         n_patients = nrow(cohort_data), n_deaths = events)
+}
+per_cohort <- expand_grid(cohort = COHORTS, OUTCOMES, adjustment = names(ADJUSTMENTS), severity = names(severity_rhs)) %>%
+  mutate(fit = pmap(list(cohort, outcome_key, model, adjustment, severity),
+                    function(cohort_now, outcome_key, model, adjustment, severity)
+                      fit_pfvc(filter(both_cohorts, cohort == cohort_now), outcome_key, model, adjustment, severity))) %>%
+  unnest(fit)
+difference <- per_cohort %>% filter(term == "pfvc") %>%
+  select(cohort, outcome_key, adjustment, severity, log_ratio, se) %>%
+  pivot_wider(names_from = cohort, values_from = c(log_ratio, se)) %>%
+  transmute(outcome_key, adjustment, severity, cohort = "no support minus ventilated", term = "pfvc",
+            log_ratio = `log_ratio_No support` - log_ratio_Ventilated,
+            se = sqrt(`se_No support`^2 + se_Ventilated^2))
+contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
+  left_join(OUTCOMES, by = "outcome_key") %>%
+  mutate(ratio_type = if_else(model == "logistic", "OR", "HR"),
+         quantity = case_when(term == "pfvc_x_anchor" ~ paste0(cohort, ": PFVC x anchor (per SOFA point)"),
+                              TRUE ~ cohort),
+         ratio = exp(log_ratio), ratio_lo = exp(log_ratio - 1.96 * se), ratio_hi = exp(log_ratio + 1.96 * se),
+         p = 2 * pnorm(-abs(log_ratio / se)), severity = SEVERITY_LABELS[severity],
+         scale = "per SD of log PFVC (ventilated cohort SD)", site = site_name) %>%
+  select(outcome, ratio_type, adjustment, severity, quantity, ratio, ratio_lo, ratio_hi, p, log_ratio, se,
+         n_patients, n_deaths, scale, site)
+
+# how far the control's standardised estimate extrapolates
+anchor_overlap <- both_cohorts %>% group_by(cohort) %>%
+  summarise(anchor_mean = mean(anchor), anchor_sd = sd(anchor),
+            n_patients = n(), n_patients_at_or_above_ventilated_mean = sum(anchor_c >= 0), .groups = "drop") %>%
+  mutate(ventilated_mean_anchor = ventilated_mean_anchor, anchor = "SOFA cardiovascular + coagulation + liver + renal",
+         site = site_name)
 
 message("\nPFVC per SD of log PFVC, per cohort, and the share of the 40-to-90 age gradient it absorbs:")
 print(as.data.frame(estimates %>% select(cohort, adjustment, or_per_sd, or_lo, or_hi, lr_p,
+                                         rise_40_to_90_without_pfvc, rise_40_to_90_with_pfvc,
                                          share_of_age_gradient_absorbed, n_patients, n_deaths) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-message("\nThe contrast (strain predicts the no-support ratio nearer 1, so a difference above 1 for a protective PFVC):")
-print(as.data.frame(contrast %>% select(outcome, adjustment, quantity, ratio, ratio_lo, ratio_hi, p) %>%
+message("\nSeverity anchor by cohort (the standardised control estimate extrapolates where few controls reach the ventilated mean):")
+print(as.data.frame(anchor_overlap %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+message("\nThe contrast by outcome and severity form, adjusted (strain predicts the no-support ratio nearer 1):")
+print(as.data.frame(contrast %>% filter(adjustment == "adjusted") %>%
+                      arrange(factor(outcome, levels = OUTCOMES$outcome), severity, quantity) %>%
+                      select(outcome, severity, quantity, ratio, ratio_lo, ratio_hi, p, n_deaths) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 write_csv(mask_small_counts(estimates), file.path(final_dir, paste0("pfvc_age_control_estimates_", site_name, ".csv")))
 write_csv(curves, file.path(final_dir, paste0("pfvc_age_control_curves_", site_name, ".csv")))
 write_csv(mask_small_counts(contrast), file.path(final_dir, paste0("pfvc_age_control_contrast_", site_name, ".csv")))
+write_csv(mask_small_counts(anchor_overlap), file.path(final_dir, paste0("pfvc_age_control_anchor_", site_name, ".csv")))
 
 # =============================================================================
-# Figure: the age curves by cohort, and the PFVC ratios with the contrast
+# Figure: the age curves by cohort, and the PFVC ratios across the outcome grid
 # =============================================================================
 curve_panel <- curves %>% filter(adjustment == "adjusted") %>%
   pivot_longer(c(without_pfvc, with_pfvc), names_to = "model", values_to = "log_odds") %>%
   mutate(cohort = factor(cohort, levels = COHORTS)) %>%
   ggplot(aes(age_at_admission, log_odds, colour = model)) +
   geom_hline(yintercept = 0, linetype = 2, colour = "grey60") +
-  geom_line(linewidth = 0.9) + geom_point(size = 1.5) + facet_wrap(~ cohort) +
+  geom_line(linewidth = 0.9) + geom_point(size = 1.5) + facet_wrap(~ cohort, ncol = 1) +
   scale_colour_manual(values = OKABE_ITO, labels = c(without_pfvc = "without log PFVC", with_pfvc = "with log PFVC"),
                       name = NULL) +
-  labs(title = "A. Age curve of in-hospital death, with and without predicted lung size",
-       subtitle = "adjusted; white man at the cohort's median dose, severity and PFVC; relative to age 40",
+  labs(title = "A. Age curve of in-hospital death",
+       subtitle = "adjusted; white man at the cohort's median\ndose, severity and PFVC; relative to age 40",
        x = "Age", y = "log-odds of death") +
-  theme_minimal(base_size = 10)
-ratio_panel <- contrast %>% filter(adjustment == "adjusted") %>%
-  mutate(quantity = factor(quantity, levels = rev(c("ventilated", "no support", "no support minus ventilated")))) %>%
-  ggplot(aes(ratio, quantity)) +
+  theme_minimal(base_size = 10) + theme(legend.position = "bottom")
+ratio_panel <- contrast %>%
+  filter(adjustment == "adjusted", quantity %in% c(COHORTS, "no support minus ventilated")) %>%
+  mutate(quantity = factor(quantity, levels = rev(c("Ventilated", "No support", "no support minus ventilated"))),
+         outcome = factor(outcome, levels = OUTCOMES$outcome),
+         severity = factor(severity, levels = SEVERITY_LABELS)) %>%
+  ggplot(aes(ratio, quantity, colour = severity)) +
   geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
-  geom_pointrange(aes(xmin = ratio_lo, xmax = ratio_hi), colour = OKABE_ITO[["with_pfvc"]]) +
+  geom_pointrange(aes(xmin = ratio_lo, xmax = ratio_hi), position = position_dodge(width = 0.6)) +
   facet_wrap(~ outcome, ncol = 1) + scale_x_log10() +
-  labs(title = "B. Per SD of log PFVC, and the cohort contrast",
-       subtitle = "strain predicts a protective ventilated ratio\nand a no-support ratio nearer 1",
-       x = "OR (in-hospital) or HR (60-day, before escalation), log scale", y = NULL) +
-  theme_minimal(base_size = 10)
+  scale_colour_manual(values = c("#009E73", "#CC79A7"), name = NULL) +
+  labs(title = "B. Per SD of log PFVC, by outcome and severity form",
+       subtitle = "adjusted; OR for the logistic row, cause-specific HR otherwise. Strain predicts\na protective ventilated ratio and a no-support ratio nearer 1",
+       x = "ratio per SD of log PFVC, log scale", y = NULL) +
+  theme_minimal(base_size = 10) + theme(legend.position = "bottom")
 ggsave(file.path(final_dir, paste0("pfvc_age_control_", site_name, ".pdf")),
-       curve_panel + ratio_panel + plot_layout(widths = c(1.6, 1)), width = 14, height = 5)
+       curve_panel + ratio_panel + plot_layout(widths = c(1, 1.5)), width = 13, height = 11)
 message("xsec_pfvc_age_control complete -> ", final_dir)
