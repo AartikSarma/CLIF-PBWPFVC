@@ -43,6 +43,9 @@
 #   quick_sf_channels_*                             nested LR tables are not pooled)
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
+#   fingerprint_*, fingerprint_did_*   the height fingerprint (28): the rate per log
+#                          unit of PBW/PFVC moved by height within sex, the whole
+#                          ratio's rate it is read against, and the DiD
 # Joint-model tables are keyed by the panel horizon in the file tag (24h/48h/72h)
 # as well as the contrast horizon, so one site's three panels are never pooled as
 # three sites. Every pooled row carries k, I2, tau2 and the per-site estimates it
@@ -249,6 +252,31 @@ if (nrow(did)) {
     to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
     mutate(scale = "ventilated minus no-support divergence, log marker per day")
+}
+
+# --- 8. the height fingerprint (28_height_fingerprint.R): the rate per log unit of
+#        PBW/PFVC moved by height within sex, beside the whole ratio's rate (the
+#        predicted value), and the difference in differences against the no-support
+#        control. Log units of the ratio are the same at every site, so nothing is
+#        converted. The pooled minimum detectable effect (80% power) says whether
+#        the pool can see the predicted value.
+fp <- read_family("^fingerprint_.*\\.csv$")
+if (nrow(fp)) {
+  fp_est <- fp %>% filter(grepl("^fingerprint_[a-z]+_", file), !grepl("^fingerprint_(ladder|curves|did)_", file))
+  if (nrow(fp_est)) {
+    predicted <- fp_est %>% filter(model == "whole ratio", quantity == "rate") %>%
+      pool_by(marker, adjustment) %>% select(marker, adjustment, predicted_rate = pooled)
+    pooled$fingerprint <- pool_by(fp_est, marker, model, quantity, shared_df, adjustment) %>%
+      left_join(predicted, by = c("marker", "adjustment")) %>%
+      mutate(predicted_rate = if_else(model == "fingerprint" & quantity == "rate", predicted_rate, NA_real_),
+             mde_80 = 2.80 * se, detectable = abs(predicted_rate) >= mde_80,
+             scale = "log marker (per day for the rate) per log unit of PBW/PFVC")
+  }
+  fp_did <- fp %>% filter(grepl("^fingerprint_did_", file))
+  if (nrow(fp_did))
+    pooled$fingerprint_did <- fp_did %>% transmute(site, marker, shared_df, adjustment, estimate = did_estimate, se = did_se) %>%
+      pool_by(marker, shared_df, adjustment) %>%
+      mutate(scale = "ventilated minus no-support fingerprint rate, log marker per day per log unit of PBW/PFVC")
 }
 
 # --- write
