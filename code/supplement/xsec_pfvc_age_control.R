@@ -59,6 +59,8 @@
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03, ventilated)
 #          intermediate/controls/nosupport/analysis_cross_sectional.parquet
 #          (script 03 run with PBWPFVC_COHORT=nosupport)
+#          intermediate/controls/nosupport/resp_support_waterfall_clean.parquet
+#          clif_code_status and clif_hospitalization (config$tables_path; optional)
 # Outputs: final/supplement/
 #   pfvc_age_control_estimates_{site}.csv  per cohort and adjustment: PFVC OR per SD,
 #                                          likelihood-ratio p, share of the age
@@ -74,6 +76,11 @@
 #                                          invasive ventilation)
 #   pfvc_age_control_escalation_hazard_{site}.csv  the control's escalation hazard per
 #                                          SD of log PFVC (any support; invasive)
+#   pfvc_age_control_code_status_{site}.csv  patients and deaths by code status at the
+#                                          index and later limitation, per cohort
+# The contrast and the escalation hazard are fitted in three populations (column
+# population): everyone, full code at the index, and full code throughout; the
+# last two need the optional CLIF code_status table (section "Code status").
 #   pfvc_age_control_{site}.pdf
 # Usage: Rscript code/supplement/xsec_pfvc_age_control.R   (PBWPFVC_COHORT unset)
 # =============================================================================
@@ -196,6 +203,83 @@ cohort_counts <- both_cohorts %>% group_by(cohort) %>%
 print(as.data.frame(cohort_counts), row.names = FALSE)
 if (any(cohort_counts$n_deaths < MIN_DEATHS) || nrow(cohort_counts) < 2)
   stop("each cohort needs at least ", MIN_DEATHS, " in-hospital deaths")
+
+# =============================================================================
+# Code status: the full-code populations
+# =============================================================================
+# MIMIC's third run left one explanation for the control's protective PFVC
+# association before intubation: goals of care. A control patient with a smaller
+# predicted lung (at fixed age, sex and race: shorter, perhaps frailer) who
+# deteriorates may die without intubation under a do-not-intubate order, while a
+# larger one is intubated. Restricting both cohorts to full-code patients removes
+# that path. Two populations, beside everyone:
+#   full code at the index   the last code status recorded up to 24 hours after
+#                            the index is Full or Presume Full (orders are often
+#                            written hours after ICU admission). A limitation
+#                            entered later, during deterioration, is not removed.
+#   full code throughout     full code at the index AND no other status recorded
+#                            before death, discharge or day 60. This removes the
+#                            later limitations too, but it conditions on the future:
+#                            limitations are often written as death approaches, so
+#                            it drops many deaths and selects survivors. A reading
+#                            aid for the first population, not a replacement.
+# Code status is a patient-level CLIF table (clif_code_status: patient_id,
+# start_dttm, code_status_category), mapped to hospitalizations through
+# clif_hospitalization. It is optional in CLIF: without it the full-code
+# populations are skipped, announced, and only everyone is analysed.
+CODE_STATUS_WINDOW_H <- 24
+FULL_CODE_CATEGORIES <- c("full", "presume full")
+read_clif_table <- function(table_name, columns) {
+  path <- file.path(path.expand(config$tables_path), paste0("clif_", table_name, ".", config$file_type))
+  switch(config$file_type,
+         parquet = read_parquet(path, col_select = all_of(columns)),
+         csv     = readr::read_csv(path, col_select = all_of(columns), show_col_types = FALSE),
+         fst     = fst::read_fst(path, columns = columns))
+}
+code_status_file <- file.path(path.expand(config$tables_path), paste0("clif_code_status.", config$file_type))
+HAS_CODE_STATUS <- file.exists(code_status_file)
+if (HAS_CODE_STATUS) {
+  code_status <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
+    inner_join(read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
+                 filter(hospitalization_id %in% both_cohorts$hospitalization_id),
+               by = "patient_id", relationship = "many-to-many") %>%
+    # keyed by cohort too: a hospitalization can hold a no-support index and, later,
+    # a ventilated one
+    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, index_dttm = recorded_dttm,
+                                          end_dttm = pmin(death_dttm, discharge_dttm,
+                                                          recorded_dttm + HORIZON_DAYS * 86400, na.rm = TRUE)),
+               by = "hospitalization_id", relationship = "many-to-many") %>%
+    mutate(is_full = tolower(code_status_category) %in% FULL_CODE_CATEGORIES)
+  baseline_status <- code_status %>%
+    filter(start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
+    group_by(cohort, hospitalization_id) %>% slice_max(start_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    transmute(cohort, hospitalization_id, code_status_at_index = if_else(is_full, "full code", "limited or other"))
+  limited_later <- code_status %>%
+    filter(start_dttm > index_dttm + CODE_STATUS_WINDOW_H * 3600, start_dttm <= end_dttm, !is_full) %>%
+    distinct(cohort, hospitalization_id) %>% mutate(limited_later = TRUE)
+  both_cohorts <- both_cohorts %>%
+    left_join(baseline_status, by = c("cohort", "hospitalization_id")) %>%
+    left_join(limited_later, by = c("cohort", "hospitalization_id")) %>%
+    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"),
+           limited_later = coalesce(limited_later, FALSE))
+} else {
+  message("*** No code_status table at ", config$tables_path, ": the full-code populations are skipped. ***")
+  both_cohorts <- both_cohorts %>% mutate(code_status_at_index = "no record", limited_later = FALSE)
+}
+both_cohorts <- both_cohorts %>%
+  mutate(population_everyone = TRUE,
+         population_full_code_at_index = code_status_at_index == "full code",
+         population_full_code_throughout = code_status_at_index == "full code" & !limited_later)
+POPULATIONS <- c(everyone = "everyone",
+                 full_code_at_index = "full code at the index",
+                 full_code_throughout = "full code throughout (conditions on the future)")
+if (!HAS_CODE_STATUS) POPULATIONS <- POPULATIONS["everyone"]
+code_status_counts <- both_cohorts %>%
+  group_by(cohort, code_status_at_index, limited_later) %>%
+  summarise(n_patients = n(), n_deaths = sum(deceased == 1), .groups = "drop") %>%
+  mutate(code_status_table = HAS_CODE_STATUS, site = site_name)
+message("\nCode status at the index (last status up to ", CODE_STATUS_WINDOW_H, " h after it) and later limitation:")
+print(as.data.frame(code_status_counts), row.names = FALSE)
 
 # The control's escalation paths within the horizon, and where its deaths fall: the
 # deaths after escalation are the ones strain could reach, but only on the path
@@ -327,29 +411,33 @@ fit_pfvc <- function(cohort_data, outcome_key, model, adjustment, severity) {
   is_ventilated <- cohort_data$cohort[1] == "Ventilated"
   rhs <- paste(c(if (is_ventilated) "vtpbw", severity_rhs[[severity]], "ns(age_at_admission, 4)",
                  if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]], "log_pfvc_z"), collapse = " + ")
-  if (model == "logistic") {
-    fit <- fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = cohort_data))
-    events <- sum(cohort_data$deceased == 1)
-  } else {
-    dat <- outcome_data(cohort_data, outcome_key)
-    fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
-    events <- sum(dat$event)
-  }
+  dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
+  events <- sum(dat$event == 1)
+  # a restricted population can run short of deaths: the row says so and has no estimate
+  if (events < MIN_DEATHS)
+    return(tibble(term = "pfvc", log_ratio = NA_real_, se = NA_real_, n_patients = nrow(cohort_data),
+                  n_deaths = events, note = paste("skipped: fewer than", MIN_DEATHS, "deaths")))
+  fit <- if (model == "logistic")
+    fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = dat)) else
+    fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
   b <- coef(fit); V <- vcov(fit)
   interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "anchor_c"))]
   terms <- c(pfvc = "log_pfvc_z", pfvc_x_anchor = if (length(interaction_term)) interaction_term)
   tibble(term = names(terms), log_ratio = unname(b[terms]), se = unname(sqrt(diag(V)[terms])),
-         n_patients = nrow(cohort_data), n_deaths = events)
+         n_patients = nrow(cohort_data), n_deaths = events, note = NA_character_)
 }
-per_cohort <- expand_grid(cohort = COHORTS, OUTCOMES, adjustment = names(ADJUSTMENTS), severity = names(severity_rhs)) %>%
-  mutate(fit = pmap(list(cohort, outcome_key, model, adjustment, severity),
-                    function(cohort_now, outcome_key, model, adjustment, severity)
-                      fit_pfvc(filter(both_cohorts, cohort == cohort_now), outcome_key, model, adjustment, severity))) %>%
+population_data <- function(population, cohort_now)
+  both_cohorts %>% filter(cohort == cohort_now, .data[[paste0("population_", population)]])
+per_cohort <- expand_grid(population = names(POPULATIONS), cohort = COHORTS, OUTCOMES,
+                          adjustment = names(ADJUSTMENTS), severity = names(severity_rhs)) %>%
+  mutate(fit = pmap(list(population, cohort, outcome_key, model, adjustment, severity),
+                    function(population, cohort_now, outcome_key, model, adjustment, severity)
+                      fit_pfvc(population_data(population, cohort_now), outcome_key, model, adjustment, severity))) %>%
   unnest(fit)
 difference <- per_cohort %>% filter(term == "pfvc") %>%
-  select(cohort, outcome_key, adjustment, severity, log_ratio, se) %>%
+  select(population, cohort, outcome_key, adjustment, severity, log_ratio, se) %>%
   pivot_wider(names_from = cohort, values_from = c(log_ratio, se)) %>%
-  transmute(outcome_key, adjustment, severity, cohort = "no support minus ventilated", term = "pfvc",
+  transmute(population, outcome_key, adjustment, severity, cohort = "no support minus ventilated", term = "pfvc",
             log_ratio = `log_ratio_No support` - log_ratio_Ventilated,
             se = sqrt(`se_No support`^2 + se_Ventilated^2))
 contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
@@ -359,9 +447,10 @@ contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
                               TRUE ~ cohort),
          ratio = exp(log_ratio), ratio_lo = exp(log_ratio - 1.96 * se), ratio_hi = exp(log_ratio + 1.96 * se),
          p = 2 * pnorm(-abs(log_ratio / se)), severity = SEVERITY_LABELS[severity],
+         population = POPULATIONS[population],
          scale = "per SD of log PFVC (ventilated cohort SD)", site = site_name) %>%
-  select(outcome, ratio_type, adjustment, severity, quantity, ratio, ratio_lo, ratio_hi, p, log_ratio, se,
-         n_patients, n_deaths, scale, site)
+  select(population, outcome, ratio_type, adjustment, severity, quantity, ratio, ratio_lo, ratio_hi, p, log_ratio, se,
+         n_patients, n_deaths, note, scale, site)
 
 # =============================================================================
 # The control's escalation hazard by PFVC
@@ -372,8 +461,8 @@ contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
 # days. An HR below 1 says larger predicted lungs escalate less, so censoring at
 # escalation removes smaller-lung patients preferentially, and the before-escalation
 # death estimate is read on a population that PFVC itself selected.
-fit_escalation <- function(escalation_column, escalation_label, adjustment, severity) {
-  dat <- both_cohorts %>% filter(cohort == "No support") %>%
+fit_escalation <- function(population, escalation_column, escalation_label, adjustment, severity) {
+  dat <- population_data(population, "No support") %>%
     mutate(escalation_time = .data[[escalation_column]],
            death_or_discharge = pmin(coalesce(death_index_day, Inf), discharge_index_day),
            censor_day = pmin(HORIZON_DAYS, death_or_discharge),
@@ -381,15 +470,21 @@ fit_escalation <- function(escalation_column, escalation_label, adjustment, seve
            end_day = pmax(if_else(event == 1L, escalation_time, censor_day), 0.01))
   rhs <- paste(c(severity_rhs[[severity]], "ns(age_at_admission, 4)",
                  if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]], "log_pfvc_z"), collapse = " + ")
+  row_head <- tibble(population = POPULATIONS[[population]], escalation = escalation_label, adjustment = adjustment,
+                     severity = SEVERITY_LABELS[[severity]])
+  if (sum(dat$event) < MIN_DEATHS)
+    return(row_head %>% mutate(term = "pfvc", log_hr = NA_real_, se = NA_real_, n_patients = nrow(dat),
+                               n_patients_escalated = sum(dat$event),
+                               note = paste("skipped: fewer than", MIN_DEATHS, "escalations")))
   fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
   b <- coef(fit); se <- sqrt(diag(vcov(fit)))
   interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "anchor_c"))]
   terms <- c(pfvc = "log_pfvc_z", pfvc_x_anchor = if (length(interaction_term)) interaction_term)
-  tibble(escalation = escalation_label, adjustment = adjustment, severity = SEVERITY_LABELS[[severity]],
-         term = names(terms), log_hr = unname(b[terms]), se = unname(se[terms]),
-         n_patients = nrow(dat), n_patients_escalated = sum(dat$event))
+  row_head %>% cross_join(tibble(term = names(terms), log_hr = unname(b[terms]), se = unname(se[terms]))) %>%
+    mutate(n_patients = nrow(dat), n_patients_escalated = sum(dat$event), note = NA_character_)
 }
 escalation_hazard <- expand_grid(
+  population = names(POPULATIONS),
   tibble(escalation_column = c("escalation_day", "imv_day"),
          escalation_label = c("any advanced support", "invasive ventilation")),
   adjustment = names(ADJUSTMENTS), severity = names(severity_rhs)) %>%
@@ -412,11 +507,15 @@ print(as.data.frame(estimates %>% select(cohort, adjustment, or_per_sd, or_lo, o
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 message("\nSeverity anchor by cohort (the standardised control estimate extrapolates where few controls reach the ventilated mean):")
 print(as.data.frame(anchor_overlap %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-message("\nThe contrast by outcome and severity form, adjusted (strain predicts the no-support ratio nearer 1):")
-print(as.data.frame(contrast %>% filter(adjustment == "adjusted") %>%
-                      arrange(factor(outcome, levels = OUTCOMES$outcome), severity, quantity) %>%
-                      select(outcome, severity, quantity, ratio, ratio_lo, ratio_hi, p, n_deaths) %>%
+message("\nThe contrast by population and outcome, adjusted, severity within cohort (strain predicts the no-support ratio nearer 1;",
+        " the severity-standardised rows and the PFVC x anchor terms are in the CSV):")
+print(as.data.frame(contrast %>% filter(adjustment == "adjusted", severity == SEVERITY_LABELS[["within"]],
+                                        quantity %in% c(COHORTS, "no support minus ventilated")) %>%
+                      arrange(factor(population, levels = POPULATIONS), factor(outcome, levels = OUTCOMES$outcome), quantity) %>%
+                      select(population, outcome, quantity, ratio, ratio_lo, ratio_hi, p, n_deaths, note) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+write_csv(mask_small_counts(code_status_counts),
+          file.path(final_dir, paste0("pfvc_age_control_code_status_", site_name, ".csv")))
 
 write_csv(mask_small_counts(estimates), file.path(final_dir, paste0("pfvc_age_control_estimates_", site_name, ".csv")))
 write_csv(curves, file.path(final_dir, paste0("pfvc_age_control_curves_", site_name, ".csv")))
@@ -424,7 +523,7 @@ write_csv(mask_small_counts(contrast), file.path(final_dir, paste0("pfvc_age_con
 write_csv(mask_small_counts(anchor_overlap), file.path(final_dir, paste0("pfvc_age_control_anchor_", site_name, ".csv")))
 message("\nThe control's escalation hazard per SD of log PFVC (below 1: larger predicted lungs escalate less):")
 print(as.data.frame(escalation_hazard %>% filter(adjustment == "adjusted") %>%
-                      select(escalation, severity, term, hr, hr_lo, hr_hi, p, n_patients_escalated) %>%
+                      select(population, escalation, severity, term, hr, hr_lo, hr_hi, p, n_patients_escalated, note) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 write_csv(mask_small_counts(escalation_paths),
           file.path(final_dir, paste0("pfvc_age_control_escalation_paths_", site_name, ".csv")))
@@ -447,17 +546,19 @@ curve_panel <- curves %>% filter(adjustment == "adjusted") %>%
        x = "Age", y = "log-odds of death") +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
 ratio_panel <- contrast %>%
-  filter(adjustment == "adjusted", quantity %in% c(COHORTS, "no support minus ventilated")) %>%
+  filter(adjustment == "adjusted", severity == SEVERITY_LABELS[["within"]], !is.na(ratio),
+         quantity %in% c(COHORTS, "no support minus ventilated")) %>%
   mutate(quantity = factor(quantity, levels = rev(c("Ventilated", "No support", "no support minus ventilated"))),
          outcome = factor(outcome, levels = OUTCOMES$outcome),
-         severity = factor(severity, levels = SEVERITY_LABELS)) %>%
-  ggplot(aes(ratio, quantity, colour = severity)) +
+         population = factor(population, levels = POPULATIONS)) %>%
+  ggplot(aes(ratio, quantity, colour = population)) +
   geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
-  geom_pointrange(aes(xmin = ratio_lo, xmax = ratio_hi), position = position_dodge(width = 0.6)) +
+  geom_pointrange(aes(xmin = ratio_lo, xmax = ratio_hi), position = position_dodge(width = 0.7)) +
   facet_wrap(~ outcome, ncol = 1) + scale_x_log10() +
-  scale_colour_manual(values = c("#009E73", "#CC79A7"), name = NULL) +
-  labs(title = "B. Per SD of log PFVC, by outcome and severity form",
-       subtitle = "adjusted; OR for the logistic row, cause-specific HR otherwise. Strain predicts\na protective ventilated ratio and a no-support ratio nearer 1",
+  scale_colour_manual(values = c("#009E73", "#CC79A7", "#56B4E9")[seq_along(POPULATIONS)], name = NULL) +
+  guides(colour = guide_legend(ncol = 1)) +
+  labs(title = "B. Per SD of log PFVC, by outcome and population",
+       subtitle = "adjusted, severity within cohort; OR for the logistic row, cause-specific HR otherwise.\nStrain predicts a protective ventilated ratio and a no-support ratio nearer 1",
        x = "ratio per SD of log PFVC, log scale", y = NULL) +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
 ggsave(file.path(final_dir, paste0("pfvc_age_control_", site_name, ".pdf")),
