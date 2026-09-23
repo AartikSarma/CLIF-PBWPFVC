@@ -144,8 +144,22 @@ both_cohorts <- both_cohorts %>%
 if (anyNA(both_cohorts$vtpbw[both_cohorts$cohort == "Ventilated"]))
   stop("ventilated patients without VT/PBW in the cross-sectional table")
 if (anyNA(both_cohorts$anchor)) stop("patients without the SOFA components of the severity anchor")
-n_death_before_index <- sum(both_cohorts$death_index_day < 0, na.rm = TRUE)
-if (n_death_before_index > 0) stop(n_death_before_index, " deaths recorded before the index: check death_dttm")
+# Deaths timestamped before the index. A death recorded as a date without a time
+# (MIMIC's dod for deaths outside hospital) sits at midnight, so a patient who dies
+# on the day of the index can appear to die hours before it. Within one day of the
+# index such a death is placed at the index; further back it is a data error and
+# stops the script. The breakdown is printed either way.
+death_before_index <- both_cohorts %>% filter(!is.na(death_index_day), death_index_day < 0) %>%
+  mutate(how_far = if_else(death_index_day >= -1, "within 1 day before the index", "more than 1 day before the index")) %>%
+  count(cohort, how_far, in_hospital_death = deceased == 1, name = "n_patients")
+if (nrow(death_before_index)) {
+  message("Deaths timestamped before the index:")
+  print(as.data.frame(death_before_index), row.names = FALSE)
+}
+if (any(death_before_index$how_far == "more than 1 day before the index"))
+  stop("deaths recorded more than a day before the index: check death_dttm and the index at this site")
+both_cohorts <- both_cohorts %>%
+  mutate(death_index_day = if_else(!is.na(death_index_day) & death_index_day < 0, 0, death_index_day))
 ventilated_mean_anchor <- mean(both_cohorts$anchor[both_cohorts$cohort == "Ventilated"])
 both_cohorts <- both_cohorts %>% mutate(anchor_c = anchor - ventilated_mean_anchor)
 
