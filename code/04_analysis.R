@@ -1309,8 +1309,11 @@ write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", si
 # estimated from a sliver of residual variation; PFVC keeps far more. The share of
 # each exposure's variance that survives the adjustment set explains the CI widths
 # in one number, and the share of THAT residual explained by height says what the
-# surviving variation is: for both the ratio and PFVC it is height (the ratio falls
-# with height, PFVC rises), so the two exposures are one signal on two scales.
+# surviving variation is. Height enters as a spline within sex: GLI FVC is a power
+# law in height but Devine PBW is a line with an intercept, so at fixed age, sex and
+# race log PBW/PFVC is curved in height and runs opposite ways by sex (a hump near
+# 167 cm in men, rising to ~185 cm in women). A linear height term finds almost none
+# of that; PFVC's height channel is near log-linear and either form captures it.
 # Reported per cohort, under linear and spline age, with and without VT/PBW.
 nc_idvar <- map_dfr(nc_cohort_levels, function(cl) {
   d <- nc_frames %>% filter(nc_cohort == cl)
@@ -1329,8 +1332,9 @@ nc_idvar <- map_dfr(nc_cohort_levels, function(cl) {
                n = nrow(dd), r2_on_adjusters = summary(fit)$r.squared,
                residual_variance_share = 1 - summary(fit)$r.squared,
                residual_sd_in_analytic_sd = sd(resid(fit)) / nc_sd[[e]],
-               # how much of what survives the adjusters is height: R2 of the residual on height
-               height_share_of_residual = summary(lm(resid(fit) ~ dd$height_cm))$r.squared)
+               # how much of what survives the adjusters is height: R2 of the residual on a
+               # sex-specific natural spline in height (the ratio's height channel is curved)
+               height_share_of_residual = summary(lm(resid(fit) ~ dd$sex_category * ns(dd$height_cm, 3)))$r.squared)
       })
     })
   })
