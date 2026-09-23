@@ -144,22 +144,22 @@ both_cohorts <- both_cohorts %>%
 if (anyNA(both_cohorts$vtpbw[both_cohorts$cohort == "Ventilated"]))
   stop("ventilated patients without VT/PBW in the cross-sectional table")
 if (anyNA(both_cohorts$anchor)) stop("patients without the SOFA components of the severity anchor")
-# Deaths timestamped before the index. A death recorded as a date without a time
-# (MIMIC's dod for deaths outside hospital) sits at midnight, so a patient who dies
-# on the day of the index can appear to die hours before it. Within one day of the
-# index such a death is placed at the index; further back it is a data error and
-# stops the script. The breakdown is printed either way.
+# Deaths timestamped before the index are excluded (user, 2026-09-23). A death
+# cannot precede the index, so either the death time or the index is wrong for
+# these patients (MIMIC: 14 of about 19,000, most of them in-hospital deaths within
+# a day before a ventilated index), and neither can be repaired from here. The
+# breakdown is printed and the counts excluded per cohort are written with the
+# estimates.
 death_before_index <- both_cohorts %>% filter(!is.na(death_index_day), death_index_day < 0) %>%
   mutate(how_far = if_else(death_index_day >= -1, "within 1 day before the index", "more than 1 day before the index")) %>%
   count(cohort, how_far, in_hospital_death = deceased == 1, name = "n_patients")
 if (nrow(death_before_index)) {
-  message("Deaths timestamped before the index:")
+  message("Excluded, death timestamped before the index:")
   print(as.data.frame(death_before_index), row.names = FALSE)
 }
-if (any(death_before_index$how_far == "more than 1 day before the index"))
-  stop("deaths recorded more than a day before the index: check death_dttm and the index at this site")
-both_cohorts <- both_cohorts %>%
-  mutate(death_index_day = if_else(!is.na(death_index_day) & death_index_day < 0, 0, death_index_day))
+excluded_by_cohort <- both_cohorts %>% group_by(cohort) %>%
+  summarise(n_patients_excluded_death_before_index = sum(!is.na(death_index_day) & death_index_day < 0), .groups = "drop")
+both_cohorts <- both_cohorts %>% filter(is.na(death_index_day) | death_index_day >= 0)
 ventilated_mean_anchor <- mean(both_cohorts$anchor[both_cohorts$cohort == "Ventilated"])
 both_cohorts <- both_cohorts %>% mutate(anchor_c = anchor - ventilated_mean_anchor)
 
@@ -215,6 +215,7 @@ fit_cohort <- function(cohort_data, adjustment) {
 cohort_fits <- expand_grid(cohort = COHORTS, adjustment = names(ADJUSTMENTS)) %>%
   mutate(fit = map2(cohort, adjustment, ~ fit_cohort(filter(both_cohorts, cohort == .x), .y)))
 estimates <- cohort_fits %>% mutate(estimates = map(fit, "estimates")) %>% select(-fit) %>% unnest(estimates) %>%
+  left_join(excluded_by_cohort %>% mutate(cohort = as.character(cohort)), by = "cohort") %>%
   mutate(scale = "OR per SD of log PFVC (ventilated cohort SD)", site = site_name)
 curves <- cohort_fits %>% mutate(curves = map(fit, "curves")) %>% select(-fit) %>% unnest(curves) %>%
   mutate(scale = "log-odds of in-hospital death relative to age 40", site = site_name)
