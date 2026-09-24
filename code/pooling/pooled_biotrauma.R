@@ -378,14 +378,20 @@ if (nrow(contrast_tbl)) {
     mutate(ratio = exp(pooled), ratio_lo = exp(lo), ratio_hi = exp(hi))
 }
 
+# each site labels its short-women subgroup with its own median female height ("women
+# shorter than 163 cm"); the subgroup is the same definition everywhere, so the label is
+# made common before pooling, or each site would pool alone
+common_short_women <- function(label) sub("women shorter than [0-9.]+ cm", "women below the median female height", label)
 crs_tbl <- read_family("^crs_channels_estimates_.*\\.csv$", SUPPLEMENT)
 if (nrow(crs_tbl)) {
   pooled$crs_channels <- crs_tbl %>% filter(!is.na(estimate), !is.na(se)) %>%
+    mutate(model = common_short_women(model)) %>%
     select(site, sample, model, term, estimate, se) %>%
     pool_by(sample, model, term) %>%
     mutate(scale = "exponent of log Crs (1 = proportional scaling)")
   crs_tests <- read_family("^crs_channels_tests_.*\\.csv$", SUPPLEMENT)
   if (nrow(crs_tests)) pooled$crs_channel_aic <- crs_tests %>% filter(grepl("AIC", test)) %>%
+    mutate(test = common_short_women(test)) %>%
     group_by(sample, test) %>%
     summarise(k = n(), summed_delta_aic = sum(statistic), sites_below_zero = sum(statistic < 0),
               sites = paste(site, collapse = ";"), site_delta_aic = paste(round(statistic, 1), collapse = ";"),
