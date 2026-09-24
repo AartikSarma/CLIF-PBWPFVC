@@ -198,7 +198,9 @@ RHAT_MAX <- 1.1   # a site's estimate enters a pool only if its own chain conver
 PER_LOG_PFVC <- 0.1
 sc <- read_family("^jm_scale_.*\\.csv$")
 pfvc_sd <- if (nrow(sc)) sc %>% filter(cohort == "imv") %>%
-  transmute(site, panel_h = paste0(horizon_days, "d"), sd_log_pfvc) %>% distinct() else
+  # the panel tag comes from the file name (jm_scale_48h_*, jm_scale_7d_*), as for every
+  # other family: horizon_days would turn a 48-hour panel into "2d" and miss its estimates
+  transmute(site, panel_h = str_match(file, "^jm_scale_(\\d+[hd])_")[, 2], sd_log_pfvc) %>% distinct() else
   tibble(site = character(), panel_h = character(), sd_log_pfvc = double())
 # Scale the estimates that are per SD of log PFVC (`per_sd`, one value per row)
 # to per PER_LOG_PFVC log units, leaving every other row as it is with the unit
@@ -364,6 +366,8 @@ if (nrow(fp)) {
 #        channels (supplement/xsec_crs_channels.R). Read from each site's supplement/.
 #   channels     each GLI piece per cohort and ventilated minus no support, per log
 #                unit of the piece: the same unit at every site, pooled as it stands.
+#                Each site reports the pieces on two exposure scales (log PFVC, and
+#                log PBW/PFVC, the strain error), so every pool and test keys on exposure.
 #                The pooled test that the pieces' differences agree needs each site's
 #                covariance between pieces (pfvc_age_control_channel_vcov_*), pooled by
 #                multivariate common-effect inverse variance; a site without that table
@@ -386,18 +390,20 @@ PIECES <- c("height", "age", "sex", "race")
 channels_tbl <- read_family("^pfvc_age_control_channels_.*\\.csv$", SUPPLEMENT)
 if (nrow(channels_tbl)) {
   pooled$age_control_channels <- channels_tbl %>% filter(!is.na(log_ratio), !is.na(se)) %>%
-    transmute(site, population, outcome, ratio_type, quantity, piece, estimate = log_ratio, se) %>%
-    pool_by(population, outcome, ratio_type, quantity, piece) %>%
+    transmute(site, exposure, population, outcome, ratio_type, quantity, piece, estimate = log_ratio, se) %>%
+    pool_by(exposure, population, outcome, ratio_type, quantity, piece) %>%
     mutate(ratio_per_0.1 = exp(0.1 * pooled), lo_per_0.1 = exp(0.1 * lo), hi_per_0.1 = exp(0.1 * hi),
-           scale = "log ratio per log unit of the GLI piece; ratio_per_0.1 per 0.1 log units (about 10% of PFVC)")
+           scale = paste0("log ratio per log unit of the GLI piece, ", exposure, " scale; ratio_per_0.1 per 0.1 log units"))
   vcov_tbl <- read_family("^pfvc_age_control_channel_vcov_.*\\.csv$", SUPPLEMENT)
   if (nrow(vcov_tbl)) {
     differences <- channels_tbl %>% filter(quantity == "ventilated minus no support", piece %in% PIECES)
-    pooled$age_control_channel_tests <- vcov_tbl %>% distinct(population, outcome) %>%
-      pmap_dfr(function(population, outcome) {
+    pooled$age_control_channel_tests <- vcov_tbl %>% distinct(exposure, population, outcome) %>%
+      pmap_dfr(function(exposure, population, outcome) {
         per_site <- map(unique(vcov_tbl$site), function(s) {
-          b <- differences %>% filter(site == s, .data$population == .env$population, .data$outcome == .env$outcome)
-          V <- vcov_tbl %>% filter(site == s, .data$population == .env$population, .data$outcome == .env$outcome)
+          b <- differences %>% filter(site == s, .data$exposure == .env$exposure, .data$population == .env$population,
+                                      .data$outcome == .env$outcome)
+          V <- vcov_tbl %>% filter(site == s, .data$exposure == .env$exposure, .data$population == .env$population,
+                                   .data$outcome == .env$outcome)
           if (nrow(b) != 4 || nrow(V) != 16 || anyNA(b$log_ratio)) return(NULL)
           b_vec <- setNames(b$log_ratio, b$piece)[PIECES]
           V_mat <- matrix(NA_real_, 4, 4, dimnames = list(PIECES, PIECES))
@@ -411,7 +417,7 @@ if (nrow(channels_tbl)) {
         names(b_pooled) <- PIECES
         four_equal <- rbind(c(1, -1, 0, 0), c(1, 0, -1, 0), c(1, 0, 0, -1))
         size_equal <- rbind(c(1, 0, -1, 0), c(1, 0, 0, -1))    # height = sex = race, age left out
-        tibble(population = population, outcome = outcome, k = length(per_site),
+        tibble(exposure = exposure, population = population, outcome = outcome, k = length(per_site),
                sites = paste(map_chr(per_site, "site"), collapse = ";"),
                test = c("the four differences are equal (3 df)", "height = sex = race differences (2 df)"),
                p = c(equal_test_p(b_pooled, V_pooled, four_equal), equal_test_p(b_pooled, V_pooled, size_equal)))
@@ -464,7 +470,9 @@ if (nrow(crs_tbl)) {
 #           in-hospital death
 #   page 3  each cohort's own piece coefficients, pooled: where each difference comes from
 # Ratios per 0.1 log units of the piece (about 10% of PFVC); below 1 = a larger predicted
-# lung through that input goes with less death. Pooled rows are diamonds.
+# lung through that input goes with less death. Pooled rows are diamonds. The pages are
+# drawn on the log PFVC scale; the strain-error scale is in the tables only.
+FIGURE_EXPOSURE <- "log PFVC"
 PIECE_ORDER <- c("height", "sex", "race", "age", "all four (one beta)")
 PIECE_COLOURS <- setNames(okabe[c(1, 3, 5, 2, 8)], PIECE_ORDER)
 DIFFERENCE <- "ventilated minus no support"
@@ -473,10 +481,10 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
                                       hi = exp(0.1 * (log_ratio + 1.96 * se)))
   channel_rows <- function(quantities, populations, outcomes) {
     sites_part <- channels_tbl %>%
-      filter(quantity %in% quantities, population %in% populations, outcome %in% outcomes, !is.na(log_ratio)) %>%
+      filter(exposure == FIGURE_EXPOSURE, quantity %in% quantities, population %in% populations, outcome %in% outcomes, !is.na(log_ratio)) %>%
       per_0.1() %>% transmute(population, outcome, quantity, piece, site = anon(site), ratio, lo, hi, is_pooled = FALSE)
     pooled_part <- pooled$age_control_channels %>%
-      filter(quantity %in% quantities, population %in% populations, outcome %in% outcomes) %>%
+      filter(exposure == FIGURE_EXPOSURE, quantity %in% quantities, population %in% populations, outcome %in% outcomes) %>%
       transmute(population, outcome, quantity, piece, site = "Pooled", ratio = ratio_per_0.1, lo = lo_per_0.1,
                 hi = hi_per_0.1, is_pooled = TRUE)
     bind_rows(sites_part, pooled_part) %>%
@@ -529,7 +537,7 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
                    piece ~ population, "Ventilated minus no support, by GLI input and population",
                    "in-hospital death, OR per 0.1 log units of the piece; hypoxemic = index SF < 315 in both cohorts")
   cohort_rows <- pooled$age_control_channels %>%
-    filter(population == "everyone", outcome %in% outcomes_main, quantity %in% c("Ventilated", "No support")) %>%
+    filter(exposure == FIGURE_EXPOSURE, population == "everyone", outcome %in% outcomes_main, quantity %in% c("Ventilated", "No support")) %>%
     transmute(outcome = factor(outcome, outcomes_main), quantity, piece = factor(piece, levels = PIECE_ORDER),
               ratio = ratio_per_0.1, lo = lo_per_0.1, hi = hi_per_0.1)
   page_3 <- ggplot(cohort_rows, aes(ratio, fct_rev(piece), colour = quantity)) +
