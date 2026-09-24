@@ -44,7 +44,7 @@ output_dir <- config$output_dir
 final_dir  <- final_dir_for("injury")
 source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP, JM_HORIZON, N_PERIODS, h_suffix
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
-MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
+MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")   # figure 4
 # RRT as a third competing cause (creatinine only): its own tables and its own
 # bundles, so the two-cause primary is never overwritten by the sensitivity
 RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")

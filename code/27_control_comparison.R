@@ -16,7 +16,7 @@
 #                              the ventilated cohort's severity (PBWPFVC_JM_SEV_CENTER,
 #                              the "sevstd_" tables); the severity x divergence term
 #                              says whether sicker controls diverge faster.
-#   no support, SF <= 315      the same control restricted to patients hypoxemic on
+#   no support, SF < 315       the same control restricted to patients hypoxemic on
 #                              the index day ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
@@ -78,7 +78,7 @@ if (!nrow(arms)) stop("no jm_estimates_*", MOD_FORM, "_", h_suffix, "_* tables f
 arms <- arms %>%
   mutate(sf_part  = str_match(restriction, "sf([0-9.]+)to([0-9.]+)_")[, 2:3, drop = FALSE] %>%
            apply(1, function(limits) if (anyNA(limits)) NA_character_ else
-             if (as.numeric(limits[1]) == 0) paste0("SF <= ", limits[2]) else paste0("SF ", limits[1], "-", limits[2])),
+             if (as.numeric(limits[1]) == 0) paste0("SF < ", limits[2]) else paste0("SF ", limits[1], "-", limits[2])),
          arm = paste0(cohort_label, if_else(is.na(sf_part), "", paste0(", ", sf_part))))
 message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site, "): ", nrow(arms), " arms ===")
 message(paste0("  ", arms$arm, collapse = "\n"))
@@ -169,7 +169,7 @@ if (is.na(to_vent_sd)) {
   unlink(did_path)
 }
 # The same difference against any control arm: the primary one, and the hypoxemic
-# control (index-day SF <= 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
+# control (index-day SF < 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
 # on the control fit, 2026-09-23). The ventilated cohort is hypoxemic by construction and
 # the whole control mostly is not, so the primary difference also contrasts hypoxemia;
 # against the hypoxemic control the arms differ in ventilation alone. Both use the
@@ -197,13 +197,13 @@ did_against <- function(control_arm) {
          unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
 }
 did <- did_against("No support, at ventilated severity")
-HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF <= 315"
+HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF < 315"
 hypoxemic_did_path <- file.path(final_dir, paste0("jm_hypoxemic_control_did_", out_stub, ".csv"))
 if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
   hypoxemic_did <- did_against(HYPOXEMIC_CONTROL_ARM)
   if (nrow(hypoxemic_did)) {
     write_csv(hypoxemic_did, hypoxemic_did_path)
-    message("--- difference-in-differences against the hypoxemic control (index-day SF <= 315)")
+    message("--- difference-in-differences against the hypoxemic control (index-day SF < 315)")
     print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                                     control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                                     lo = signif(did_lo, 3), hi = signif(did_hi, 3), both_converged)), row.names = FALSE)

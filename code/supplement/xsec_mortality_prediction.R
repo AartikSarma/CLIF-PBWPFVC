@@ -115,6 +115,15 @@ message(sprintf("=== xsec_mortality_prediction, %s: %d patients; %d with every m
 print(as.data.frame(tibble(measure = MEASURES$label,
                            n_patients = map_int(MEASURES$column, ~ sum(!is.na(usable[[.x]])))), row.names = FALSE))
 
+# One cross-validation fold per patient, drawn once and reused by every measure,
+# outcome, form and adjustment. Measures fitted on the same patients are then trained
+# and tested on the same splits, so their AUC differences are paired. The common
+# sample is balanced across the folds on its own; the other patients are spread
+# across the folds after it.
+other_ids <- setdiff(usable$hospitalization_id, common_ids)
+patient_fold <- c(setNames(sample(rep_len(seq_len(N_FOLDS), length(common_ids))), as.character(common_ids)),
+                  setNames(sample(rep_len(seq_len(N_FOLDS), length(other_ids))), as.character(other_ids)))
+
 # =============================================================================
 # Metrics
 # =============================================================================
@@ -125,7 +134,7 @@ auc_of <- function(y, p) {   # rank (Mann-Whitney) AUC
 log_loss_of <- function(y, p) { p <- pmin(pmax(p, 1e-12), 1 - 1e-12); -mean(y * log(p) + (1 - y) * log(1 - p)) }
 
 # out-of-fold predictions for one measure, outcome and form, on the rows of `dat`
-# (folds are assigned once per sample, so every measure shares them)
+# (each patient's fold is patient_fold, shared by every measure)
 cross_validated <- function(dat, folds, rhs) {
   predictions <- numeric(nrow(dat))
   for (k in seq_len(N_FOLDS)) {
@@ -169,10 +178,9 @@ evaluate_sample <- function(sample_label, ids_for) {
                       sex_category, race_category) %>%
             filter(!is.na(sex_category), !is.na(race_category))
           if (sum(dat$y == 1) < MIN_DEATHS || sum(dat$y == 0) < MIN_DEATHS) return(NULL)
-          # VT/PBW given VT/PBW is VT/PBW alone: the base model
           # VT/PBW in each adjustment is that adjustment's base model
           rhs <- paste0(FORMS[[form]], if (measure != "vtpbw") ADJUSTMENTS[[adjustment]] else BASE_EXTRA[[adjustment]])
-          folds <- sample(rep_len(seq_len(N_FOLDS), nrow(dat)))
+          folds <- unname(patient_fold[as.character(dat$hospitalization_id)])
           predicted <- cross_validated(dat, folds, rhs)
           full_fit <- fit_strict(glm(as.formula(paste("y ~", rhs)), family = binomial, data = dat))
           # the sign: log-odds per log unit of the measure, in the linear-in-log form

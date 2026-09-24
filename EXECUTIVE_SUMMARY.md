@@ -134,9 +134,6 @@ data and should **not** leave the site.
   height, age, sex, race, and a computable PFVC — wider than the ventilated
   analytic cohort) used only for the predicted-FVC-vs-predicted-body-weight
   model.
-- **`sofa_scores.parquet`** — per-encounter aggregated SOFA (worst component
-  values and total). **`sofa_daily.parquet`** — the per-encounter-day components
-  and totals.
 
 ### `final/` (scripts 03–05) — per-site results
 

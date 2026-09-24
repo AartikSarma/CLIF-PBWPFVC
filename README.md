@@ -75,7 +75,8 @@ delivers large, unlimited positive-pressure volumes.
   race/ethnicity; valid ages 3–95).
 - **VT/PBW**, **VT/PFVC**, **PBW/PFVC** ratio.
 - Driving pressure, compliance, elastance.
-- SOFA (extremal aggregation; Severinghaus imputation of PaO2 from SpO2), SF/PF ratios.
+- SOFA from the worst values over the 24 hours from the index, scored by
+  [clifR](https://github.com/AartikSarma/clifR)'s `compute_sofa()`; SF/PF ratios.
 - VFD-28 (ventilator-free days at 28 days).
 
 Lung-protective ventilation is defined as VT/PBW between 6–8 mL/kg.

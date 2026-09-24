@@ -4,7 +4,8 @@
 # Sourced by 21_biotrauma_panel.R, 22_biotrauma_fit.R and 23_biotrauma_report.R
 # so the three agree on the grid, the horizon and the output suffix.
 #
-#   PBWPFVC_JM_GRID       "6h" (PRIMARY) or "daily" (sensitivity)
+#   PBWPFVC_JM_GRID       "daily" (figure 4, the default) or "6h" (six-hour periods;
+#                         not in the paper)
 #   PBWPFVC_JM_HORIZON_H  horizon in hours for the 6h grid (48)
 #   PBWPFVC_JM_HORIZON    horizon in days for the daily grid (7)
 #
@@ -13,7 +14,7 @@
 # Time in every model is `vent_day` in days (period x STEP), so coefficients on
 # time and the random slope have the same units on both grids.
 # =============================================================================
-JM_GRID <- Sys.getenv("PBWPFVC_JM_GRID", "6h")
+JM_GRID <- Sys.getenv("PBWPFVC_JM_GRID", "daily")
 stopifnot(JM_GRID %in% c("6h", "daily"))
 if (JM_GRID == "6h") {
   STEP_H     <- 6
@@ -174,9 +175,11 @@ sev_center_for <- function(marker) {
 sev_center_sfx_for <- function(marker) { v <- sev_center_for(marker); if (is.na(v)) "" else sprintf("_sevstd%.3f", v) }
 sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
 
-# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo < SF <= hi on
+# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi on
 # the index day. The strata in use are "235,315", "115,235" and "0,115" (user-specified,
 # 2026-09-18; 315 and 235 are the Rice 2007 SF equivalents of P/F 300 and 200).
+# The upper bound is strict so that "0,315" is the ventilated cohort's own gate, SF < 315.
+SF_BAND_RULE <- "lo <= SF < hi"   # stored with each fit: a fit made under another rule is refitted
 SF_BAND <- trimws(Sys.getenv("PBWPFVC_JM_SF_BAND", ""))
 sf_band_limits <- if (nzchar(SF_BAND)) suppressWarnings(as.numeric(strsplit(SF_BAND, ",")[[1]])) else c(NA_real_, NA_real_)
 if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) || sf_band_limits[1] >= sf_band_limits[2]))
