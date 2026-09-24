@@ -47,7 +47,8 @@
 #   pfvc_age_control_channels_*, _channel_vcov_*, _contrast_*   the mortality control
 #                          contrast and its GLI channel breakdown (supplement/)
 #   crs_channels_estimates_*, crs_channels_tests_*   the compliance channels and the
-#                          compliance head-to-head (supplement/)
+#                          compliance head-to-head (supplement/); the channel results
+#                          are drawn in All sites/pooled_biotrauma_channels.pdf
 #   fingerprint_*, fingerprint_did_*   the height fingerprint (28): the rate per log
 #                          unit of PBW/PFVC moved by height within sex, the whole
 #                          ratio's rate it is read against, and the DiD
@@ -397,6 +398,98 @@ if (nrow(crs_tbl)) {
               sites = paste(site, collapse = ";"), site_delta_aic = paste(round(statistic, 1), collapse = ";"),
               .groups = "drop") %>%
     mutate(note = "AIC differences summed across sites (additive over independent samples); below 0 favours the non-PBW exposure")
+}
+
+# --- 10. figures for the channel results (2026-09-24): one PDF, three pages.
+#   page 1  the candidate figure 5: for each GLI piece, the ventilated-minus-no-support
+#           mortality difference by site and pooled, for the three outcomes, beside the
+#           Crs exponent through the same piece (the inputs that move measured compliance
+#           are the ones strain predicts will carry a ventilator-specific association)
+#   page 2  the same differences across populations (everyone, full code, hypoxemic),
+#           in-hospital death
+#   page 3  each cohort's own piece coefficients, pooled: where each difference comes from
+# Ratios per 0.1 log units of the piece (about 10% of PFVC); below 1 = a larger predicted
+# lung through that input goes with less death. Pooled rows are diamonds.
+PIECE_ORDER <- c("height", "sex", "race", "age", "all four (one beta)")
+PIECE_COLOURS <- setNames(okabe[c(1, 3, 5, 2, 8)], PIECE_ORDER)
+DIFFERENCE <- "ventilated minus no support"
+if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_channels)) {
+  per_0.1 <- function(d) d %>% mutate(ratio = exp(0.1 * log_ratio), lo = exp(0.1 * (log_ratio - 1.96 * se)),
+                                      hi = exp(0.1 * (log_ratio + 1.96 * se)))
+  channel_rows <- function(quantities, populations, outcomes) {
+    sites_part <- channels_tbl %>%
+      filter(quantity %in% quantities, population %in% populations, outcome %in% outcomes, !is.na(log_ratio)) %>%
+      per_0.1() %>% transmute(population, outcome, quantity, piece, site = anon(site), ratio, lo, hi, is_pooled = FALSE)
+    pooled_part <- pooled$age_control_channels %>%
+      filter(quantity %in% quantities, population %in% populations, outcome %in% outcomes) %>%
+      transmute(population, outcome, quantity, piece, site = "Pooled", ratio = ratio_per_0.1, lo = lo_per_0.1,
+                hi = hi_per_0.1, is_pooled = TRUE)
+    bind_rows(sites_part, pooled_part) %>%
+      mutate(piece = factor(piece, levels = PIECE_ORDER),
+             site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")))
+  }
+  channel_theme <- theme_minimal(base_size = 10) + theme(legend.position = "bottom", panel.grid.minor = element_blank())
+  forest <- function(d, facet_formula, title, subtitle) {
+    ggplot(d, aes(ratio, fct_rev(site), colour = piece, shape = is_pooled)) +
+      geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
+      geom_pointrange(aes(xmin = lo, xmax = hi, size = is_pooled)) +
+      scale_size_manual(values = c(`FALSE` = 0.3, `TRUE` = 0.6), guide = "none") +
+      facet_grid(facet_formula, switch = "y") + scale_x_log10() +
+      scale_colour_manual(values = PIECE_COLOURS, guide = "none") +
+      scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 18), guide = "none") +
+      labs(title = title, subtitle = subtitle, x = "ratio per 0.1 log units of the piece (log scale)", y = NULL) +
+      channel_theme + theme(strip.text.y.left = element_text(angle = 0), strip.placement = "outside")
+  }
+  outcomes_main <- c("in-hospital death (logistic)", "60-day death, all", "60-day death, before invasive ventilation")
+  page_1a <- forest(channel_rows(DIFFERENCE, "everyone", outcomes_main) %>% mutate(outcome = factor(outcome, outcomes_main)),
+                    piece ~ outcome, "A. Ventilated minus no support, by GLI input",
+                    "mortality OR (in-hospital) or cause-specific HR; below 1 = more protective under ventilation than without it")
+  # the Crs exponent through each piece, by site and pooled (supplement/xsec_crs_channels.R)
+  page_1b <- NULL
+  if (exists("crs_tbl") && nrow(crs_tbl) && !is.null(pooled$crs_channels)) {
+    crs_rows <- bind_rows(
+      crs_tbl %>% filter(sample == "all plateau-measured", model == "channels") %>%
+        transmute(piece = term, site = anon(site), estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, is_pooled = FALSE),
+      pooled$crs_channels %>% filter(sample == "all plateau-measured", model == "channels") %>%
+        transmute(piece = term, site = "Pooled", estimate = pooled, lo, hi, is_pooled = TRUE)) %>%
+      mutate(piece = factor(piece, levels = PIECE_ORDER),
+             site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")))
+    page_1b <- ggplot(crs_rows, aes(estimate, fct_rev(site), colour = piece, shape = is_pooled)) +
+      geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+      geom_vline(xintercept = 1, colour = "grey30") +
+      geom_pointrange(aes(xmin = lo, xmax = hi, size = is_pooled)) +
+      scale_size_manual(values = c(`FALSE` = 0.3, `TRUE` = 0.6), guide = "none") +
+      facet_grid(piece ~ ., switch = "y") +
+      scale_colour_manual(values = PIECE_COLOURS, guide = "none") +
+      scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 18), guide = "none") +
+      labs(title = "B. Crs exponent, same input", subtitle = "1 = proportional to PFVC",
+           x = "d log Crs / d log PFVC (piece)", y = NULL) +
+      channel_theme + theme(strip.text.y.left = element_text(angle = 0), strip.placement = "outside")
+  }
+  page_1 <- if (is.null(page_1b)) page_1a else patchwork::wrap_plots(page_1a, page_1b, widths = c(3, 1))
+  populations_shown <- intersect(c("everyone", "full code at the index", "hypoxemic at the index (SF < 315)"),
+                                 unique(channels_tbl$population))
+  page_2 <- forest(channel_rows(DIFFERENCE, populations_shown, "in-hospital death (logistic)") %>%
+                     mutate(population = factor(population, populations_shown)),
+                   piece ~ population, "Ventilated minus no support, by GLI input and population",
+                   "in-hospital death, OR per 0.1 log units of the piece; hypoxemic = index SF < 315 in both cohorts")
+  cohort_rows <- pooled$age_control_channels %>%
+    filter(population == "everyone", outcome %in% outcomes_main, quantity %in% c("Ventilated", "No support")) %>%
+    transmute(outcome = factor(outcome, outcomes_main), quantity, piece = factor(piece, levels = PIECE_ORDER),
+              ratio = ratio_per_0.1, lo = lo_per_0.1, hi = hi_per_0.1)
+  page_3 <- ggplot(cohort_rows, aes(ratio, fct_rev(piece), colour = quantity)) +
+    geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
+    geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5), size = 0.35) +
+    facet_wrap(~ outcome) + scale_x_log10() +
+    scale_colour_manual(values = c(Ventilated = okabe[[1]], `No support` = okabe[[2]]), breaks = c("Ventilated", "No support"), name = NULL) +
+    labs(title = "Each cohort's own association through each GLI input (pooled)",
+         subtitle = "everyone; the difference in figure A is the gap between the two points of each input",
+         x = "ratio per 0.1 log units of the piece (log scale)", y = NULL) +
+    channel_theme
+  pdf(file.path(out_dir, "pooled_biotrauma_channels.pdf"), width = 13, height = 8.5)
+  print(page_1); print(page_2); print(page_3)
+  invisible(dev.off())
+  message("channel figures -> ", file.path(out_dir, "pooled_biotrauma_channels.pdf"))
 }
 
 # --- write
