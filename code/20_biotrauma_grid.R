@@ -4,7 +4,8 @@
 # Sourced by 21_biotrauma_panel.R, 22_biotrauma_fit.R and 23_biotrauma_report.R
 # so the three agree on the grid, the horizon and the output suffix.
 #
-#   PBWPFVC_JM_GRID       "6h" (PRIMARY) or "daily" (sensitivity)
+#   PBWPFVC_JM_GRID       "daily" (figure 4, the default) or "6h" (six-hour periods;
+#                         not in the paper)
 #   PBWPFVC_JM_HORIZON_H  horizon in hours for the 6h grid (48)
 #   PBWPFVC_JM_HORIZON    horizon in days for the daily grid (7)
 #
@@ -13,7 +14,7 @@
 # Time in every model is `vent_day` in days (period x STEP), so coefficients on
 # time and the random slope have the same units on both grids.
 # =============================================================================
-JM_GRID <- Sys.getenv("PBWPFVC_JM_GRID", "6h")
+JM_GRID <- Sys.getenv("PBWPFVC_JM_GRID", "daily")
 stopifnot(JM_GRID %in% c("6h", "daily"))
 if (JM_GRID == "6h") {
   STEP_H     <- 6

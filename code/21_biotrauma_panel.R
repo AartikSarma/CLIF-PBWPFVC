@@ -41,7 +41,7 @@
 #     creatinine trajectory at all
 #   * rows are truncated at the event day, as a joint model requires
 #
-# Horizon: PBWPFVC_JM_HORIZON days (default 7; 14 is the sensitivity). The shared
+# Horizon: PBWPFVC_JM_HORIZON days (default 7, figure 4's). The shared
 # panel is built with the TTE's 28-day death window so death_day and the
 # extubation day are identical objects in both analyses.
 #
@@ -69,14 +69,11 @@ is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synt
 PANEL_NORM   <- "pfvc"          # the joint models always normalize to GLI PFVC
 source(here("code", "10_panel_common.R"))
 
-# --- time grid. PRIMARY = "6h": six-hour periods over the first 48 hours, where
-# the ventilator acts on the injured lung most, a linear trend is plausible, and
-# death and extubation have not yet removed a third of the cohort. The dense
-# markers (SF, driving pressure, NE-equivalent dose) have a value in most
-# periods; labs are drawn about daily and carry one or two values. SENSITIVITY =
-# "daily": one row per ventilator day over PBWPFVC_JM_HORIZON days (7), with the
-# day spline in the fit. Both grids share the 22_biotrauma_fit.R / _report.R code
-# through the `period` index and the numeric time `vent_day` (days).
+# --- time grid. Figure 4 (the default) is "daily": one row per ventilator day over
+# PBWPFVC_JM_HORIZON days (7), with a spline in day in the fit. "6h", six-hour
+# periods over the first 48 hours, is kept for development and is not in the paper.
+# Both grids share the 22_biotrauma_fit.R / _report.R code through the `period`
+# index and the numeric time `vent_day` (days).
 source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP_H, STEP, JM_HORIZON, N_PERIODS, h_suffix
 STRAIN_CEILING <- 11   # VT/PFVC % above which a period counts toward the cumulative-strain exposure
 message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " days (",

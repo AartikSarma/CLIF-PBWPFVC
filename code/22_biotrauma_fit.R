@@ -3,27 +3,33 @@
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
 #
-# For each organ-injury marker, fits a joint model (JMbayes2) that links
-#   longitudinal submodel   log marker on day t  ~  spline(day) + previous-day
-#                           VT/PFVC as a WITHIN-patient deviation from the
-#                           patient's mean + that mean (between) + baseline
-#                           marker + previous-day confounders + non-respiratory
-#                           SOFA, BMI and demographics; random intercept and
-#                           slope per patient
-#   survival submodel       cause-specific stratified Cox, death vs extubation,
-#                           with index VT/PBW (dose), log PFVC (size) and
-#                           baseline covariates: the paper's primary exposure set
-#   association             current value and current slope of the marker on
-#                           each cause-specific hazard
+# For each organ-injury marker, fits a joint model (JMbayes2). The defaults are
+# figure 4's (PBWPFVC_JM_MODIFIER=pfvc, PBWPFVC_JM_GRID=daily, 7 days, main model),
+# which 29_run_figure4.R also sets:
+#   longitudinal submodel   log marker on day t ~ ns(day, 3)
+#                           + log PFVC (per SD of this cohort) + log PFVC x day
+#                           + previous-day VT/PBW minus the patient's mean VT/PBW
+#                           + that mean + log baseline marker (its first value in
+#                           the window) + previous-day log SF and pressor flag
+#                           (not the marker's own) + non-respiratory SOFA
+#                           [+ BMI, driving pressure only]
+#                           [+ ns(age, 4) + sex + race, the adjusted fit]
+#                           random intercept per patient, and a random slope in
+#                           day for the markers whose `random` entry below has one.
+#                           The control cohort has no VT/PBW terms.
+#                           log PFVC x day is the divergence: the change in the
+#                           log marker per day per SD of log PFVC.
+#   survival submodel       cause-specific Cox stratified by cause (death;
+#                           extubation, or escalation in the control), on
+#                           standardised non-respiratory SOFA, baseline log SF,
+#                           BMI, age, sex and race. No size or dose term: this
+#                           submodel corrects for who leaves the panel.
+#   association             the current value of the log marker on each
+#                           cause-specific hazard (PBWPFVC_JM_ASSOC=value_slope
+#                           adds the current slope)
 #
-# Three questions (docs/joint_model_plan_2026-09.md, section 3):
-#   Q1  the previous-day strain coefficient in the longitudinal submodel: a
-#       conditional, within-patient dose-response (not a policy effect; the 11.*
-#       g-methods are the causal version)
-#   Q2  the value and slope association parameters, per cause
-#   Markers: creatinine, platelets, bilirubin, sf, dp, ne_equiv_peak (log dose per kg,
-#   flagged: it carries -2 log(height)), any_pressor (the hurdle's binary part:
-#   a logistic mixed model of any vasoactive running, the vasopressor read).
+#   Markers: creatinine, platelets, bilirubin, sf, osi, pressor_dose, and others
+#   that the paper does not use.
 #
 # Model set per marker:
 #   main      full cohort, adjusted (age spline, sex, race) and unadjusted
@@ -40,9 +46,10 @@
 #          intermediate/jm_fit_{marker}_{model}_{adj}_{H}d.rds   fit bundles
 #          (patient-level rows inside, so never in final/)
 #
-# Environment knobs: PBWPFVC_JM_GRID (6h | daily) with PBWPFVC_JM_HORIZON_H (48) or
+# Environment knobs: PBWPFVC_JM_MODIFIER (pfvc; the other forms are not in the paper),
+#   PBWPFVC_JM_GRID (daily | 6h) with PBWPFVC_JM_HORIZON_H (48) or
 #   PBWPFVC_JM_HORIZON (7 days), PBWPFVC_JM_MARKERS (comma list),
-#   PBWPFVC_JM_MODELS (main,hetero), PBWPFVC_JM_BASELINE (free | offset; offset
+#   PBWPFVC_JM_MODELS (main; hetero is not in the paper), PBWPFVC_JM_BASELINE (free | offset; offset
 #   fixes the baseline coefficient at 1 = the log percent-change outcome, written
 #   with an offset_ prefix), PBWPFVC_JM_ITER / _BURNIN / _CHAINS (3500 / 500 / 3;
 #   lower them only for plumbing runs), PBWPFVC_CORES, PBWPFVC_JM_PILOT (0 skips
@@ -106,7 +113,8 @@ USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
 CUM_FORM <- Sys.getenv("PBWPFVC_JM_CUM", "none")
 stopifnot(CUM_FORM %in% c("none", "mean", "days"))
 CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cum_days_above")
-# Effect modifier of the dose slope (PRIMARY = "disc"): the within-patient VT/PBW
+# The form of the lung-size term. Figure 4 (the default) is "pfvc", described below.
+# "disc" (not in the paper): the within-patient VT/PBW
 # change interacts with centred log PBW/PFVC discordance and, in the adjusted
 # model, with the age spline (the within-demographic adjudicator: discordance is 99%
 # demographics, so a discordance interaction only means something if it survives
@@ -125,7 +133,7 @@ CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cu
 # One arm only (the pieces are the demographics). The report tests whether the
 # four horizon contrasts are equal: if lung size is the operative quantity they
 # are, and the form collapses to the pfvc form unadjusted.
-MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "disc")
+MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 # "vtpfvc" (2026-09-17): the pfvc form told the reader's way round. VT/PFVC in
 # percent of predicted FVC (the patient's mean over the window, centred, per point)
 # enters beside the clinician's dose, so the contrast is "patients at the same
@@ -282,7 +290,7 @@ if (nzchar(want_markers)) {
 # which entry rule a marker's fit uses (see the entry filter in fit_one); stored with
 # each result so a cached fit made under the other rule is refitted
 entry_rule_for <- function(mk) if (mk$name == "creatinine" && RRT_EVENT) "rrt_one_value" else "two_values"
-want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main,hetero"), ",")[[1]])
+want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main"), ",")[[1]])   # figure 4: main; "hetero" is not in the paper
 stopifnot(all(want_models %in% c("main", "hetero")))
 
 # =============================================================================
@@ -372,7 +380,7 @@ DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" e
 # BMI is weight over height squared, so it carries height, which is what
 # identifies log PFVC once age, sex and race are in; its chest-wall rationale
 # applies to driving pressure and elastance, not to labs, oxygenation or
-# vasopressors (user, 2026-09-15). The hazard keeps the paper's mortality set.
+# vasopressors.
 BASE_RHS  <- "np_sofa"
 PRESSURE_MARKERS <- c("dp")
 base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi") else BASE_RHS
@@ -620,7 +628,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
 
   # --- longitudinal submodel
   lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
-  # PRIMARY: PFVC as an effect modifier of the clinician's dose. l_vtpbw_within =
+  # disc form: PFVC as an effect modifier of the clinician's dose. l_vtpbw_within =
   # yesterday's VT/PBW minus the patient's mean over the course (the dose change,
   # identified within patient); its slope is modified by centred log PBW/PFVC
   # discordance (and, adjusted, by the age spline). The ratio of the interaction
