@@ -76,6 +76,10 @@
 #                                          invasive ventilation)
 #   pfvc_age_control_escalation_hazard_{site}.csv  the control's escalation hazard per
 #                                          SD of log PFVC (any support; invasive)
+#   pfvc_age_control_channels_{site}.csv   the channel control contrast: each GLI piece's
+#                                          coefficient per cohort and ventilated minus
+#                                          no support; pfvc_age_control_channel_tests_
+#                                          {site}.csv, whether the differences agree
 #   pfvc_age_control_code_status_{site}.csv  patients and deaths by code status at the
 #                                          index and later limitation, per cohort
 #   pfvc_age_control_hypoxemia_{site}.csv  the hypoxemia pathway in the control: onset
@@ -116,7 +120,7 @@ OKABE_ITO <- c(without_pfvc = "#E69F00", with_pfvc = "#0072B2")
 cohort_columns <- c("hospitalization_id", "recorded_dttm", "age_at_admission", "sex_category",
                     "race_category", "pfvc", "sf_ratio", "sofa_total",
                     "sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal",
-                    "deceased", "death_dttm", "discharge_dttm")
+                    "deceased", "death_dttm", "discharge_dttm", "height_cm")
 control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_cross_sectional.parquet")
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
@@ -162,7 +166,8 @@ index_day <- function(dttm, index) as.numeric(difftime(dttm, index, units = "day
 ventilated_log_pfvc_sd <- sd(log(ventilated$pfvc[ventilated$pfvc > 0]), na.rm = TRUE)
 both_cohorts <- both_cohorts %>%
   filter(!is.na(pfvc), pfvc > 0, !is.na(sf_ratio), !is.na(sofa_total), !is.na(deceased),
-         !is.na(age_at_admission), !is.na(sex_category), !is.na(race_category), !is.na(discharge_dttm)) %>%
+         !is.na(age_at_admission), !is.na(sex_category), !is.na(race_category), !is.na(discharge_dttm),
+         !is.na(height_cm), height_cm > 0) %>%
   group_by(cohort) %>%
   mutate(sf_z = as.numeric(scale(sf_ratio)), sofa_z = as.numeric(scale(sofa_total))) %>%
   ungroup() %>%
@@ -176,7 +181,8 @@ both_cohorts <- both_cohorts %>%
          escalation_day      = index_day(escalation_dttm, recorded_dttm),
          imv_day             = index_day(imv_dttm, recorded_dttm),   # control only; NA in the ventilated cohort
          # figure 4's severity anchor: SOFA without its respiratory and neurological parts
-         anchor = sofa_cv_97 + sofa_coag + sofa_liver + sofa_renal)
+         anchor = sofa_cv_97 + sofa_coag + sofa_liver + sofa_renal,
+         age10 = age_at_admission / 10)
 if (anyNA(both_cohorts$vtpbw[both_cohorts$cohort == "Ventilated"]))
   stop("ventilated patients without VT/PBW in the cross-sectional table")
 if (anyNA(both_cohorts$anchor)) stop("patients without the SOFA components of the severity anchor")
@@ -610,6 +616,83 @@ if (HAS_CONTROL_PANEL) {
                ": the hypoxemia pathway is skipped. Build it with PBWPFVC_COHORT=nosupport PBWPFVC_JM_GRID=daily ",
                "PBWPFVC_JM_HORIZON=7 Rscript code/21_biotrauma_panel.R ***")
 
+# =============================================================================
+# The channel control contrast
+# =============================================================================
+# log PFVC split into its GLI pieces (height, age, sex, race; pfvc_channels() in
+# 20_biotrauma_grid.R, each in log-PFVC units), each with its own coefficient, in each
+# cohort. The pieces replace the demographics, so a demographic direct path (age's
+# frailty, race's selection into the ICU) loads onto its piece in both cohorts; the
+# difference ventilated minus no support removes it, and strain, which acts only where
+# a PBW-scaled volume is delivered, remains. Two readings:
+#   each piece's difference   the ventilator-specific association through that input
+#   equal differences         strain's prediction: one lung-size effect, so the four
+#                             differences agree (Wald, 3 df; an overidentification
+#                             test). Also height = sex = race (2 df), leaving out age,
+#                             where the two candidate strain denominators part.
+# Assumption, as for the whole contrast: each direct path is the same in both cohorts
+# (at the within-cohort severity). The pieces are computed once on both cohorts, so
+# they share one reference patient. Outcomes: the in-hospital logistic model, 60-day
+# death, and 60-day death before intubation; populations as elsewhere. The one-beta
+# model (the four pieces' sum, which is log PFVC to a small remainder) is fitted beside
+# it for reference. No demographics: the pieces are the demographics in GLI's shape.
+source(here::here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, channels_equal_p()
+both_cohorts <- bind_cols(both_cohorts, pfvc_channels(both_cohorts, "log_pfvc"))
+CHANNEL_OUTCOMES <- OUTCOMES %>% filter(outcome_key %in% c("inhosp_logistic", "day60_all", "day60_before_imv"))
+fit_channels <- function(population, cohort_now, outcome_key, model) {
+  cohort_data <- population_data(population, cohort_now)
+  dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
+  if (sum(dat$event == 1) < MIN_DEATHS) return(NULL)
+  base_terms <- c(if (cohort_now == "Ventilated") "vtpbw", "sf_z", "sofa_z")
+  fit_one <- function(terms) {
+    rhs <- paste(c(terms, base_terms), collapse = " + ")
+    if (model == "logistic") fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = dat)) else
+      fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
+  }
+  pieces_fit <- fit_one(CHANNELS); one_fit <- fit_one("ch_sum")
+  list(b = coef(pieces_fit)[CHANNELS], V = vcov(pieces_fit)[CHANNELS, CHANNELS],
+       b_one = coef(one_fit)[["ch_sum"]], se_one = sqrt(vcov(one_fit)["ch_sum", "ch_sum"]),
+       n_patients = nrow(dat), n_deaths = sum(dat$event == 1))
+}
+piece_rows <- function(b, V, b_one, se_one, quantity, n_patients, n_deaths) tibble(
+  quantity = quantity, piece = c(sub("^ch_", "", CHANNELS), "all four (one beta)"),
+  log_ratio = c(unname(b), b_one), se = c(sqrt(diag(V)), se_one), n_patients = n_patients, n_deaths = n_deaths)
+channel_rows <- list(); channel_tests <- list()
+for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))) {
+  outcome_key <- CHANNEL_OUTCOMES$outcome_key[k]; model <- CHANNEL_OUTCOMES$model[k]
+  fits <- map(set_names(COHORTS), ~ fit_channels(population, .x, outcome_key, model))
+  if (any(map_lgl(fits, is.null))) next
+  ventilated <- fits[["Ventilated"]]; control <- fits[["No support"]]
+  difference_b <- ventilated$b - control$b
+  difference_V <- ventilated$V + control$V          # independent cohorts
+  channel_rows[[length(channel_rows) + 1]] <- bind_rows(
+    piece_rows(ventilated$b, ventilated$V, ventilated$b_one, ventilated$se_one, "Ventilated",
+               ventilated$n_patients, ventilated$n_deaths),
+    piece_rows(control$b, control$V, control$b_one, control$se_one, "No support", control$n_patients, control$n_deaths),
+    piece_rows(difference_b, difference_V, ventilated$b_one - control$b_one,
+               sqrt(ventilated$se_one^2 + control$se_one^2), "ventilated minus no support", NA_integer_, NA_integer_)) %>%
+    mutate(population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+           ratio_type = if_else(model == "logistic", "OR", "HR"))
+  size_pieces <- c("ch_height", "ch_sex", "ch_race")
+  size_contrast <- rbind(c(1, -1, 0), c(1, 0, -1))
+  size_d <- size_contrast %*% difference_b[size_pieces]
+  size_stat <- as.numeric(t(size_d) %*% solve(size_contrast %*% difference_V[size_pieces, size_pieces] %*% t(size_contrast)) %*% size_d)
+  channel_tests[[length(channel_tests) + 1]] <- tibble(
+    population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+    test = c("the four differences are equal (3 df)", "height = sex = race differences (2 df)",
+             "the four ventilated pieces are equal (3 df, for reference)",
+             "the four no-support pieces are equal (3 df, for reference)"),
+    p = c(channels_equal_p(difference_b, difference_V), pchisq(size_stat, 2, lower.tail = FALSE),
+          channels_equal_p(ventilated$b, ventilated$V), channels_equal_p(control$b, control$V)))
+}
+channel_contrast <- bind_rows(channel_rows) %>%
+  mutate(ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+         hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "per log unit of the piece (log-PFVC units); ratio_per_0.1 is per 0.1 log units (about 10% of PFVC)",
+         site = site_name) %>%
+  relocate(population, outcome, ratio_type, quantity, piece)
+channel_tests <- bind_rows(channel_tests) %>% mutate(site = site_name)
+
 # how far the control's standardised estimate extrapolates
 anchor_overlap <- both_cohorts %>% group_by(cohort) %>%
   summarise(anchor_mean = mean(anchor), anchor_sd = sd(anchor),
@@ -631,6 +714,15 @@ print(as.data.frame(contrast %>% filter(adjustment == "adjusted", severity == SE
                       arrange(factor(population, levels = POPULATIONS), factor(outcome, levels = OUTCOMES$outcome), quantity) %>%
                       select(population, outcome, quantity, ratio, ratio_lo, ratio_hi, p, n_deaths, note) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+message("\nThe channel control contrast (everyone, 60-day death before intubation; per 0.1 log units of each piece;",
+        " strain predicts equal ventilated-minus-control differences):")
+print(as.data.frame(channel_contrast %>%
+                      filter(population == POPULATIONS[["everyone"]], outcome == "60-day death, before invasive ventilation") %>%
+                      select(quantity, piece, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+print(as.data.frame(channel_tests %>% mutate(p = signif(p, 3))), row.names = FALSE)
+write_csv(mask_small_counts(channel_contrast), file.path(final_dir, paste0("pfvc_age_control_channels_", site_name, ".csv")))
+write_csv(channel_tests, file.path(final_dir, paste0("pfvc_age_control_channel_tests_", site_name, ".csv")))
 write_csv(mask_small_counts(code_status_counts),
           file.path(final_dir, paste0("pfvc_age_control_code_status_", site_name, ".csv")))
 
