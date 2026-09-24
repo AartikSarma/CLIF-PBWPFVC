@@ -325,9 +325,23 @@ escalation_paths <- both_cohorts %>% filter(cohort == "No support") %>%
 message("\nThe control's escalation paths (in-hospital deaths):")
 print(as.data.frame(escalation_paths), row.names = FALSE)
 
-# a model that warns stops the script (no silent fallback)
-fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
-  stop("model warning, stopping: ", conditionMessage(w), call. = FALSE))
+# A model that warns stops the script (no silent fallback), with one exception.
+# Separation (a coefficient that runs to infinity, as when a category of a small
+# subgroup has no deaths; UCSF, 2026-09-23: hypoxemic controls, death before
+# escalation) raises a "separation" condition instead. The subgroup fits below catch
+# it and report the fit as not estimable, with the model's own message, in their
+# output row; no model is replaced by a simpler one, and every other warning stops.
+SEPARATION_PATTERN <- "coefficient may be infinite|fitted probabilities numerically 0 or 1"
+fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w) {
+  message_text <- conditionMessage(w)
+  if (grepl(SEPARATION_PATTERN, message_text))
+    stop(structure(class = c("separation", "error", "condition"),
+                   list(message = paste("not estimable (separation):", trimws(message_text)), call = NULL)))
+  stop("model warning, stopping: ", message_text, call. = FALSE)
+})
+# the fit, or the separation condition itself (the caller writes its message as the note)
+fit_or_separation <- function(expr) tryCatch(expr, separation = function(condition) condition)
+separated <- function(fit) inherits(fit, "separation")
 
 # =============================================================================
 # Per cohort: the age curve with and without log PFVC
@@ -443,9 +457,12 @@ fit_pfvc <- function(cohort_data, outcome_key, model, adjustment, severity) {
   if (events < MIN_DEATHS)
     return(tibble(term = "pfvc", log_ratio = NA_real_, se = NA_real_, n_patients = nrow(cohort_data),
                   n_deaths = events, note = paste("skipped: fewer than", MIN_DEATHS, "deaths")))
-  fit <- if (model == "logistic")
+  fit <- fit_or_separation(if (model == "logistic")
     fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = dat)) else
-    fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
+    fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat)))
+  if (separated(fit))
+    return(tibble(term = "pfvc", log_ratio = NA_real_, se = NA_real_, n_patients = nrow(cohort_data),
+                  n_deaths = events, note = conditionMessage(fit)))
   b <- coef(fit); V <- vcov(fit)
   interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "anchor_c"))]
   terms <- c(pfvc = "log_pfvc_z", pfvc_x_anchor = if (length(interaction_term)) interaction_term)
@@ -502,7 +519,10 @@ fit_escalation <- function(population, escalation_column, escalation_label, adju
     return(row_head %>% mutate(term = "pfvc", log_hr = NA_real_, se = NA_real_, n_patients = nrow(dat),
                                n_patients_escalated = sum(dat$event),
                                note = paste("skipped: fewer than", MIN_DEATHS, "escalations")))
-  fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
+  fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat)))
+  if (separated(fit))
+    return(row_head %>% mutate(term = "pfvc", log_hr = NA_real_, se = NA_real_, n_patients = nrow(dat),
+                               n_patients_escalated = sum(dat$event), note = conditionMessage(fit)))
   b <- coef(fit); se <- sqrt(diag(vcov(fit)))
   interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "anchor_c"))]
   terms <- c(pfvc = "log_pfvc_z", pfvc_x_anchor = if (length(interaction_term)) interaction_term)
@@ -564,7 +584,9 @@ if (HAS_CONTROL_PANEL) {
     row_head <- tibble(population = POPULATIONS[[population]], adjustment, analysis = "onset of hypoxemia (days 1-7)",
                        horizon_days = 7, n_patients = nrow(dat), n_patients_hypoxemic = sum(dat$event))
     if (sum(dat$event) < MIN_DEATHS) return(row_head %>% mutate(term = "PFVC", note = paste("skipped: fewer than", MIN_DEATHS, "onsets")))
-    fit <- fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", covariate_rhs(adjustment), "+ log_pfvc_z")), data = dat))
+    fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", covariate_rhs(adjustment), "+ log_pfvc_z")),
+                                              data = dat)))
+    if (separated(fit)) return(row_head %>% mutate(term = "PFVC", note = conditionMessage(fit)))
     row_head %>% mutate(term = "PFVC", log_hr = unname(coef(fit)["log_pfvc_z"]),
                         se = unname(sqrt(vcov(fit)["log_pfvc_z", "log_pfvc_z"])), note = NA_character_)
   }
@@ -589,9 +611,10 @@ if (HAS_CONTROL_PANEL) {
                     id = hospitalization_id, death = event(follow_up_end, died))
     split <- tmerge(split, dat %>% filter(!is.na(hypoxemia_day)) %>% select(hospitalization_id, hypoxemia_day),
                     id = hospitalization_id, hypoxemic = tdc(hypoxemia_day))
-    fit <- fit_strict(coxph(as.formula(paste("Surv(tstart, tstop, death) ~", covariate_rhs(adjustment),
-                                             "+ hypoxemic + log_pfvc_z + log_pfvc_z:hypoxemic")),
-                            data = split, cluster = hospitalization_id))
+    fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(tstart, tstop, death) ~", covariate_rhs(adjustment),
+                                                               "+ hypoxemic + log_pfvc_z + log_pfvc_z:hypoxemic")),
+                                              data = split, cluster = hospitalization_id)))
+    if (separated(fit)) return(row_head %>% mutate(term = "PFVC before hypoxemia", note = conditionMessage(fit)))
     b <- coef(fit); V <- vcov(fit)
     interaction_term <- names(b)[sapply(strsplit(names(b), ":"), setequal, c("log_pfvc_z", "hypoxemic"))]
     after_b <- b[["log_pfvc_z"]] + b[[interaction_term]]
@@ -649,7 +672,12 @@ fit_channels <- function(population, cohort_now, outcome_key, model) {
     if (model == "logistic") fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = dat)) else
       fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat))
   }
-  pieces_fit <- fit_one(CHANNELS); one_fit <- fit_one("ch_sum")
+  pieces_fit <- fit_or_separation(fit_one(CHANNELS)); one_fit <- fit_or_separation(fit_one("ch_sum"))
+  if (separated(pieces_fit) || separated(one_fit)) {
+    message("  channel contrast not estimable for ", population, ", ", cohort_now, ", ", outcome_key, ": ",
+            conditionMessage(if (separated(pieces_fit)) pieces_fit else one_fit))
+    return(NULL)
+  }
   list(b = coef(pieces_fit)[CHANNELS], V = vcov(pieces_fit)[CHANNELS, CHANNELS],
        b_one = coef(one_fit)[["ch_sum"]], se_one = sqrt(vcov(one_fit)["ch_sum", "ch_sum"]),
        n_patients = nrow(dat), n_deaths = sum(dat$event == 1))
