@@ -6,14 +6,9 @@
 library(tidyverse)
 library(arrow)
 library(here)
-library(gtsummary)
-library(gt)
 library(survival)
-library(survminer)
 library(splines)
-library(patchwork)
 library(broom)
-library(algorithmDiagnostics)
 library(EValue)
 
 source("utils/config.R")
@@ -35,21 +30,6 @@ analysis_all <- read_parquet(file.path(output_dir, "analysis_all_timepoints.parq
 message("Cross-sectional: ", nrow(cross_sectional), " observations")
 message("All timepoints: ", nrow(analysis_all), " observations")
 
-# Stratify Table 1 by PBW/PFVC tercile (the analysis now centers on the
-# PBW:PFVC discrepancy rather than delivered VT/PFVC).
-cross_sectional <- cross_sectional %>%
-  mutate(
-    pbwpfvc_tercile = ntile(pbwpfvc, 3),
-    pbwpfvc_tercile = factor(pbwpfvc_tercile, labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
-  )
-
-# Add age_group for downstream use
-cross_sectional <- cross_sectional %>%
-  mutate(age_group = cut(age_at_admission,
-                          breaks = c(18, 40, 60, 80, Inf),
-                          labels = c("18-39", "40-59", "60-79", "80+"),
-                          right = FALSE))
-
 # Reference categories: Male and White. Set in script 03, but re-applied here so
 # the reference is explicit and robust to the parquet round-trip; all regressions
 # below report effects relative to male / white patients.
@@ -61,62 +41,55 @@ cross_sectional <- cross_sectional %>%
     # reported per 10 years / 10 SF units (Table 1 keeps the raw scales).
     age10 = age_at_admission / 10,
     sf10  = sf_ratio / 10,
-    height10 = height_cm / 10
+    height10 = height_cm / 10,
+    # the primary size term of the mortality models (Table 2): log PFVC fits better
+    # than PFVC in litres (4k), and its coefficient is per proportional change in
+    # predicted lung size, the scale the GLI pieces are read on
+    log_pfvc = log(pfvc)
   )
 
 # =============================================================================
 # 4a. Table 1
 # =============================================================================
 
-table1_data <- cross_sectional %>%
-  select(pbwpfvc_tercile, age_at_admission, sex_category, race_category,
-         height_cm, pbw, pfvc, sofa_total, sf_ratio, deceased,
-         vtpbw, vtpfvc, pbwpfvc, crs, ers, vfd_28) %>%
-  mutate(deceased = factor(deceased, levels = c(0, 1), labels = c("Alive", "Deceased")))
-
-table1 <- table1_data %>%
-  tbl_summary(
-    by = pbwpfvc_tercile,
-    statistic = list(
-      all_continuous() ~ "{median} ({p25}, {p75})",
-      all_categorical() ~ "{n} ({p}%)"
-    ),
-    digits = all_continuous() ~ 1,
-    label = list(
-      age_at_admission ~ "Age (years)",
-      sex_category ~ "Sex",
-      race_category ~ "Race",
-      height_cm ~ "Height (cm)",
-      pbw ~ "PBW (kg)",
-      pfvc ~ "PFVC (L)",
-      sofa_total ~ "SOFA Total",
-      sf_ratio ~ "SF Ratio",
-      deceased ~ "Mortality",
-      vtpbw ~ "VT/PBW (mL/kg)",
-      vtpfvc ~ "VT/PFVC (%)",
-      pbwpfvc ~ "PBW/PFVC",
-      crs ~ "Compliance (mL/cmH2O)",
-      ers ~ "Elastance (cmH2O/L)",
-      vfd_28 ~ "28-day VFDs"
-    )
-  ) %>%
-  add_p() %>%
-  add_overall() %>%
-  # The stratifying columns are terciles of PBW/PFVC; without a spanning header
-  # the bare "T1 (Low) / T2 (Mid) / T3 (High)" labels don't say tercile of what.
-  modify_spanning_header(
-    all_stat_cols(stat_0 = FALSE) ~ "**Predicted body weight / predicted FVC (PBW/PFVC), tercile**"
-  ) %>%
-  modify_header(
-    label  ~ "**Characteristic**",
-    stat_0 ~ "**Overall**, N = {N}"
-  )
-
-message("Table 1 generated")
-
-table1 %>%
-  as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table1_", site_name, ".html")))
+# The whole cohort, one row per characteristic (continuous: median and quartiles) or
+# per level (categorical: count and percent). The pooled Table 1 is the cohort by
+# site, so the table is not stratified; a level of 1-9 patients is blanked with its
+# percent (mask_small_counts, utils/config.R).
+TABLE1_CONTINUOUS <- c(age_at_admission = "Age (years)", height_cm = "Height (cm)",
+                       pbw = "PBW (kg)", pfvc = "PFVC (L)", pbwpfvc = "PBW/PFVC (kg/L)",
+                       vtpbw = "VT/PBW (mL/kg)", vtpfvc = "VT/PFVC (%)",
+                       sofa_total = "SOFA", sf_ratio = "SF ratio", crs = "Compliance (mL/cmH2O)",
+                       ers = "Elastance (cmH2O/L)", vfd_28 = "28-day VFDs")
+TABLE1_CATEGORICAL <- c(sex_category = "Sex", race_category = "Race",
+                        deceased = "In-hospital death", mortality_event_60 = "Death by day 60")
+n_cohort <- nrow(cross_sectional)
+table1_continuous <- imap_dfr(TABLE1_CONTINUOUS, function(label, v) {
+  x <- cross_sectional[[v]]
+  tibble(characteristic = label, level = NA_character_,
+         n_patients = sum(!is.na(x)), percent = NA_real_,
+         median = median(x, na.rm = TRUE), q1 = quantile(x, 0.25, na.rm = TRUE, names = FALSE),
+         q3 = quantile(x, 0.75, na.rm = TRUE, names = FALSE))
+})
+table1_categorical <- imap_dfr(TABLE1_CATEGORICAL, function(label, v) {
+  cross_sectional %>% filter(!is.na(.data[[v]])) %>%
+    count(level = as.character(.data[[v]]), name = "n_patients") %>%
+    transmute(characteristic = label, level, n_patients, percent = 100 * n_patients / n_cohort,
+              median = NA_real_, q1 = NA_real_, q3 = NA_real_)
+})
+# complementary suppression: the levels of a characteristic sum to the cohort, so a
+# single blanked level could be recovered by subtraction; the next-smallest is blanked too
+table1_categorical <- table1_categorical %>% mask_small_counts() %>%
+  group_by(characteristic) %>%
+  mutate(n_patients = if (sum(is.na(n_patients)) == 1)
+           replace(n_patients, which(n_patients == min(n_patients, na.rm = TRUE))[1], NA) else n_patients) %>%
+  ungroup()
+table1_long <- bind_rows(tibble(characteristic = "Patients", level = NA_character_, n_patients = n_cohort),
+                         table1_continuous, table1_categorical) %>%
+  mask_small_counts() %>%
+  mutate(percent = if_else(is.na(n_patients), NA_real_, percent), site = site_name, .before = 1)
+write_csv(table1_long, file.path(final_dir, paste0("table1_", site_name, ".csv")))
+message("Table 1 written (", n_cohort, " patients)")
 
 # =============================================================================
 # 4b. Model specifications
@@ -128,10 +101,6 @@ table1 %>%
 # adjusted+unadjusted convention.
 covariates       <- "race_category + age10 + sex_category + sofa_total + sf10"
 covariates_unadj <- "sofa_total + sf10"
-
-# Readable labels for the per-10-unit covariates in the rendered regression
-# tables (age10 / sf10 appear in every model's covariate set).
-covar_labels <- list(age10 ~ "Age (per 10 yr)", sf10 ~ "SF ratio (per 10)")
 
 # Per the original paper, any model whose outcome OR exposure is derived from
 # driving pressure (static DP, elastance, compliance, and the elastance-normalized
@@ -161,15 +130,19 @@ exposure_specs <- list(
   vtpbw         = "vtpbw",
   vtpfvc_vtpbw  = "vtpfvc + vtpbw",
   vtpbw_pfvc    = "vtpbw + pfvc",
+  vtpbw_logpfvc = "vtpbw + log_pfvc",
   vtpbw_pbwpfvc = "vtpbw + pbwpfvc",
   vtpbw_excess  = "vtpbw + vt_excess_ml"
 )
 
+# PFVC enters twice: in litres, the scale of the mechanics betas (Crs per litre of
+# PFVC, Claim 3), and as log PFVC, the primary size term of the mortality models.
 exposure_labels <- c(
   vtpfvc        = "VT/PFVC",
   vtpbw         = "VT/PBW",
   vtpfvc_vtpbw  = "VT/PFVC + VT/PBW",
   vtpbw_pfvc    = "VT/PBW + PFVC",
+  vtpbw_logpfvc = "VT/PBW + log PFVC",
   vtpbw_pbwpfvc = "VT/PBW + PBW/PFVC",
   vtpbw_excess  = "VT/PBW + VT excess (mL)"
 )
@@ -186,16 +159,8 @@ if (has_mortality_variation) {
     glm(as.formula(formula_str), data = cross_sectional, family = binomial)
   })
 
-  mortality_tables <- map(mortality_models, ~ {
-    tbl_regression(.x, exponentiate = TRUE, label = covar_labels) %>% bold_p()
-  })
-
   message("Logistic regression (mortality) — AIC:")
   iwalk(mortality_models, ~ message("  ", exposure_labels[.y], ": ", round(AIC(.x), 1)))
-
-  tbl_merge(mortality_tables, tab_spanner = exposure_labels) %>%
-    as_gt() %>%
-    gt::gtsave(file.path(final_dir, paste0("regression_mortality_", site_name, ".html")))
 } else {
   mortality_models <- NULL
   message("Skipping mortality regression: no variation in outcome (all deceased = ",
@@ -224,7 +189,6 @@ continuous_outcomes <- list(
 )
 
 continuous_models <- list()
-continuous_tables <- list()
 
 for (outcome_name in names(continuous_outcomes)) {
   outcome_var <- continuous_outcomes[[outcome_name]]$var
@@ -236,19 +200,10 @@ for (outcome_name in names(continuous_outcomes)) {
     lm(as.formula(formula_str), data = cross_sectional)
   })
 
-  tables_for_outcome <- map(models_for_outcome, ~ {
-    tbl_regression(.x, label = covar_labels) %>% bold_p()
-  })
-
   continuous_models[[outcome_name]] <- models_for_outcome
-  continuous_tables[[outcome_name]] <- tables_for_outcome
 
   message(outcome_label, " models — AIC:")
   iwalk(models_for_outcome, ~ message("  ", exposure_labels[.y], ": ", round(AIC(.x), 1)))
-
-  tbl_merge(tables_for_outcome, tab_spanner = exposure_labels) %>%
-    as_gt() %>%
-    gt::gtsave(file.path(final_dir, paste0("regression_", outcome_name, "_", site_name, ".html")))
 }
 
 # =============================================================================
@@ -281,16 +236,8 @@ fit_vfd_finegray <- function(exposure_spec) {
 
 vfd_cr_models <- map(exposure_specs, fit_vfd_finegray)
 
-vfd_cr_tables <- map(vfd_cr_models, ~ {
-  tbl_regression(.x, exponentiate = TRUE, label = covar_labels) %>% bold_p()
-})
-
 message("28-day VFDs (Fine-Gray, extubation SHR) — AIC:")
 iwalk(vfd_cr_models, ~ message("  ", exposure_labels[.y], ": ", round(AIC(.x), 1)))
-
-tbl_merge(vfd_cr_tables, tab_spanner = exposure_labels) %>%
-  as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("regression_vfd28_", site_name, ".html")))
 
 # =============================================================================
 # 4e. AIC comparison across all models and outcomes
@@ -397,35 +344,8 @@ aic_all <- aic_all %>% mutate(exposure = factor(exposure, levels = exposure_orde
 message("AIC comparison (evidence ratios vs VT/PBW-alone within each outcome):")
 print(aic_all)
 
+# pooled_estimates.R draws the evidence-ratio heatmap across sites from this table
 write_csv(aic_all, file.path(final_dir, paste0("aic_comparison_all_", site_name, ".csv")))
-
-# Evidence ratio heatmap on the per-1000-patient scale: divergent log10 colour
-# scale, white = 1 (no difference from VT/PBW), blue = less support, red = more
-# support. Each cell shows the evidence ratio per 1000 patients and the delta_AIC
-# per 1000 patients; the raw (untruncated) delta_AIC is in the CSV.
-er_heatmap <- ggplot(aic_all,
-                     aes(x = outcome, y = exposure,
-                         fill = log10(er_per_1k_trunc))) +
-  geom_tile(color = "grey80", linewidth = 0.5) +
-  geom_text(aes(label = sprintf("%s\n(dAIC %+.1f)", er_per_1k_label, delta_AIC_per_1k)),
-            size = 2.9, lineheight = 0.9) +
-  scale_fill_gradient2(
-    name = "Evidence ratio per\n1000 pts (vs VT/PBW)",
-    low = "#2166AC", mid = "white", high = "#B2182B",
-    midpoint = 0, limits = c(log10(ER_FLOOR), log10(ER_CEIL)),
-    breaks = -3:3, labels = c("0.001", "0.01", "0.1", "1", "10", "100", "1000")
-  ) +
-  labs(
-    title = "Evidence ratios across models and outcomes (per 1000 patients)",
-    subtitle = "Each cell vs the VT/PBW-alone model within that outcome; delta_AIC / N x 1000; ER = exp(-dAIC/2)",
-    x = "Outcome",
-    y = "Exposure specification"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-ggsave(file.path(final_dir, paste0("evidence_ratio_heatmap_all_", site_name, ".pdf")),
-       er_heatmap, width = 10, height = 8)
 
 # =============================================================================
 # 4f. Survival analysis
@@ -459,45 +379,19 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
     data = surv_data
   )
 
+  # the primary size term, log PFVC (Table 2)
+  cox_model_logpfvc <- coxph(
+    Surv(surv_time, event) ~ log_pfvc + vtpbw + age10 +
+      sex_category + race_category + sf10 + sofa_total,
+    data = surv_data
+  )
+
   message("Cox model (PBW/PFVC):")
   print(summary(cox_model))
   message("Cox model (PFVC):")
   print(summary(cox_model_pfvc))
-
-  # Fit on the labelled pbwpfvc_tercile factor (not ntile()) so the strata carry
-  # informative names instead of "ntile(pbwpfvc, 3)=1".
-  km_fit <- survfit(Surv(surv_time, event) ~ pbwpfvc_tercile, data = surv_data)
-
-  km_plot <- ggsurvplot(
-    km_fit,
-    data = surv_data,
-    pval = TRUE,
-    conf.int = TRUE,
-    risk.table = TRUE,
-    palette = c("#CC5555", "#266cae", "#d47e0e"),
-    xlab = "Days from Admission",
-    ylab = "Survival Probability",
-    title = "Kaplan-Meier Survival by PBW/PFVC Tercile",
-    legend.title = "PBW/PFVC tercile (lower = PBW closer to PFVC)",
-    legend.labs = c("Lowest tercile (T1)", "Middle tercile (T2)", "Highest tercile (T3)"),
-    ggtheme = theme_minimal(),
-    # Clean risk table: drop the background grid behind the at-risk counts.
-    tables.theme = theme_cleantable()
-  )
-
-  pdf(file.path(final_dir, paste0("km_curves_", site_name, ".pdf")),
-      width = 10, height = 8)
-  print(km_plot)
-  dev.off()
-
-  message("KM curves saved")
-
-  sink(file.path(final_dir, paste0("cox_model_summary_", site_name, ".txt")))
-  cat("=== Cox model: PBW/PFVC + VT/PBW ===\n")
-  print(summary(cox_model))
-  cat("\n=== Cox model: VT/PBW + PFVC ===\n")
-  print(summary(cox_model_pfvc))
-  sink()
+  message("Cox model (log PFVC):")
+  print(summary(cox_model_logpfvc))
 } else {
   message("Skipping survival analysis: no mortality events in data")
 }
@@ -561,65 +455,7 @@ if (sum(!is.na(demo_data$dp)) >= 30) {
   message("Skipping Static DP demographic-bias model: < 30 driving-pressure observations")
 }
 
-# --- Combined table: rows = covariates, columns = outcomes -------------------
-demo_star <- function(p) dplyr::case_when(
-  p < .001 ~ "***", p < .01 ~ "**", p < .05 ~ "*", TRUE ~ ""
-)
-demo_term_labels <- c(
-  age10              = "Age (per 10 yr)",
-  sex_categoryFemale = "Female vs male",
-  race_categoryOTHER = "Other vs white",
-  race_categoryBLACK = "Black vs white",
-  height10           = "Height (per 10 cm)",
-  sf10               = "SF ratio (per 10)",
-  sofa_total         = "SOFA",
-  bmi                = "BMI"
-)
-demo_outcome_order <- c("VT/PBW", "VT/PFVC (%)", "Mortality",
-                        "Static DP", "Ers x PBW", "Ers x PFVC")
-
-demo_cells <- imap_dfr(demo_models, function(m, outcome) {
-  broom::tidy(m$model, conf.int = TRUE, exponentiate = m$type == "OR") %>%
-    filter(term != "(Intercept)") %>%
-    transmute(
-      outcome = outcome,
-      term,
-      cell = sprintf("%.2f [%.2f, %.2f]%s",
-                     estimate, conf.low, conf.high, demo_star(p.value))
-    )
-})
-
-demo_n_row <- tibble(
-  term_label = "N",
-  outcome = names(demo_models),
-  cell = map_chr(demo_models, ~ format(stats::nobs(.x$model), big.mark = ","))
-)
-
-demo_table <- demo_cells %>%
-  mutate(term_label = recode(term, !!!demo_term_labels)) %>%
-  select(term_label, outcome, cell) %>%
-  bind_rows(demo_n_row) %>%
-  mutate(
-    term_label = factor(term_label, levels = c(unname(demo_term_labels), "N")),
-    outcome = factor(outcome, levels = demo_outcome_order)
-  ) %>%
-  arrange(term_label, outcome) %>%
-  pivot_wider(names_from = outcome, values_from = cell) %>%
-  arrange(term_label)
-
-demo_gt <- demo_table %>%
-  mutate(term_label = as.character(term_label)) %>%
-  gt::gt(rowname_col = "term_label") %>%
-  gt::tab_header(
-    title = "Demographic variation in dosing, driving pressure, and elastance",
-    subtitle = paste0(site_name,
-      " — z-scored outcomes (SD units) except Mortality (OR) and Static DP (cmH2O); ",
-      "predictors per 10 units; reference = male, white")
-  ) %>%
-  gt::sub_missing(missing_text = "")
-
-gt::gtsave(demo_gt, file.path(final_dir, paste0("table_demographic_bias_", site_name, ".html")))
-message("Demographic-bias table written (", length(demo_models), " outcome models)")
+message("Demographic-bias models fitted (", length(demo_models), " outcomes); rows in regression_results_long")
 
 # =============================================================================
 # 4f3. Predicted FVC vs predicted body weight
@@ -637,25 +473,7 @@ broad_pfvc <- read_parquet(file.path(output_dir, "analysis_broad_pfvc.parquet"))
 
 pfvc_vs_pbw_model <- lm(pfvc ~ pbw + age10 + sex_category + race_category, data = broad_pfvc)
 pfvc_vs_pbw_formula <- "pfvc ~ pbw + age10 + sex_category + race_category"
-
-pfvc_vs_pbw_gt <- tbl_regression(
-  pfvc_vs_pbw_model,
-  label = list(
-    pbw ~ "PBW (kg)",
-    age10 ~ "Age (per 10 yr)",
-    sex_category ~ "Sex",
-    race_category ~ "Race"
-  )
-) %>%
-  bold_p() %>%
-  modify_caption(paste0(site_name,
-                        " — predicted FVC vs. predicted body weight (all subjects, N = ",
-                        nrow(broad_pfvc), ")"))
-
-pfvc_vs_pbw_gt %>%
-  as_gt() %>%
-  gt::gtsave(file.path(final_dir, paste0("table_pfvc_vs_pbw_", site_name, ".html")))
-message("PFVC-vs-PBW table written (N = ", nrow(broad_pfvc), ")")
+message("PFVC-vs-PBW model fitted (N = ", nrow(broad_pfvc), "); rows in regression_results_long")
 
 # =============================================================================
 # 4g. Unified long-format regression results table
@@ -740,7 +558,9 @@ if (exists("cox_model")) {
     extract_model_results(cox_model, "HR", "Survival", "VT/PBW + PBW/PFVC", "cox",
                           paste("Surv(surv_time, event) ~ pbwpfvc +", cox_covars)),
     extract_model_results(cox_model_pfvc, "HR", "Survival", "VT/PBW + PFVC", "cox",
-                          paste("Surv(surv_time, event) ~ pfvc +", cox_covars))
+                          paste("Surv(surv_time, event) ~ pfvc +", cox_covars)),
+    extract_model_results(cox_model_logpfvc, "HR", "Survival", "VT/PBW + log PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ log_pfvc +", cox_covars))
   ))
 }
 
@@ -804,7 +624,12 @@ if (exists("cox_model")) {
                           data = surv_data)
   cox_pfvc_unadj <- coxph(Surv(surv_time, event) ~ pfvc + vtpbw + sf10 + sofa_total,
                           data = surv_data)
+  cox_logpfvc_unadj <- coxph(Surv(surv_time, event) ~ log_pfvc + vtpbw + sf10 + sofa_total,
+                             data = surv_data)
   results_long <- c(results_long, list(
+    extract_model_results(cox_logpfvc_unadj, "HR", "Survival", "VT/PBW + log PFVC", "cox",
+                          paste("Surv(surv_time, event) ~ log_pfvc +", cox_covars_unadj),
+                          adjustment = "unadjusted"),
     extract_model_results(cox_unadj, "HR", "Survival", "VT/PBW + PBW/PFVC", "cox",
                           paste("Surv(surv_time, event) ~ pbwpfvc +", cox_covars_unadj),
                           adjustment = "unadjusted"),
@@ -835,8 +660,6 @@ regression_results_long <- bind_rows(results_long) %>%
 
 write_csv(regression_results_long,
           file.path(final_dir, paste0("regression_results_long_", site_name, ".csv")))
-write_parquet(regression_results_long,
-              file.path(final_dir, paste0("regression_results_long_", site_name, ".parquet")))
 
 message("Unified regression results table: ", nrow(regression_results_long),
         " rows across ", n_distinct(regression_results_long$analysis), " analyses; saved to ",
@@ -876,9 +699,9 @@ message("Unified regression results table: ", nrow(regression_results_long),
 # the E-value (rare = FALSE; VanderWeele & Ding, Ann Intern Med 2017); the
 # Fine-Gray subdistribution HR uses the same common-outcome HR conversion.
 
-EXPOSURE_TERMS <- c("vtpfvc", "vtpbw", "pfvc", "pbwpfvc")
+EXPOSURE_TERMS <- c("vtpfvc", "vtpbw", "pfvc", "log_pfvc", "pbwpfvc")
 exposure_term_labels_ev <- c(vtpfvc = "VT/PFVC", vtpbw = "VT/PBW",
-                             pfvc = "PFVC", pbwpfvc = "PBW/PFVC")
+                             pfvc = "PFVC", log_pfvc = "log PFVC", pbwpfvc = "PBW/PFVC")
 
 # Spline-age covariate set (mirrors the linear-age set, age10 -> ns(age, 4)).
 # Reused for the mortality and Fine-Gray refits below; the Cox refit is spelled
@@ -971,6 +794,10 @@ cox_model_pfvc_spline <- if (exists("cox_model_pfvc")) {
   coxph(Surv(surv_time, event) ~ pfvc + vtpbw + ns(age_at_admission, 4) +
           sex_category + race_category + sf10 + sofa_total, data = surv_data)
 } else NULL
+cox_model_logpfvc_spline <- if (exists("cox_model_logpfvc")) {
+  coxph(Surv(surv_time, event) ~ log_pfvc + vtpbw + ns(age_at_admission, 4) +
+          sex_category + race_category + sf10 + sofa_total, data = surv_data)
+} else NULL
 
 # Fine-Gray refit with spline age (mirrors fit_vfd_finegray from section 4d2).
 fit_vfd_finegray_spline <- function(exposure_spec) {
@@ -1007,6 +834,8 @@ if (!is.null(cox_model_spline)) {
     residual_conf_rows(cox_model, cox_model_spline, "VT/PBW + PBW/PFVC",
                        "Survival (60-day)", "HR", surv_data),
     residual_conf_rows(cox_model_pfvc, cox_model_pfvc_spline, "VT/PBW + PFVC",
+                       "Survival (60-day)", "HR", surv_data),
+    residual_conf_rows(cox_model_logpfvc, cox_model_logpfvc_spline, "VT/PBW + log PFVC",
                        "Survival (60-day)", "HR", surv_data)))
 }
 
@@ -1029,139 +858,13 @@ residual_confounding <- bind_rows(residual_list) %>%
 # Filename kept as `evalues_<site>` for continuity; the table now also carries the
 # linear- vs spline-age estimates alongside the E-values.
 write_csv(residual_confounding, file.path(final_dir, paste0("evalues_", site_name, ".csv")))
-
-# Rendered table: grouped by analysis, one row per (model spec, exposure).
-evalue_gt <- residual_confounding %>%
-  transmute(
-    analysis,
-    Model                 = model_spec,
-    Exposure              = term_label,
-    Type                  = estimate_type,
-    `Linear-age estimate` = sprintf("%.2f (%.2f, %.2f)", est_linage, lo_linage, hi_linage),
-    `Spline-age estimate` = sprintf("%.2f (%.2f, %.2f)",
-                                    est_splineage, lo_splineage, hi_splineage),
-    `E-value (estimate)`  = sprintf("%.2f", evalue_point),
-    `E-value (95% CI)`    = ifelse(is.na(evalue_ci), "—", sprintf("%.2f", evalue_ci))
-  ) %>%
-  gt::gt(groupname_col = "analysis") %>%
-  gt::tab_header(
-    title = "Residual confounding: per-SD estimates, age functional-form sensitivity, and E-values",
-    subtitle = paste0(
-      site_name,
-      " — per-1-SD exposure contrasts. Linear- vs spline-age estimates bound the ",
-      "only enumerable residual confounder (nonlinear age); the exposures are ",
-      "deterministic in {height, age, sex, race} and height lies on the causal ",
-      "pathway, not a backdoor. The E-value is the minimum risk-ratio association ",
-      "an unmeasured confounder would need with both the exposure and the outcome ",
-      "to explain the estimate (CI E-value: to move the CI to include the null).")
-  ) %>%
-  gt::cols_align("left", columns = c(Model, Exposure)) %>%
-  gt::sub_missing(missing_text = "—")
-
-gt::gtsave(evalue_gt, file.path(final_dir, paste0("table_evalues_", site_name, ".html")))
 message("Residual-confounding table written (", nrow(residual_confounding),
         " ratio-scale exposure estimates across ",
         n_distinct(residual_confounding$analysis),
         " analyses; linear/spline age + E-values)")
 
 # =============================================================================
-# 4h. Conditional bias diagnostic plots (algorithmDiagnostics)
-# =============================================================================
-
-# Prepare data with all needed variables
-diag_data <- cross_sectional %>%
-  filter(!is.na(age_group))
-
-# --- Plot 1: PBW as prediction of PFVC, stratified by demographics ---
-bias_pbw_pfvc <- conditional_bias_plot(
-  data = diag_data,
-  dependent_vars = "pfvc",
-  independent_vars = "pbw",
-  grouping_vars = c("race_category", "sex_category", "age_group"),
-  dep_var_labels = c("PFVC (L)"), min_n = 20
-)
-
-ggsave(file.path(final_dir, paste0("bias_pbw_vs_pfvc_", site_name, ".pdf")),
-       bias_pbw_pfvc, width = 14, height = 12)
-
-# --- Plot 2: Mortality by VT/PFVC and VT/PBW, stratified by demographics ---
-bias_mortality <- conditional_bias_plot(
-  data = diag_data,
-  dependent_vars = "deceased",
-  independent_vars = c("vtpfvc", "vtpbw", "pbwpfvc"),
-  grouping_vars = c("race_category", "sex_category", "age_group"),
-  dep_var_labels = "Mortality",
-  x_labels = c("Percentile of VT/PFVC", "Percentile of VT/PBW","Percentile of PBW/PFVC")
-)
-
-ggsave(file.path(final_dir, paste0("bias_mortality_", site_name, ".pdf")),
-       bias_mortality, width = 14, height = 18)
-
-# --- Plot 3: Elastance by exposures, stratified by demographics ---
-bias_ers <- conditional_bias_plot(
-    data = diag_data,
-    dependent_vars = "ers",
-    independent_vars = c("vtpfvc", "vtpbw"),
-    grouping_vars = c("race_category", "sex_category", "age_group"),
-    dep_var_labels = "Elastance (cmH2O/L)",
-    x_labels = c("Percentile of VT/PFVC", "Percentile of VT/PBW")
-  )
-
-  ggsave(file.path(final_dir, paste0("bias_elastance_", site_name, ".pdf")),
-         bias_ers, width = 14, height = 18)
-  message("Elastance bias plots saved")
-
-# --- Plot 4: Compliance by exposures, stratified by demographics ---
-bias_crs <- conditional_bias_plot(
-    data = diag_data,
-    dependent_vars = "crs",
-    independent_vars = c("pbwpfvc"),
-    grouping_vars = c("race_category", "sex_category", "age_group"),
-    dep_var_labels = "Compliance (mL/cmH2O)",
-    x_labels = c("Percentile of PBW/PFVC")
-  )
-
-  ggsave(file.path(final_dir, paste0("bias_compliance_", site_name, ".pdf")),
-         bias_crs, width = 14, height = 18)
-  message("Compliance bias plots saved")
-
-# --- Plot 5: VFD-28 by exposures, stratified by demographics ---
-bias_vfd <- conditional_bias_plot(
-  data = diag_data,
-  dependent_vars = "vfd_28",
-  independent_vars = c("pbwpfvc"),
-  grouping_vars = c("race_category", "sex_category", "age_group"),
-  dep_var_labels = "28-day VFDs", min_n = 20
-)
-
-ggsave(file.path(final_dir, paste0("bias_vfd28_", site_name, ".pdf")),
-       bias_vfd, width = 14, height = 18)
-
-# --- Plot 6: PBW/PFVC ratio by demographics ---
-bias_pbwpfvc <- conditional_bias_plot(
-  data = diag_data,
-  dependent_vars = "pbwpfvc",
-  independent_vars = c("pfvc", "pbw"),
-  grouping_vars = c("race_category", "sex_category", "age_group"),
-  dep_var_labels = "PBW/PFVC Ratio",
-  x_labels = c("Percentile of PFVC", "Percentile of PBW")
-)
-
-ggsave(file.path(final_dir, paste0("bias_pbwpfvc_ratio_", site_name, ".pdf")),
-       bias_pbwpfvc, width = 14, height = 18)
-
-message("All bias diagnostic plots saved")
-
-# NOTE: the federated per-percentile conditional-bias export that drives the POOLED
-# cross-cohort bias plots is DEFERRED and not in this repository (it is recoverable
-# from the tag pre-prune-2026-09-19, as cbias_federated_export.R). After stratification some
-# (stratum x percentile) cells fall below n = 10, so those aggregates must be run
-# through the consortium's deterministic additive-masking pipeline before they can
-# leave a site, which is held until all sites confirm participation. The pooled
-# plots are likewise deferred.
-
-# =============================================================================
-# 4i. Inclusion CONSORT diagram + PBW:PFVC-by-demographics figure (site QC)
+# 4i. Inclusion CONSORT diagram (site QC)
 # =============================================================================
 # CONSORT flow from the 7-step attrition log written in script 03.
 attrition <- read_csv(file.path(final_dir, paste0("attrition_log_", site_name, ".csv")),
@@ -1170,41 +873,6 @@ consort_fig <- render_consort(attrition, title = paste0("Cohort inclusion - ", s
 ggsave(file.path(final_dir, paste0("consort_diagram_", site_name, ".pdf")),
        consort_fig, width = 9, height = 11)
 message("CONSORT diagram saved")
-
-# PBW:PFVC by demographics — site QC figure from local data. The federated
-# histogram/quantile exports written in script 03 drive the POOLED figure in
-# script 05; this local version uses raw points (never leaves the site).
-okabe <- c("#E69F00", "#56B4E9", "#009E73", "#0072B2", "#D55E00", "#CC79A7")
-dist_base <- cross_sectional %>% filter(!is.na(pbwpfvc))
-
-p_sex <- ggplot(dist_base, aes(sex_category, pbwpfvc, fill = sex_category)) +
-  geom_violin(alpha = 0.5, colour = NA) +
-  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.85) +
-  scale_fill_manual(values = okabe, guide = "none") +
-  labs(x = "Sex", y = "PBW:PFVC ratio (kg/L)") + theme_minimal(base_size = 11)
-
-p_race <- ggplot(dist_base, aes(race_category, pbwpfvc, fill = race_category)) +
-  geom_violin(alpha = 0.5, colour = NA) +
-  geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.85) +
-  scale_fill_manual(values = okabe, guide = "none") +
-  labs(x = "Race", y = "PBW:PFVC ratio (kg/L)") + theme_minimal(base_size = 11)
-
-p_age <- ggplot(dist_base, aes(age_at_admission, pbwpfvc)) +
-  geom_point(alpha = 0.15, colour = "#D55E00") +
-  geom_smooth(method = "loess", colour = "#0072B2", se = TRUE) +
-  labs(x = "Age (years)", y = "PBW:PFVC ratio (kg/L)") + theme_minimal(base_size = 11)
-
-p_height <- ggplot(dist_base, aes(height_cm, pbwpfvc)) +
-  geom_point(alpha = 0.15, colour = "#D55E00") +
-  geom_smooth(method = "loess", colour = "#0072B2", se = TRUE) +
-  labs(x = "Height (cm)", y = "PBW:PFVC ratio (kg/L)") + theme_minimal(base_size = 11)
-
-dist_fig <- (p_sex | p_race) / (p_age | p_height) +
-  plot_annotation(title = paste0("PBW:PFVC by demographics - ", site_name),
-                  theme = theme(plot.title = element_text(face = "bold")))
-ggsave(file.path(final_dir, paste0("distribution_pbwpfvc_", site_name, ".pdf")),
-       dist_fig, width = 11, height = 9)
-message("PBW:PFVC distribution figure saved")
 
 # =============================================================================
 # 4j. Negative-control cohorts: PBW/PFVC, PFVC, height (and dose) vs mortality
@@ -1407,57 +1075,6 @@ if (nrow(nc_interaction)) {
   print(as.data.frame(nc_interaction %>% transmute(exposure, outcome, contrast,
           ratio = ifelse(is.na(ratio_of_effects), NA, sprintf("%.2f [%.2f, %.2f]", ratio_of_effects, lo, hi)),
           lrt_p = signif(lrt_p, 2))), row.names = FALSE)
-}
-
-# Figure: the three size exposures only. VT/PBW and VT/PFVC stay in the CSV but not the
-# figure: without SOFA / SF in this shared adjustment set their estimates are confounded
-# by severity (clinicians lower VT in sicker patients).
-NC_FIG_EXPOSURES <- c("Height", "PFVC", "PBW/PFVC", "VT excess (mL)")
-if (nrow(nc_results)) {
-  nc_lab <- nc_results %>% filter(age_form == "linear", exposure %in% NC_FIG_EXPOSURES) %>%
-    transmute(cohort, exposure, outcome, lab = sprintf("n=%s, d=%s", format(n, big.mark = ","), events))
-  nc_fig <- ggplot(nc_results %>% filter(exposure %in% NC_FIG_EXPOSURES) %>%
-                     mutate(cohort = factor(cohort, rev(nc_cohort_levels)), exposure = factor(exposure, NC_FIG_EXPOSURES)),
-                   aes(x = estimate, y = cohort, colour = cohort, shape = age_form)) +
-    geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
-    geom_errorbarh(aes(xmin = conf_low, xmax = conf_high), height = 0.2,
-                   position = position_dodge(width = 0.5)) +
-    geom_point(size = 2.4, position = position_dodge(width = 0.5)) +
-    geom_text(data = nc_lab %>% mutate(cohort = factor(cohort, rev(nc_cohort_levels))),
-              aes(x = Inf, y = cohort, label = lab), inherit.aes = FALSE,
-              hjust = 1.05, vjust = -0.9, size = 2.4, colour = "grey30") +
-    facet_grid(exposure ~ outcome, scales = "free_x") +
-    scale_x_log10(labels = scales::label_number(accuracy = 0.1)) +
-    scale_colour_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
-    scale_shape_manual(values = c(linear = 16, spline = 1), name = "Age term",
-                       labels = c(linear = "linear", spline = "ns(age, 4)")) +
-    labs(title = paste0("Negative-control cohorts - ", site_name),
-         subtitle = paste0("OR / HR per analytic-cohort SD, adjusted for sex, race and age. ",
-                           "A dosing pathway predicts attenuation only where no tidal volume is set."),
-         x = "OR / HR per SD (log scale)", y = NULL) +
-    theme_minimal(base_size = 10) + theme(legend.position = "bottom")
-  ggsave(file.path(final_dir, paste0("negative_control_", site_name, ".pdf")), nc_fig, width = 11, height = 7)
-}
-# Figure: identifying variation. Bar = share of each exposure's variance left after the
-# adjusters (linear age; open point = spline age), per cohort. The ratio's bar is the
-# reason its intervals are wide.
-if (nrow(nc_idvar)) {
-  iv_plot <- nc_idvar %>% filter(exposure %in% NC_FIG_EXPOSURES, adjustment == "demographics") %>%
-    mutate(cohort = factor(cohort, rev(nc_cohort_levels)), exposure = factor(exposure, NC_FIG_EXPOSURES))
-  iv_fig <- ggplot(iv_plot %>% filter(age_form == "linear"), aes(x = residual_variance_share, y = cohort, fill = cohort)) +
-    geom_col(width = 0.6) +
-    geom_point(data = iv_plot %>% filter(age_form == "spline"), aes(x = residual_variance_share, y = cohort),
-               shape = 1, size = 2.6, inherit.aes = FALSE) +
-    geom_text(data = iv_plot %>% filter(age_form == "linear"),
-              aes(label = sprintf("%.0f%%", 100 * residual_variance_share)), hjust = -0.15, size = 3) +
-    facet_wrap(~ exposure, nrow = 1) +
-    scale_x_continuous(limits = c(0, 1.12), breaks = seq(0, 1, 0.25), labels = scales::percent) +
-    scale_fill_manual(values = setNames(okabe[c(4, 1, 3)], rev(nc_cohort_levels)), guide = "none") +
-    labs(title = paste0("Identifying variation after adjustment - ", site_name),
-         subtitle = "Share of each exposure's variance left after age, sex and race. Bar: linear age; open point: ns(age, 4).",
-         x = "Residual variance share", y = NULL) +
-    theme_minimal(base_size = 10)
-  ggsave(file.path(final_dir, paste0("negative_control_identifying_variation_", site_name, ".pdf")), iv_fig, width = 11, height = 4)
 }
 message("Negative-control models: ", nrow(nc_results), " estimates across ",
         n_distinct(nc_results$cohort), " cohort(s)")

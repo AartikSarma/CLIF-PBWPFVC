@@ -1108,7 +1108,8 @@ attrition <- read_csv(partial_path, show_col_types = FALSE) %>%
                 exclusion_reason = if (config$cohort == "nosupport") "Escalated within 24 h of the index" else "Not hypoxemic (SF ratio >= 315)") %>%
   mutate(site = site_name, .before = 1)
 
-write_csv(attrition, file.path(final_dir, paste0("attrition_log_", site_name, ".csv")))
+# an exclusion step of 1-9 patients is blanked (mask_small_counts, utils/config.R)
+write_csv(mask_small_counts(attrition), file.path(final_dir, paste0("attrition_log_", site_name, ".csv")))
 message("Attrition log written (7 steps): ",
         paste(attrition$n_remaining, collapse = " -> "))
 
@@ -1212,7 +1213,8 @@ dist_quantiles <- dist_groups %>%
   ) %>%
   mutate(site = site_name, .before = 1)
 
-write_csv(dist_histograms, file.path(final_dir, paste0("dist_histograms_", site_name, ".csv")))
+# a bin holding 1-9 patients is blanked; groups under DIST_MIN_CELL are already dropped
+write_csv(mask_small_counts(dist_histograms), file.path(final_dir, paste0("dist_histograms_", site_name, ".csv")))
 write_csv(dist_quantiles, file.path(final_dir, paste0("dist_quantiles_", site_name, ".csv")))
 message("Federated distribution exports written for ",
         n_distinct(dist_groups$group_value), " demographic groups")
