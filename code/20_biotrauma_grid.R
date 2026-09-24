@@ -31,7 +31,7 @@ STEP      <- STEP_H / 24
 N_PERIODS <- as.integer(round(JM_HORIZON / STEP))
 
 # =============================================================================
-# Channel decomposition of the size exposure (25_injury_at_horizon.R, 26_quick_lme.R)
+# Channel decomposition of the size exposure (the channels form of 22 and 23)
 # =============================================================================
 # GLI-2012 log PFVC is, to a small remainder, a sum of four pieces: a height
 # term, an age curve, a sex shift and a race shift. Each piece is computed by

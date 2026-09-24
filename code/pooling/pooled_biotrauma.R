@@ -35,12 +35,6 @@
 #                          current marker (value) or per unit slope
 #   jm_estimates_*         the key longitudinal terms (dose slope, dose x
 #                          discordance, dose x age) with posterior SD as SE
-#   injury_at_horizon_*    the fixed-horizon comparator (estimate, se)
-#   quick_lme_*            the longitudinal-submodel-only contrast, SE from the CI
-#   injury_channels_*, quick_channels_*            the channel decomposition
-#   injury_dose_channels_*, injury_sf_channels_*,  the channel supports
-#   injury_negctrl_*, quick_dose_channels_*,       (coefficients only; the
-#   quick_sf_channels_*                             nested LR tables are not pooled)
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
 #   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF <= 315)
@@ -100,7 +94,7 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F
 MARKER_LABELS <- c(platelets = "Platelets", creatinine = "Creatinine", bilirubin = "Bilirubin",
                    pressor_dose = "Vasopressor dose\n(NE-equivalents per kg)", any_pressor = "Any vasopressor\n(log-odds)",
                    ne_equiv_peak = "Peak vasopressor\n(NE-equivalents per kg)", osi = "Oxygen saturation index",
-                   sf = "SpO2 / FiO2", dp = "Driving pressure")
+                   sf = "SpO2 / FiO2\n(positive control)", dp = "Driving pressure")
 MARKER_WORSE  <- c(platelets = "lower", creatinine = "higher", bilirubin = "higher", pressor_dose = "higher",
                    any_pressor = "higher", ne_equiv_peak = "higher", osi = "higher", sf = "lower", dp = "higher")
 toward_injury <- function(d) {
@@ -265,39 +259,6 @@ if (nrow(es)) {
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
   pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, form)
-}
-
-# --- 4. fixed-horizon comparator
-ih <- read_family("^injury_at_horizon_.*\\.csv$")   # list.files takes POSIX regex: no lookahead
-if (nrow(ih)) ih <- ih %>% filter(!grepl("^injury_at_horizon_counts_", file))
-if (nrow(ih)) pooled$injury_at_horizon <- pool_by(ih, marker, horizon_h, outcome_type, exposure, adjustment)
-
-# --- 5. quick LME (no death correction); older horizon-tagged files are stale copies
-ql <- read_family("^quick_lme_.*\\.csv$")
-if (nrow(ql)) ql <- ql %>% filter(!grepl("^quick_lme_[a-z_]+_\\d+h_", file))
-if (nrow(ql)) {
-  ql <- ql %>% mutate(se = (hi - lo) / 3.92,
-                      model_horizon_h = if ("model_horizon_h" %in% names(ql)) model_horizon_h else horizon_h)
-  pooled$quick_lme <- pool_by(ql, marker, exposure, adjustment, model_horizon_h)
-}
-
-# --- 6. channel decomposition and its supports (coefficients with a standard error)
-ic <- read_family("^injury_channels_.*\\.csv$")
-if (nrow(ic)) pooled$injury_channels <- pool_by(ic, marker, horizon_h, outcome_type, exposure, channel)
-qc <- read_family("^quick_channels_.*\\.csv$")
-if (nrow(qc)) pooled$quick_channels <- pool_by(qc, marker, exposure, channel, model_horizon_h)
-for (fam in c("injury_dose_channels", "injury_sf_channels", "injury_negctrl")) {
-  x <- read_family(paste0("^", fam, "_.*\\.csv$"))
-  if (nrow(x) && "estimate" %in% names(x)) {
-    x <- x %>% filter(!is.na(estimate))
-    pooled[[fam]] <- if (fam == "injury_negctrl") pool_by(x, marker, outcome, model, term) else
-      pool_by(x, marker, horizon_h, outcome_type, model, term)
-  }
-}
-for (fam in c("quick_dose_channels", "quick_sf_channels")) {
-  x <- read_family(paste0("^", fam, "_.*\\.csv$"))
-  if (nrow(x) && "estimate" %in% names(x))
-    pooled[[fam]] <- pool_by(x %>% filter(!is.na(estimate)), marker, exposure, model_horizon_h, model, term)
 }
 
 # --- 7. the figure-4 causal support: the difference-in-differences against the
