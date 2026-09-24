@@ -80,6 +80,12 @@
 #                                          coefficient per cohort and ventilated minus
 #                                          no support; pfvc_age_control_channel_tests_
 #                                          {site}.csv, whether the differences agree;
+#                                          pfvc_age_control_channel_conversion_{site}.csv,
+#                                          how each piece rescales between the two
+#                                          exposure scales. Every channel table carries
+#                                          both scales (column exposure): log PFVC
+#                                          (predicted size) and log PBW/PFVC (strain
+#                                          error), with each piece's identifying SD;
 #                                          pfvc_age_control_channel_vcov_{site}.csv, the
 #                                          differences' covariance, for the pooled test
 #   pfvc_age_control_code_status_{site}.csv  patients and deaths by code status at the
@@ -662,11 +668,42 @@ if (HAS_CONTROL_PANEL) {
 # death, and 60-day death before intubation; populations as elsewhere. The one-beta
 # model (the four pieces' sum, which is log PFVC to a small remainder) is fitted beside
 # it for reference. No demographics: the pieces are the demographics in GLI's shape.
+#
+# Two exposure scales (2026-09-24). log PFVC asks about predicted lung size; log
+# PBW/PFVC asks about the strain error, which at a fixed VT/PBW is the delivered
+# strain and so the paper's clinical quantity. Devine has no age or race term, so the
+# ratio's age and race pieces are GLI's negated exactly, and its sex piece is GLI's
+# rescaled (+0.102 against -0.173 at a 170 cm reference): for those three the ratio
+# scale is a re-expression, and the conversion table below gives the factor and the R2
+# of the proportionality. Height is the exception and is reported, not converted: the
+# two formulas' height functions nearly coincide, so the ratio's height piece spans
+# about 0.017 log units against GLI's 0.43, and the ratio model's height column
+# therefore carries almost no height adjustment. Its coefficient is weakly identified
+# and the other three pieces on that scale can absorb height confounding; the
+# identifying SD of each piece is reported beside every estimate so this is visible.
 source(here::here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, channels_equal_p()
-both_cohorts <- bind_cols(both_cohorts, pfvc_channels(both_cohorts, "log_pfvc"))
+CHANNEL_EXPOSURES <- c(`log PFVC` = "log_pfvc", `log PBW/PFVC (strain error)` = "ldisc")
+channel_frames <- map(CHANNEL_EXPOSURES, ~ bind_cols(both_cohorts, pfvc_channels(both_cohorts, .x)))
+# how each piece rescales between the two exposure scales, from the formulas alone: the
+# slope through the origin of the ratio piece on the PFVC piece, and the R2 of that
+# proportionality. R2 = 1 means the ratio scale is the PFVC scale times a constant
+# (beta on the ratio scale = beta on the PFVC scale divided by the slope); below 1
+# means the two scales are different functions of the input and no factor exists.
+channel_conversion <- map_dfr(CHANNELS, function(piece) {
+  x <- channel_frames[["log PFVC"]][[piece]]; y <- channel_frames[["log PBW/PFVC (strain error)"]][[piece]]
+  slope <- sum(x * y) / sum(x * x)
+  tibble(piece = sub("^ch_", "", piece), sd_pfvc_piece = sd(x), sd_ratio_piece = sd(y),
+         ratio_per_pfvc_unit = slope, r2_proportional = 1 - sum((y - slope * x)^2) / sum(y^2),
+         convertible = r2_proportional > 0.999, site = site_name)
+})
+# the SD of each piece left after the other three: what identifies its coefficient
+identifying_sd <- function(frame, piece) {
+  others <- setdiff(CHANNELS, piece)
+  sd(resid(lm(as.formula(paste(piece, "~", paste(others, collapse = " + "))), data = frame)))
+}
 CHANNEL_OUTCOMES <- OUTCOMES %>% filter(outcome_key %in% c("inhosp_logistic", "day60_all", "day60_before_imv"))
-fit_channels <- function(population, cohort_now, outcome_key, model) {
-  cohort_data <- population_data(population, cohort_now)
+fit_channels <- function(frame, population, cohort_now, outcome_key, model) {
+  cohort_data <- frame %>% filter(cohort == cohort_now, .data[[paste0("population_", population)]])
   dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
   if (sum(dat$event == 1) < MIN_DEATHS) return(NULL)
   base_terms <- c(if (cohort_now == "Ventilated") "vtpbw", "sf_z", "sofa_z")
@@ -689,9 +726,12 @@ piece_rows <- function(b, V, b_one, se_one, quantity, n_patients, n_deaths) tibb
   quantity = quantity, piece = c(sub("^ch_", "", CHANNELS), "all four (one beta)"),
   log_ratio = c(unname(b), b_one), se = c(sqrt(diag(V)), se_one), n_patients = n_patients, n_deaths = n_deaths)
 channel_rows <- list(); channel_tests <- list(); channel_vcov <- list()
+for (exposure in names(CHANNEL_EXPOSURES)) {
+frame <- channel_frames[[exposure]]
+piece_identifying_sd <- setNames(map_dbl(CHANNELS, ~ identifying_sd(frame, .x)), sub("^ch_", "", CHANNELS))
 for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))) {
   outcome_key <- CHANNEL_OUTCOMES$outcome_key[k]; model <- CHANNEL_OUTCOMES$model[k]
-  fits <- map(set_names(COHORTS), ~ fit_channels(population, .x, outcome_key, model))
+  fits <- map(set_names(COHORTS), ~ fit_channels(frame, population, .x, outcome_key, model))
   if (any(map_lgl(fits, is.null))) next
   ventilated <- fits[["Ventilated"]]; control <- fits[["No support"]]
   difference_b <- ventilated$b - control$b
@@ -701,7 +741,7 @@ for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))
   channel_vcov[[length(channel_vcov) + 1]] <- as_tibble(as.table(difference_V), .name_repair = "minimal") %>%
     set_names(c("piece_row", "piece_col", "covariance")) %>%
     mutate(across(c(piece_row, piece_col), ~ sub("^ch_", "", .x)),
-           population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+           exposure = exposure, population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
            quantity = "ventilated minus no support", .before = 1)
   channel_rows[[length(channel_rows) + 1]] <- bind_rows(
     piece_rows(ventilated$b, ventilated$V, ventilated$b_one, ventilated$se_one, "Ventilated",
@@ -709,26 +749,30 @@ for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))
     piece_rows(control$b, control$V, control$b_one, control$se_one, "No support", control$n_patients, control$n_deaths),
     piece_rows(difference_b, difference_V, ventilated$b_one - control$b_one,
                sqrt(ventilated$se_one^2 + control$se_one^2), "ventilated minus no support", NA_integer_, NA_integer_)) %>%
-    mutate(population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
-           ratio_type = if_else(model == "logistic", "OR", "HR"))
+    mutate(exposure = exposure, population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+           ratio_type = if_else(model == "logistic", "OR", "HR"),
+           identifying_sd = unname(piece_identifying_sd[piece]))
   size_pieces <- c("ch_height", "ch_sex", "ch_race")
   size_contrast <- rbind(c(1, -1, 0), c(1, 0, -1))
   size_d <- size_contrast %*% difference_b[size_pieces]
   size_stat <- as.numeric(t(size_d) %*% solve(size_contrast %*% difference_V[size_pieces, size_pieces] %*% t(size_contrast)) %*% size_d)
   channel_tests[[length(channel_tests) + 1]] <- tibble(
-    population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+    exposure = exposure, population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
     test = c("the four differences are equal (3 df)", "height = sex = race differences (2 df)",
              "the four ventilated pieces are equal (3 df, for reference)",
              "the four no-support pieces are equal (3 df, for reference)"),
     p = c(channels_equal_p(difference_b, difference_V), pchisq(size_stat, 2, lower.tail = FALSE),
           channels_equal_p(ventilated$b, ventilated$V), channels_equal_p(control$b, control$V)))
 }
+}
 channel_contrast <- bind_rows(channel_rows) %>%
   mutate(ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
          hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
-         scale = "per log unit of the piece (log-PFVC units); ratio_per_0.1 is per 0.1 log units (about 10% of PFVC)",
+         scale = if_else(exposure == "log PFVC",
+                         "per log unit of the piece (log-PFVC units); ratio_per_0.1 is per 0.1 log units (about 10% of PFVC)",
+                         "per log unit of the piece (log PBW/PFVC units); ratio_per_0.1 is per 0.1 log units (about 10% more strain than the protocol intends)"),
          site = site_name) %>%
-  relocate(population, outcome, ratio_type, quantity, piece)
+  relocate(exposure, population, outcome, ratio_type, quantity, piece)
 channel_tests <- bind_rows(channel_tests) %>% mutate(site = site_name)
 channel_vcov <- bind_rows(channel_vcov) %>% mutate(site = site_name)
 
@@ -757,12 +801,15 @@ message("\nThe channel control contrast (everyone, 60-day death before intubatio
         " strain predicts equal ventilated-minus-control differences):")
 print(as.data.frame(channel_contrast %>%
                       filter(population == POPULATIONS[["everyone"]], outcome == "60-day death, before invasive ventilation") %>%
-                      select(quantity, piece, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p) %>%
+                      select(exposure, quantity, piece, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, identifying_sd) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 print(as.data.frame(channel_tests %>% mutate(p = signif(p, 3))), row.names = FALSE)
 write_csv(mask_small_counts(channel_contrast), file.path(final_dir, paste0("pfvc_age_control_channels_", site_name, ".csv")))
 write_csv(channel_tests, file.path(final_dir, paste0("pfvc_age_control_channel_tests_", site_name, ".csv")))
 write_csv(channel_vcov, file.path(final_dir, paste0("pfvc_age_control_channel_vcov_", site_name, ".csv")))
+message("\nThe two exposure scales: how each piece rescales, from the formulas (R2 = 1: a constant factor exists)")
+print(as.data.frame(channel_conversion %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+write_csv(channel_conversion, file.path(final_dir, paste0("pfvc_age_control_channel_conversion_", site_name, ".csv")))
 write_csv(mask_small_counts(code_status_counts),
           file.path(final_dir, paste0("pfvc_age_control_code_status_", site_name, ".csv")))
 
