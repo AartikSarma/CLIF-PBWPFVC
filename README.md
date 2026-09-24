@@ -138,16 +138,27 @@ the file format. See [config/README.md](config/README.md).
 }
 ```
 
-### 2. Run the pipeline
+### 2. Install uvr
 
-One entry point restores the environment from `renv.lock` and runs the stages you
+[uvr](https://github.com/nbafrank/uvr) manages the R packages. `uvr.toml` lists the
+packages the scripts load and `uvr.lock` pins them and everything they depend on;
+`uvr sync` installs them into `.uvr/library/`, and `uvr run` runs a script against
+that library. Install uvr by following its
+[instructions](https://github.com/nbafrank/uvr#installation). Run every script with
+`uvr run`, never bare `Rscript`: bare `Rscript` does not see the project library.
+
+### 3. Run the pipeline
+
+One entry point installs the locked packages (`uvr sync`) and runs the stages you
 ask for, each script as a clean subprocess. From the repository root:
 
 ```bash
-Rscript code/00_run_pipeline.R                          # prep + cross_sectional (figures 1-3)
-Rscript code/00_run_pipeline.R --stages injury          # figure 4, with its controls
-Rscript code/00_run_pipeline.R --stages all
+uvr run code/00_run_pipeline.R                             # prep + cross_sectional (figures 1-3)
+uvr run code/00_run_pipeline.R -- --stages injury          # figure 4, with its controls
+uvr run code/00_run_pipeline.R -- --stages all
 ```
+
+The `--` separates uvr's options from the runner's.
 
 | Stage | Runs | Rough cost |
 |---|---|---|
@@ -196,7 +207,7 @@ caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 The figure is `final/injury/biotrauma_fig_main_pfvc_7d_<site>.pdf`.
 
 To run a single script while debugging, run it from the repository root, for
-example `Rscript code/04_analysis.R`. Scripts read the previous step's outputs, so
+example `uvr run code/04_analysis.R`. Scripts read the previous step's outputs, so
 they run in number order. Set `PBWPFVC_COHORT=nosupport` (or `niv`) to run a script
 on a control cohort.
 

@@ -1,0 +1,31 @@
+[project]
+name = "pbwpfvc"
+r_version = ">=4.5.0"
+
+# The packages the scripts in code/ and utils/ load; uvr.lock pins them and
+# everything they depend on.
+[dependencies]
+broom = "*"
+collapse = "*"
+"data.table" = "*"
+dplyr = "*"
+EValue = "*"
+fst = "*"
+GLMMadaptive = "*"
+gtsummary = "*"
+here = "*"
+JMbayes2 = "*"
+jsonlite = "*"
+knitr = "*"
+lubridate = "*"
+metafor = "*"
+nlme = "*"
+patchwork = "*"
+readr = "*"
+rspiro = "*"
+scales = "*"
+stringr = "*"
+survival = "*"
+tidyverse = "*"
+vctrs = "*"
+arrow = "*"

@@ -4,7 +4,7 @@
 # =============================================================================
 # Single entry point for running this project at a CLIF consortium site.
 #
-#   1. Restores the project environment from renv.lock.
+#   1. Installs the packages pinned in uvr.lock (uvr sync).
 #   2. Runs the requested stages in order, each script as a clean subprocess.
 #
 # Everything a stage writes for sharing goes to output/<site>_output/final/, which
@@ -26,11 +26,11 @@
 # intentionally not invoked here.
 #
 # Usage (from the project root, or anywhere — the script locates the repo):
-#   Rscript code/00_run_pipeline.R
-#   Rscript code/00_run_pipeline.R --site_name my_site --site_path /data/clif [--file_type parquet]
-#   Rscript code/00_run_pipeline.R --stages injury
-#   Rscript code/00_run_pipeline.R --stages all
-#   Rscript code/00_run_pipeline.R --analysis_only          (the same as --stages cross_sectional)
+#   uvr run code/00_run_pipeline.R
+#   uvr run code/00_run_pipeline.R -- --site_name my_site --site_path /data/clif [--file_type parquet]
+#   uvr run code/00_run_pipeline.R -- --stages injury
+#   uvr run code/00_run_pipeline.R -- --stages all
+#   uvr run code/00_run_pipeline.R -- --analysis_only          (the same as --stages cross_sectional)
 #
 # --analysis_only skips the data-preparation scripts (01 cohort, 02 QC, 03 variables)
 # and runs only the analyses (04, 05) against the script-03 outputs already on disk
@@ -46,7 +46,7 @@
 # script through environment variables read by utils/config.R
 # (PBWPFVC_SITE_NAME, PBWPFVC_TABLES_PATH, PBWPFVC_FILE_TYPE), so a single script
 # can be re-run by hand with the same override, e.g.
-#   PBWPFVC_SITE_NAME=my_site Rscript code/04_analysis.R
+#   PBWPFVC_SITE_NAME=my_site uvr run code/04_analysis.R
 #
 # Each numbered script is standalone: it reads its inputs from disk and writes
 # its outputs back to disk, so they are run as separate subprocesses rather than
@@ -56,7 +56,7 @@
 # =============================================================================
 
 # --- Locate the repository root ----------------------------------------------
-# Find this file's path from the Rscript invocation so the pipeline can be
+# Find this file's path from the R invocation so the pipeline can be
 # launched from any working directory.
 get_script_path <- function() {
   args <- commandArgs(trailingOnly = FALSE)
@@ -69,7 +69,7 @@ get_script_path <- function() {
     return(normalizePath(sys.frames()[[1]]$ofile))
   }
   stop("Unable to determine the path to 00_run_pipeline.R. ",
-       "Run it with: Rscript code/00_run_pipeline.R")
+       "Run it with: uvr run code/00_run_pipeline.R")
 }
 
 script_path <- get_script_path()
@@ -81,7 +81,7 @@ parse_pipeline_args <- function(args) {
   known <- c(site_name = "PBWPFVC_SITE_NAME", site_path = "PBWPFVC_TABLES_PATH",
              file_type = "PBWPFVC_FILE_TYPE", stages = "stages")
   flags <- c("analysis_only")
-  usage <- paste0("Usage: Rscript code/00_run_pipeline.R [--site_name NAME] [--site_path DIR] ",
+  usage <- paste0("Usage: uvr run code/00_run_pipeline.R -- [--site_name NAME] [--site_path DIR] ",
                   "[--file_type parquet|csv|fst] [--stages prep,cross_sectional,injury|all] ",
                   "[--analysis_only]")
   out <- list(); i <- 1L
@@ -139,13 +139,21 @@ message("Stages: ", paste(stages, collapse = ", "))
 if (analysis_only) message("No prep stage: running on the script-03 outputs already on disk")
 message("=============================================================")
 
-# --- 1. Restore the project environment --------------------------------------
-message("\n[00] Restoring renv environment from renv.lock ...")
-if (!requireNamespace("renv", quietly = TRUE)) {
-  install.packages("renv", repos = "https://cloud.r-project.org")
-}
-renv::restore(prompt = FALSE)
-message("[00] renv environment restored.\n")
+# --- 1. Sync the project environment -----------------------------------------
+# uvr (https://github.com/nbafrank/uvr) installs the packages pinned in uvr.lock
+# into .uvr/library/. `uvr run` puts that library first on this process's library
+# path through R_LIBS_USER, which every script started below inherits, so the
+# runner must be launched with `uvr run`, not bare Rscript.
+message("\n[00] Syncing packages from uvr.lock ...")
+if (!nzchar(Sys.which("uvr")))
+  stop("uvr is not installed; see https://github.com/nbafrank/uvr#installation")
+if (!identical(system2("uvr", "sync"), 0L))
+  stop("uvr sync failed; fix the error above before re-running.")
+uvr_library <- normalizePath(file.path(repo_root, ".uvr", "library"))
+if (!uvr_library %in% normalizePath(.libPaths()))
+  stop("The project library ", uvr_library, " is not on the library path. ",
+       "Launch the runner with: uvr run code/00_run_pipeline.R")
+message("[00] Packages synced.\n")
 
 # --- 2. Run the numbered pipeline scripts in order ---------------------------
 # Each step is a command line: an R script, or one of the shell runners.

@@ -7,9 +7,6 @@
 *.Rproj
 .Rproj.user
 
-## ignore the renv initialization file
-initialize_renv.R
-
 ## ignore filtered CLIF tables stored as Rdata
 *.RData
 
@@ -20,9 +17,6 @@ CLIF_*.fst
 
 #ignore the identifier app
 CLIF_cohort_identifier*
-
-# ignore file used to initialize renv when creating the template
-initialize_renv.R
 
 # ignore filtered CLIF tables stored as Rdata
 *.RData
@@ -61,6 +55,12 @@ code/pooling/pooled_tte.R
 # session-local data exports at repo root -- never commit patient-derived data
 arma_pfvc_data*.csv
 
-
 # local figure renders left over from the removed figures/*.py scripts
 figures/
+
+# uvr: the installed packages and the shell shim stay local; uvr.toml and uvr.lock are committed
+/.uvr/library/
+/.uvr/activate*
+
+# editor settings (uvr init writes machine-specific R paths here)
+.vscode/

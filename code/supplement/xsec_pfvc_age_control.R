@@ -99,7 +99,7 @@
 # the index (SF < 315, the ventilated cohort's own gate); hypoxemic and full code.
 # The full-code ones need the optional CLIF code_status table (section "Code status").
 #   pfvc_age_control_{site}.pdf
-# Usage: Rscript code/supplement/xsec_pfvc_age_control.R   (PBWPFVC_COHORT unset)
+# Usage: uvr run code/supplement/xsec_pfvc_age_control.R   (PBWPFVC_COHORT unset)
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -646,7 +646,7 @@ if (HAS_CONTROL_PANEL) {
            site = site_name)
 } else message("*** No 7-day control panel (jm_long_7d, jm_surv_7d) in ", control_panel_dir,
                ": the hypoxemia pathway is skipped. Build it with PBWPFVC_COHORT=nosupport PBWPFVC_JM_GRID=daily ",
-               "PBWPFVC_JM_HORIZON=7 Rscript code/21_biotrauma_panel.R ***")
+               "PBWPFVC_JM_HORIZON=7 uvr run code/21_biotrauma_panel.R ***")
 
 # =============================================================================
 # The channel control contrast

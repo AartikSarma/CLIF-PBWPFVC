@@ -18,7 +18,7 @@
 #   arm    any label (e.g. "6 mL/kg", "12 mL/kg")
 #   tidal_volume  OPTIONAL delivered VT (mL or L auto-detected). If present, also reports the
 #                 actual delivered strain per arm: VT/PBW (mL/kg), VT/PFVC (%), VT/FVC_age25 (%).
-# Usage:  Rscript code/tools/calc_external_pfvc.R <input.csv> [output.csv]
+# Usage:  uvr run code/tools/calc_external_pfvc.R <input.csv> [output.csv]
 #
 # PBW (Devine) is reported per arm. With delivered VT, VT/PFVC and VT/FVC_age25 are the strain
 # each arm actually received -- directly comparable to the TTE ceilings (C_LOW=11, C_HIGH=16),
@@ -27,7 +27,7 @@
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(rspiro) })
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 1) stop("Usage: Rscript code/tools/calc_external_pfvc.R <input.csv> [output.csv]")
+if (length(args) < 1) stop("Usage: uvr run code/tools/calc_external_pfvc.R <input.csv> [output.csv]")
 in_path  <- args[1]
 out_path <- if (length(args) >= 2) args[2] else sub("\\.csv$", "_pfvc_by_arm.csv", in_path)
 raw <- readr::read_csv(in_path, show_col_types = FALSE)

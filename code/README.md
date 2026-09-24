@@ -15,7 +15,7 @@ to change; that stops once sites have returned `final/` folders.
 
 | Script | Block | What it does | Writes (prefix) |
 |---|---|---|---|
-| `00_run_pipeline.R` | | Entry point: restores `renv`, runs the requested stages | |
+| `00_run_pipeline.R` | | Entry point: installs the packages in `uvr.lock`, runs the requested stages | |
 | `01_cohort_identification.R` | prep | Filters the CLIF tables to the eligible cohort (ventilated, or a control cohort under `PBWPFVC_COHORT`) | |
 | `02_quality_checks.R` | prep | Outlier thresholds and QC summaries | nothing in `final/`; its summaries stay in `intermediate/summary_stats/` |
 | `03_variable_derivation.R` | prep | PBW, PFVC, SOFA, SF and PF ratios, tidal-volume metrics | `attrition_log_`, `dist_` |
@@ -47,7 +47,7 @@ to change; that stops once sites have returned `final/` folders.
   mkdir -p results/fig4/MIMIC results/fig4/UCSF     # results/ is gitignored
   cp -R output/MIMIC_output/final/injury output/MIMIC_output/final/supplement results/fig4/MIMIC/
   cp -R output/UCSF_output/final/injury  output/UCSF_output/final/supplement  results/fig4/UCSF/
-  PBWPFVC_RESULTS_ROOT=results/fig4 Rscript code/pooling/pooled_biotrauma.R
+  PBWPFVC_RESULTS_ROOT=results/fig4 uvr run code/pooling/pooled_biotrauma.R
   ```
 
   The same script pools the supplement's contrasts from each site's `supplement/`: the

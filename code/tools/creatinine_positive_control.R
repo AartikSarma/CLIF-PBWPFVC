@@ -32,7 +32,7 @@
 #   creatinine_check_7d_{site}.csv          change from day 0 by stratum and day
 #   creatinine_check_counts_7d_{site}.csv   patients, CRRT starts and deaths by stratum
 #
-# Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 Rscript code/tools/creatinine_positive_control.R
+# Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/tools/creatinine_positive_control.R
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(arrow); library(here) })
 rm(list = ls())

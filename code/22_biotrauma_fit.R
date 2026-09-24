@@ -51,7 +51,7 @@
 #   divergence as a line and as a day spline, longitudinal submodel only (section
 #   13f0) -> final/jm_shape_{tag}.csv and .pdf.
 #
-# Usage: Rscript code/22_biotrauma_fit.R
+# Usage: uvr run code/22_biotrauma_fit.R
 # =============================================================================
 
 Sys.setenv(OMP_NUM_THREADS = "1", OPENBLAS_NUM_THREADS = "1",

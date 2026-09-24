@@ -48,7 +48,7 @@
 #                                     against each other (common sample)
 #   mortality_prediction_{site}.pdf   cross-validated AUC with the difference from
 #                                     VT/PBW alone, alone and given VT/PBW
-# Usage: Rscript code/supplement/xsec_mortality_prediction.R
+# Usage: uvr run code/supplement/xsec_mortality_prediction.R
 # =============================================================================
 
 suppressPackageStartupMessages({

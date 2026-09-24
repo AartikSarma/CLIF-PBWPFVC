@@ -39,7 +39,7 @@
 #   jm_control_did_{form}_{h}_{site}.csv            ventilated minus the control
 #   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated minus the hypoxemic control
 #
-# Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 Rscript code/27_control_comparison.R
+# Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/27_control_comparison.R
 # =============================================================================
 
 suppressPackageStartupMessages({

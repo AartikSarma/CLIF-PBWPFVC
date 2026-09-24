@@ -51,7 +51,7 @@
 # three sites. Every pooled row carries k, I2, tau2 and the per-site estimates it
 # was built from. Sites are anonymised with utils/site_anonymization.R when present.
 #
-# Usage: PBWPFVC_RESULTS_ROOT=/path/to/results Rscript code/pooling/pooled_biotrauma.R
+# Usage: PBWPFVC_RESULTS_ROOT=/path/to/results uvr run code/pooling/pooled_biotrauma.R
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(here); library(metafor) })
 rm(list = ls())
