@@ -20,7 +20,7 @@ ATTRITION_STEPS <- c(
   "ICU admission",
   "Invasive ventilation with set tidal volume",
   "Height 150-210 cm",
-  "Complete index data (VT/PBW, VT/PFVC, SF ratio, SOFA)",
+  "Complete index data (VT/PBW, VT/PFVC, SF ratio)",
   "Lung-protective VT/PBW 6-8 mL/kg",
   "Hypoxemic (SF ratio < 315)"
 )

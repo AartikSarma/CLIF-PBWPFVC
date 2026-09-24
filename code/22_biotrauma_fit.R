@@ -325,7 +325,7 @@ if (nrow(severity_anchor)) {
       severity_anchor <- bind_rows(anchor_on_disk %>% filter(!marker %in% severity_anchor$marker), severity_anchor)
   }
   write_csv(severity_anchor, anchor_path)
-  message("Severity anchor by marker (index-day SOFA components, own component left out; bands of 10 or more):")
+  message("Severity anchor by marker (SOFA components over the 24 h from the index, own component left out; bands of 10 or more):")
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
                         select(marker, anchor, sev_anchor, n_patients, pct, pct_at_or_above)), row.names = FALSE)
 }

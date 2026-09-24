@@ -11,7 +11,6 @@ library(lubridate)
 library(rspiro)
 
 source("utils/config.R")
-source("utils/process_sofa_scores.R")
 source("utils/standardize_pressor_dose.R")
 source("utils/attrition_log.R")
 
@@ -187,193 +186,9 @@ pf_joined <- as_tibble(pf_joined) %>%
 message("PF ratio computed at ", nrow(pf_joined), " PaO2 measurement times")
 
 # =============================================================================
-# 3c. SOFA scores — daily (worst values per calendar day)
+# 3c. SOFA is scored after the index is chosen (section 3e2): the worst values over
+# the 24 hours from each patient's index, by clifR's definition.
 # =============================================================================
-
-# Aggregate each data source to worst-per-day BEFORE joining,
-# so the join produces compact rows instead of millions of sparse ones.
-
-admission_times <- cohort_demographics %>%
-  select(hospitalization_id, admission_dttm)
-
-# Helper: add sofa_day and filter to the ventilation window.
-#
-# Daily SOFA is required by the cross-sectional inclusion gate (has_all_data needs
-# a same-day sofa_total). Previously the window was the first 72h (days 0-2), which
-# silently excluded any patient whose first qualifying IMV timepoint fell later than
-# 72h after admission. The original analysis required only a non-missing stay-level
-# SOFA, so late-intubation patients were retained. We extend the window to span the
-# 28-day study/ventilation window so a same-day SOFA exists on whichever day the
-# index timepoint lands. (Pre-aggregation to patient-days keeps this inexpensive.)
-SOFA_MAX_DAY <- 28L
-add_day <- function(df, dttm_col = "recorded_dttm") {
-  df %>%
-    inner_join(admission_times, by = "hospitalization_id") %>%
-    mutate(sofa_day = as.integer(floor(as.numeric(
-      difftime(.data[[dttm_col]], admission_dttm, units = "days")
-    )))) %>%
-    filter(sofa_day >= 0L, sofa_day <= SOFA_MAX_DAY) %>%
-    select(-admission_dttm)
-}
-
-# Labs: worst per day (max for creatinine/bilirubin, min for platelets/PaO2)
-# Worst lab per day in long format, then pivot once
-labs_daily <- cohort_labs %>%
-  filter(!is.na(lab_value_numeric),
-         lab_category %in% c("creatinine", "bilirubin_total", "platelet_count", "po2_arterial")) %>%
-  mutate(lab_category = case_when(
-    lab_category == "platelets" ~ "platelet_count",
-    TRUE ~ lab_category
-  )) %>%
-  select(hospitalization_id, lab_result_dttm, lab_category, lab_value_numeric) %>%
-  add_day("lab_result_dttm") %>%
-  group_by(hospitalization_id, sofa_day, lab_category) %>%
-  summarise(
-    # max for worse-when-higher, min for worse-when-lower
-    lab_value_numeric = case_when(
-      first(lab_category) %in% c("creatinine", "bilirubin_total") ~ max(lab_value_numeric, na.rm = TRUE),
-      TRUE ~ min(lab_value_numeric, na.rm = TRUE)
-    ),
-    .groups = "drop"
-  ) %>%
-  pivot_wider(
-    id_cols = c(hospitalization_id, sofa_day),
-    names_from = lab_category,
-    values_from = lab_value_numeric
-  )
-
-# Vitals: worst per day (min MAP, min SpO2)
-vitals_daily <- cohort_vitals %>%
-  filter(!is.na(vital_value), vital_category %in% c("map", "spo2")) %>%
-  select(hospitalization_id, recorded_dttm, vital_category, vital_value) %>%
-  add_day() %>%
-  group_by(hospitalization_id, sofa_day, vital_category) %>%
-  summarise(vital_value = min(vital_value, na.rm = TRUE), .groups = "drop") %>%
-  pivot_wider(
-    id_cols = c(hospitalization_id, sofa_day),
-    names_from = vital_category,
-    values_from = vital_value
-  )
-
-# GCS: worst (min) per day
-gcs_daily <- cohort_assessments %>%
-  filter(assessment_category == "gcs_total") %>%
-  mutate(gcs_total = as.numeric(numerical_value)) %>%
-  select(hospitalization_id, recorded_dttm, gcs_total) %>%
-  add_day() %>%
-  group_by(hospitalization_id, sofa_day) %>%
-  summarise(gcs_total = min(gcs_total, na.rm = TRUE), .groups = "drop") %>%
-  mutate(gcs_total = if_else(is.infinite(gcs_total), NA_real_, gcs_total))
-
-# Vasopressors: max dose per day
-# Norepinephrine doses are standardized to mcg/kg/min using patient weight so
-# that mcg/min and mcg/kg/min entries are comparable.
-vaso_daily <- cohort_meds %>%
-  filter(med_category == "norepinephrine") %>%
-  standardize_pressor_dose(
-    weights = cohort_weights,
-    out_col = "norepinephrine_mcg_kg_min",
-    label = "norepinephrine (SOFA)"
-  ) %>%
-  filter(!is.na(norepinephrine_mcg_kg_min)) %>%
-  select(hospitalization_id, admin_dttm, norepinephrine_mcg_kg_min) %>%
-  add_day("admin_dttm") %>%
-  group_by(hospitalization_id, sofa_day) %>%
-  summarise(norepinephrine_mcg_kg_min = max(norepinephrine_mcg_kg_min, na.rm = TRUE),
-            .groups = "drop") %>%
-  mutate(norepinephrine_mcg_kg_min = if_else(is.infinite(norepinephrine_mcg_kg_min),
-                                              NA_real_, norepinephrine_mcg_kg_min))
-
-# Respiratory: worst device + max FiO2 per day
-resp_daily <- resp_waterfall %>%
-  select(hospitalization_id, recorded_dttm, device_category, fio2_set) %>%
-  add_day() %>%
-  mutate(device_category = str_to_title(device_category)) %>%
-  group_by(hospitalization_id, sofa_day) %>%
-  summarise(
-    fio2_set = max(fio2_set, na.rm = TRUE),
-    device_category = if (all(is.na(device_category))) NA_character_ else first(na.omit(device_category)),
-    .groups = "drop"
-  ) %>%
-  mutate(fio2_set = if_else(is.infinite(fio2_set), NA_real_, fio2_set))
-
-# Join pre-aggregated daily data (small: ~N_patients * N_days rows)
-sofa_collapsed <- labs_daily %>%
-  full_join(vitals_daily, by = c("hospitalization_id", "sofa_day")) %>%
-  full_join(gcs_daily, by = c("hospitalization_id", "sofa_day")) %>%
-  full_join(vaso_daily, by = c("hospitalization_id", "sofa_day")) %>%
-  full_join(resp_daily, by = c("hospitalization_id", "sofa_day"))
-
-# Add missing vasopressor columns
-for (col in c("epinephrine_mcg_kg_min", "dopamine_mcg_kg_min", "dobutamine_mcg_kg_min")) {
-  if (!col %in% names(sofa_collapsed)) {
-    sofa_collapsed[[col]] <- NA_real_
-  }
-}
-
-message("Daily SOFA input: ", nrow(sofa_collapsed), " patient-days, ",
-        n_distinct(sofa_collapsed$hospitalization_id), " patients")
-
-# Data is already pre-collapsed to one row per patient-day.
-# Score directly: impute PaO2, join device ranks, compute components.
-# No group_by aggregation needed — each row is already one observation unit.
-sofa_daily <- sofa_collapsed %>%
-  mutate(
-    po2_arterial = if_else(between(po2_arterial, 0, 700), po2_arterial, NA_real_),
-    fio2_set = if_else(between(fio2_set, 0.21, 1), fio2_set, NA_real_),
-    spo2 = if_else(between(spo2, 50, 100), spo2, NA_real_)
-  ) %>%
-  .impute_pao2_from_spo2() %>%
-  left_join(DEVICE_RANK_MAPPING, by = "device_category") %>%
-  mutate(
-    p_f = po2_arterial / fio2_set,
-    p_f_imputed = pao2_imputed / fio2_set,
-    sofa_cv_97 = case_when(
-      norepinephrine_mcg_kg_min > 0.1 ~ 4L,
-      norepinephrine_mcg_kg_min > 0   ~ 3L,
-      map < 70  ~ 1L,
-      map >= 70 ~ 0L
-    ),
-    sofa_coag = case_when(
-      platelet_count < 20   ~ 4L, platelet_count < 50  ~ 3L,
-      platelet_count < 100  ~ 2L, platelet_count < 150 ~ 1L,
-      platelet_count >= 150 ~ 0L
-    ),
-    sofa_liver = case_when(
-      bilirubin_total >= 12  ~ 4L, bilirubin_total >= 6   ~ 3L,
-      bilirubin_total >= 2   ~ 2L, bilirubin_total >= 1.2 ~ 1L,
-      bilirubin_total < 1.2  ~ 0L
-    ),
-    sofa_resp = case_when(
-      p_f < 100 & device_category %in% c("Imv", "Nippv", "Cpap") ~ 4L,
-      p_f < 200 & device_category %in% c("Imv", "Nippv", "Cpap") ~ 3L,
-      p_f < 300 ~ 2L, p_f < 400 ~ 1L, p_f >= 400 ~ 0L
-    ),
-    sofa_cns = case_when(
-      gcs_total < 6  ~ 4L, gcs_total <= 9  ~ 3L,
-      gcs_total <= 12 ~ 2L, gcs_total <= 14 ~ 1L,
-      gcs_total == 15 ~ 0L
-    ),
-    sofa_renal = case_when(
-      creatinine >= 5   ~ 4L, creatinine >= 3.5 ~ 3L,
-      creatinine >= 2   ~ 2L, creatinine >= 1.2 ~ 1L,
-      creatinine < 1.2  ~ 0L
-    )
-  ) %>%
-  mutate(
-    across(starts_with("sofa_"), ~ coalesce(.x, 0L)),
-    sofa_total = sofa_cv_97 + sofa_coag + sofa_liver + sofa_resp + sofa_cns + sofa_renal
-  )
-
-message("Daily SOFA computed: ", nrow(sofa_daily), " patient-days, ",
-        n_distinct(sofa_daily$hospitalization_id), " patients")
-
-# Per-encounter SOFA = day 1 SOFA (for cross-sectional analysis in script 04)
-sofa_scores <- sofa_daily %>%
-  filter(sofa_day == 0) %>%
-  select(-sofa_day)
-
-message("Day-1 SOFA available for ", nrow(sofa_scores), " hospitalizations")
 
 # =============================================================================
 # 3d. Derive analysis variables
@@ -753,22 +568,10 @@ message("Platelet count available at ", sum(!is.na(analysis_with_sf$platelet_cou
 message("Delta platelet available at ", sum(!is.na(analysis_with_sf$delta_platelet)),
         " / ", nrow(analysis_with_sf), " timepoints")
 
-# Join daily SOFA scores by hospitalization_id + day
 analysis_with_sf <- analysis_with_sf %>%
   left_join(
     cohort_demographics %>% select(hospitalization_id, admission_dttm),
     by = "hospitalization_id"
-  ) %>%
-  mutate(
-    sofa_day = as.integer(floor(as.numeric(
-      difftime(recorded_dttm, admission_dttm, units = "days")
-    )))
-  ) %>%
-  left_join(
-    sofa_daily %>% select(hospitalization_id, sofa_day, sofa_total,
-                           sofa_cv_97, sofa_coag, sofa_liver,
-                           sofa_resp, sofa_cns, sofa_renal),
-    by = c("hospitalization_id", "sofa_day")
   )
 
 # Join demographics for survival time
@@ -809,15 +612,16 @@ analysis_with_sf <- analysis_with_sf %>%
 SF_HYPOXEMIA_THRESHOLD <- 315
 
 # A timepoint has "all available data" when the core analysis variables used in
-# the cross-sectional models are all observed: VT/PBW, VT/PFVC, SF ratio, and a
-# daily SOFA score. Driving-pressure-derived measures (dp, crs) are intentionally
+# the cross-sectional models are all observed: VT/PBW, VT/PFVC and the SF ratio.
+# SOFA is scored after the index is chosen (3e2), over the 24 hours from it, so it
+# is not part of this gate. Driving-pressure-derived measures (dp, crs) are intentionally
 # NOT required here, since plateau pressure is frequently unrecorded and would
 # otherwise shrink the cohort dramatically.
 analysis_with_completeness <- analysis_with_sf %>%
   mutate(
-    # the control has no tidal volume: complete = SF and SOFA observed
+    # the control has no tidal volume: complete = SF observed
     has_all_data = (config$cohort != "imv" | (!is.na(vtpbw) & !is.na(vtpfvc))) &
-      !is.na(sf_ratio) & !is.na(sofa_total)
+      !is.na(sf_ratio)
   )
 
 # Save the pre-gate per-timepoint dataset (all eligible IMV timepoints with derived
@@ -840,7 +644,7 @@ write_parquet(analysis_with_completeness,
 # HFNC/NIV) and has no lung-protective band to apply
 # the no-support control has no hypoxemia gate either (its patients are, by and
 # large, not hypoxemic): a qualifying row is a room-air / nasal-cannula row with SF
-# and SOFA observed, and the index is set at ICU admission (below)
+# observed, and the index is set at ICU admission (below)
 qualifying_timepoints <- analysis_with_completeness %>%
   filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8),
          config$cohort == "nosupport" | sf_ratio < SF_HYPOXEMIA_THRESHOLD)
@@ -987,6 +791,86 @@ message("Index timepoints with driving pressure observed: ",
 message("Included patients (VT/PBW 6-8 AND SF<", SF_HYPOXEMIA_THRESHOLD,
         " at any complete-data timepoint): ", length(eligible_patients))
 
+# =============================================================================
+# 3e2. SOFA: the worst values over the 24 hours from the index
+# =============================================================================
+# One SOFA score per patient, from the worst value of each input between the index
+# timepoint and SOFA_WINDOW_H hours after it: the first qualifying ventilator row
+# for the ventilated cohort, ICU admission for the no-support control. The scoring
+# is clifR's compute_sofa() (github.com/AartikSarma/clifR, the commit pinned in
+# uvr.toml), a port of clifpy's, so the definition is the consortium's:
+#   cardiovascular  dopamine > 15, or epinephrine or norepinephrine > 0.1 mcg/kg/min: 4;
+#                   dopamine > 5, or epinephrine or norepinephrine at or below 0.1: 3;
+#                   dopamine at or below 5, or any dobutamine: 2; MAP < 70: 1
+#   respiratory     measured PaO2 / FiO2 (the worst of each over the window); below
+#                   200 scores 3-4 only on IMV, NIPPV or CPAP
+#   coagulation, liver, renal, CNS   platelets, bilirubin, creatinine, GCS on the
+#                   standard SOFA cut points
+#   A component with no data in the window scores 0.
+# Vasoactive doses are converted to mcg/kg/min first (utils/standardize_pressor_dose.R).
+SOFA_WINDOW_H <- 24
+SOFA_COMPONENTS <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_resp", "sofa_cns", "sofa_renal")
+sofa_window <- cross_sectional %>%
+  transmute(hospitalization_id, start_time = recorded_dttm,
+            end_time = recorded_dttm + lubridate::hours(SOFA_WINDOW_H))
+sofa_ids <- sofa_window$hospitalization_id
+# clifR's device names (IMV, High Flow NC, ...); the waterfall holds them in lower case
+clifr_device_names <- setNames(names(clifR::DEVICE_RANK_DICT), tolower(names(clifR::DEVICE_RANK_DICT)))
+sofa_pressor_events <- function(drug) {
+  cohort_meds %>%
+    filter(med_category == drug, hospitalization_id %in% sofa_ids) %>%
+    standardize_pressor_dose(weights = cohort_weights, out_col = "dose_mcg_kg_min",
+                             label = paste0(drug, " (SOFA)")) %>%
+    filter(!is.na(dose_mcg_kg_min)) %>%
+    transmute(hospitalization_id, event_time = admin_dttm, variable = paste0(drug, "_mcg_kg_min"),
+              value = dose_mcg_kg_min)
+}
+# every numeric input as one row per measurement: patient, time, variable, value
+sofa_numeric_events <- bind_rows(
+  cohort_labs %>%
+    filter(hospitalization_id %in% sofa_ids, !is.na(lab_value_numeric),
+           lab_category %in% c("creatinine", "bilirubin_total", "platelet_count", "po2_arterial")) %>%
+    transmute(hospitalization_id, event_time = lab_result_dttm, variable = lab_category, value = lab_value_numeric),
+  cohort_vitals %>%
+    filter(hospitalization_id %in% sofa_ids, !is.na(vital_value), vital_category %in% c("map", "spo2")) %>%
+    transmute(hospitalization_id, event_time = recorded_dttm, variable = vital_category, value = vital_value),
+  cohort_assessments %>%
+    filter(hospitalization_id %in% sofa_ids, assessment_category == "gcs_total") %>%
+    transmute(hospitalization_id, event_time = recorded_dttm, variable = "gcs_total",
+              value = as.numeric(numerical_value)) %>%
+    filter(!is.na(value)),
+  resp_waterfall %>%
+    filter(hospitalization_id %in% sofa_ids, !is.na(fio2_set)) %>%
+    transmute(hospitalization_id, event_time = recorded_dttm, variable = "fio2_set", value = fio2_set),
+  map_dfr(c("norepinephrine", "epinephrine", "dopamine", "dobutamine"), sofa_pressor_events)
+)
+# compute_sofa() reads a wide table. One row per measurement keeps every value; its
+# worst-value aggregation per patient ignores the empty cells.
+sofa_wide <- bind_rows(
+  sofa_numeric_events %>%
+    mutate(measurement = row_number()) %>%
+    pivot_wider(id_cols = c(hospitalization_id, event_time, measurement),
+                names_from = variable, values_from = value) %>%
+    select(-measurement),
+  resp_waterfall %>%
+    filter(hospitalization_id %in% sofa_ids, !is.na(device_category)) %>%
+    transmute(hospitalization_id, event_time = recorded_dttm,
+              device_category = unname(clifr_device_names[tolower(device_category)]))
+)
+for (input_column in c(clifR::MAX_ITEMS, setdiff(clifR::MIN_ITEMS, "pao2_imputed")))
+  if (!input_column %in% names(sofa_wide)) sofa_wide[[input_column]] <- NA_real_
+sofa_index <- clifR::compute_sofa(sofa_wide, cohort_df = sofa_window, id_name = "hospitalization_id") %>%
+  select(hospitalization_id, sofa_total, all_of(SOFA_COMPONENTS))
+cross_sectional <- cross_sectional %>% left_join(sofa_index, by = "hospitalization_id")
+# every index row is itself a measurement inside its window, so a missing score is a bug
+if (any(is.na(cross_sectional$sofa_total)))
+  stop(sum(is.na(cross_sectional$sofa_total)), " patients have no SOFA over the 24 h from the index")
+message("SOFA over the 24 h from the index (clifR): median ", median(cross_sectional$sofa_total),
+        " (IQR ", paste(quantile(cross_sectional$sofa_total, c(0.25, 0.75)), collapse = "-"), "), ",
+        nrow(cross_sectional), " patients; mean component scores: ",
+        paste(sprintf("%s %.2f", sub("sofa_", "", SOFA_COMPONENTS), colMeans(cross_sectional[SOFA_COMPONENTS])),
+              collapse = ", "))
+
 # All IMV timepoints for the included patients, retained for descriptive
 # summaries. Repeated-measures / longitudinal modeling is deferred to a
 # future project, so no per-timepoint eligibility flags are computed here.
@@ -1074,8 +958,6 @@ cross_sectional <- cross_sectional %>%
 
 write_parquet(analysis_all, file.path(output_dir, "analysis_all_timepoints.parquet"))
 write_parquet(cross_sectional, file.path(output_dir, "analysis_cross_sectional.parquet"))
-write_parquet(sofa_scores, file.path(output_dir, "sofa_scores.parquet"))
-write_parquet(sofa_daily, file.path(output_dir, "sofa_daily.parquet"))
 
 # =============================================================================
 # 3i. Complete the attrition log (steps 4-7) and write the full CONSORT table
@@ -1098,8 +980,8 @@ attrition <- read_csv(partial_path, show_col_types = FALSE) %>%
   attrition_add(ATTRITION_STEPS[4], n_step4,
                 exclusion_reason = "Height outside 150-210 cm or PBW/PFVC missing") %>%
   attrition_add(ATTRITION_STEPS[5], n_step5,
-                exclusion_reason = if (config$cohort != "imv") "Incomplete index data (SF, SOFA)" else
-                  "Incomplete index data (VT/PBW, VT/PFVC, SF, SOFA)") %>%
+                exclusion_reason = if (config$cohort != "imv") "Incomplete index data (SF)" else
+                  "Incomplete index data (VT/PBW, VT/PFVC, SF)") %>%
   attrition_add(ATTRITION_STEPS[6], n_step6,
                 exclusion_reason = if (config$cohort != "imv") "(no lung-protective band for the control arms)" else
                   "Not lung-protective (VT/PBW outside 6-8)") %>%

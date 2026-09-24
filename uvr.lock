@@ -324,6 +324,31 @@ url = "https://cran.r-project.org/src/contrib/cli_3.6.6.tar.gz"
 checksum = "md5:eedc08ba864ae6cd640b05eff1a607ee"
 
 [[package]]
+name = "clifR"
+version = "0.5.0"
+source = "github"
+url = "https://api.github.com/repos/AartikSarma/clifR/tarball/a701d83e5883989383a69872bc8b14df6dade0c7"
+checksum = "git:a701d83e5883989383a69872bc8b14df6dade0c7"
+requires = [
+    "R6",
+    "dplyr",
+    "tidyr",
+    "purrr",
+    "lubridate",
+    "yaml",
+    "arrow",
+    "duckdb",
+    "DBI",
+    "readr",
+    "jsonlite",
+    "stringr",
+    "rlang",
+    "cli",
+    "tibble",
+    "digest",
+]
+
+[[package]]
 name = "clipr"
 version = "0.8.1"
 source = "cran"
@@ -470,6 +495,15 @@ requires = [
     "tidyselect",
     "vctrs",
 ]
+
+[[package]]
+name = "duckdb"
+version = "1.5.5"
+source = "cran"
+raw_version = "1.5.5"
+url = "https://cran.r-project.org/src/contrib/duckdb_1.5.5.tar.gz"
+checksum = "md5:c1f5bc205faad8bcaf5b88f6b82d1cbe"
+requires = ["DBI"]
 
 [[package]]
 name = "evaluate"
