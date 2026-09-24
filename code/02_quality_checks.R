@@ -14,7 +14,7 @@ source("utils/config.R")
 site_name <- config$site_name
 output_dir <- config$output_dir
 
-# Utility functions from outlier_handler.R (sourced inline to avoid side effects)
+# Outlier helpers
 replace_outliers_with_na_long <- function(df, df_outlier_thresholds,
                                           category_variable, numeric_variable) {
   df %>%

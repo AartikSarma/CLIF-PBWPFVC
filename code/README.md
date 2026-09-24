@@ -75,8 +75,7 @@ to change; that stops once sites have returned `final/` folders.
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
   where kidney injury is expected (by ESRD, dialysis procedures and pressor dose; aggregates
-  only), and the two `migrate_*.sh` helpers move outputs written
-  under older folder layouts. Delete the helpers once every site folder is migrated.
+  only).
 - `archive/` is gitignored local scratch.
 
 Every file each script writes to `final/`, its reader and the claim it supports are
