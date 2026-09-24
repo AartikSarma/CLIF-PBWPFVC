@@ -8,9 +8,9 @@
 # fraction of the time while code is still changing. Point the pipeline at the
 # subset without editing config.json:
 #
-#   Rscript code/tools/subset_synthetic.R --frac 0.3 --seed 1
+#   uvr run code/tools/subset_synthetic.R -- --frac 0.3 --seed 1
 #   PBWPFVC_TABLES_PATH=~/Research/synthetic_clif/synth_clif_10k_sub30 \
-#     Rscript code/01_cohort_identification.R      # and so on for 02, 03
+#     uvr run code/01_cohort_identification.R      # and so on for 02, 03
 #
 # Tables keyed by hospitalization_id are filtered on the sampled hospitalizations,
 # tables keyed by patient_id on the sampled patients, and tables with neither key

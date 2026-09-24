@@ -84,11 +84,11 @@
 #
 # Usage (from the repo root; the panel first if it is missing):
 #   export PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7
-#   Rscript code/21_biotrauma_panel.R
-#   PBWPFVC_COHORT=nosupport Rscript code/21_biotrauma_panel.R
+#   uvr run code/21_biotrauma_panel.R
+#   PBWPFVC_COHORT=nosupport uvr run code/21_biotrauma_panel.R
 #   PBWPFVC_COHORT=nosupport PBWPFVC_JM_SEV_CENTER=platelets=<ventilated mean anchor> \
-#     Rscript code/28_height_fingerprint.R
-#   Rscript code/28_height_fingerprint.R
+#     uvr run code/28_height_fingerprint.R
+#   uvr run code/28_height_fingerprint.R
 # PBWPFVC_INJ_MARKER picks the marker (platelets by default; creatinine, bilirubin).
 # The ventilated mean anchor is in final/injury/jm_severity_anchor_mean_7d_{site}.csv.
 # =============================================================================
@@ -121,7 +121,7 @@ message("=== 28_height_fingerprint: ", MARKER, ", site ", site_name, " (cohort "
 # =============================================================================
 panel_path <- file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet"))
 if (!file.exists(panel_path))
-  stop("no ", h_suffix, " panel for this cohort: run  PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 Rscript code/21_biotrauma_panel.R")
+  stop("no ", h_suffix, " panel for this cohort: run  PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/21_biotrauma_panel.R")
 long <- read_parquet(panel_path)
 surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
 

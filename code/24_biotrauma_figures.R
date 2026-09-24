@@ -21,7 +21,7 @@
 # A lower PFVC is the negative of every log-marker estimate; the figures label
 # the injury direction per marker so the eye does not have to flip signs.
 #
-# Usage: PBWPFVC_JM_MODIFIER=pfvc Rscript code/24_biotrauma_figures.R
+# Usage: PBWPFVC_JM_MODIFIER=pfvc uvr run code/24_biotrauma_figures.R
 #        (PBWPFVC_JM_GRID / _HORIZON_H select the tag as for the fit; PBWPFVC_FIG_DIR
 #         points at another folder of the same CSVs, e.g. a site's or the pooled one)
 # =============================================================================

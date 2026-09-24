@@ -13,7 +13,7 @@ cell-suppressed results (n >= 10) designed to be pooled across the consortium.
 ## What the code does
 
 The per-site pipeline is five R scripts run in order by `code/00_run_pipeline.R`,
-which first restores the `renv` environment, then runs 01 -> 05 each as a clean
+which first installs the packages pinned in `uvr.lock`, then runs 01 -> 05 each as a clean
 subprocess. Cross-cohort pooling (`code/pooling/pooled_estimates.R`) is a separate step run
 centrally by the coordinator after every site returns its results — it is not part
 of the per-site runner.

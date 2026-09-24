@@ -24,7 +24,7 @@
 # inch over 60; race-specific GLI-2012 FVC (rspiro::pred_GLI, White = 1, Black = 2).
 # Colours: viridis for age (continuous), Okabe-Ito for sex, race and sites.
 #
-# Usage: PBWPFVC_RESULTS_ROOT=/path/to/results Rscript code/pooling/pooled_displays.R
+# Usage: PBWPFVC_RESULTS_ROOT=/path/to/results uvr run code/pooling/pooled_displays.R
 #   (one subfolder per site holding its final/ tables; output to <root>/All sites/)
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(here); library(patchwork); library(rspiro) })

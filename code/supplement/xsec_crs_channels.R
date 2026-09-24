@@ -67,7 +67,7 @@
 #   crs_channels_tests_{site}.csv       Wald tests of the channels, AIC head-to-head
 #   crs_channels_{site}.pdf             channel exponents, head-to-head, height
 #                                       elasticity by sex
-# Usage: Rscript code/supplement/xsec_crs_channels.R
+# Usage: uvr run code/supplement/xsec_crs_channels.R
 # =============================================================================
 
 suppressPackageStartupMessages({

@@ -93,7 +93,7 @@
 #   dp_vtpfvc_additive_espec_age_{site}.csv   specific elastance across age (the premise)
 #   dp_vtpfvc_additive_{site}.pdf             slopes by age, band estimates, predicted
 #                                             mortality, specific elastance by age
-# Usage: Rscript code/supplement/xsec_dp_vtpfvc_additive.R
+# Usage: uvr run code/supplement/xsec_dp_vtpfvc_additive.R
 # =============================================================================
 
 suppressPackageStartupMessages({

@@ -45,7 +45,7 @@
 # panel is built with the TTE's 28-day death window so death_day and the
 # extubation day are identical objects in both analyses.
 #
-# Usage: Rscript code/21_biotrauma_panel.R
+# Usage: uvr run code/21_biotrauma_panel.R
 # =============================================================================
 
 suppressPackageStartupMessages({

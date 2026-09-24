@@ -86,7 +86,7 @@ ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5};
 FORCE_BUILD=${FORCE_BUILD:-0}
 DRY=0; [[ "${1:-}" == "--dry-run" ]] && DRY=1
 
-# the site's name from config.json (sed: Rscript's stdout carries renv notices)
+# the site's name from config.json (sed, not R: this runs before any R step)
 BASE_SITE=${PBWPFVC_SITE_NAME:-$(sed -n 's/.*"site_name" *: *"\([^"]*\)".*/\1/p' config/config.json | head -n 1)}
 BASE_SITE="${BASE_SITE%_niv}"; BASE_SITE="${BASE_SITE%_nosupport}"
 [[ -n "$BASE_SITE" ]] || { echo "could not read site_name from config/config.json"; exit 1; }
@@ -99,6 +99,8 @@ export PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 PBWPFVC_JM_MODIFIER=pfvc PBWPF
 export PBWPFVC_JM_ITER=$ITER PBWPFVC_JM_BURNIN=$BURNIN PBWPFVC_JM_CHAINS=$CHAINS PBWPFVC_JM_THIN=$THIN PBWPFVC_JM_PAR=$PAR
 echo "site ${BASE_SITE}; markers ${MARKERS}$([[ $CREATININE == 1 ]] && echo ",creatinine"); controls ${CONTROL_MARKERS}; SF bands '${SF_BANDS:-none}'; chains ${ITER}/${BURNIN} x ${CHAINS}"
 [[ $DRY == 0 ]] && echo "logs -> $LOG_DIR"
+# every R step below is `uvr run`, which needs the packages in uvr.lock installed
+if [[ $DRY == 0 ]]; then uvr sync || { echo "uvr sync failed"; exit 1; }; fi
 
 FAILED=()
 run_step () {     # name, then the command
@@ -120,11 +122,11 @@ fit_arm () {      # arm name, cohort, marker list, then extra environment assign
   if [[ " ${FAILED[*]-} " == *" panel_${cohort} "* ]]; then
     echo "[$(date +%H:%M:%S)] ${arm}: skipped, the ${cohort} panel failed to build"; FAILED+=("${arm}_skipped"); return 0
   fi
-  run_step "${arm}_fit"    with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" Rscript code/22_biotrauma_fit.R
-  run_step "${arm}_report" with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" Rscript code/23_biotrauma_report.R
+  run_step "${arm}_fit"    with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" uvr run code/22_biotrauma_fit.R
+  run_step "${arm}_report" with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS="$markers" uvr run code/23_biotrauma_report.R
   if [[ $CREATININE == 1 ]]; then
-    run_step "${arm}_creatinine_fit"    with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 Rscript code/22_biotrauma_fit.R
-    run_step "${arm}_creatinine_report" with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 Rscript code/23_biotrauma_report.R
+    run_step "${arm}_creatinine_fit"    with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 uvr run code/22_biotrauma_fit.R
+    run_step "${arm}_creatinine_report" with_cohort "$cohort" env "$@" PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 uvr run code/23_biotrauma_report.R
   fi
 }
 
@@ -140,7 +142,7 @@ build_cohort () { # cohort, folder holding its derived tables
     echo "[$(date +%H:%M:%S)] ${cohort}: cohort already built, scripts 01-03 skipped (FORCE_BUILD=1 rebuilds)"; return 0
   fi
   for script in 01_cohort_identification 02_quality_checks 03_variable_derivation; do
-    run_step "build_${cohort}_${script}" with_cohort "$cohort" Rscript "code/${script}.R"
+    run_step "build_${cohort}_${script}" with_cohort "$cohort" uvr run "code/${script}.R"
   done
 }
 build_cohort imv       "$ROOT/intermediate"
@@ -161,15 +163,15 @@ build_panel () {  # cohort, folder holding its derived tables
     if [[ -z "$stale" ]]; then echo "[$(date +%H:%M:%S)] panel_${cohort}: up to date, kept (FORCE_PANEL=1 rebuilds)"; return 0; fi
     echo "[$(date +%H:%M:%S)] panel_${cohort}: $(basename "$stale") is newer than the panel (or missing); rebuilding"
   fi
-  run_step "panel_${cohort}" with_cohort "$cohort" Rscript code/21_biotrauma_panel.R
+  run_step "panel_${cohort}" with_cohort "$cohort" uvr run code/21_biotrauma_panel.R
 }
 build_panel imv       "$ROOT/intermediate"
 build_panel nosupport "$ROOT/intermediate/controls/nosupport"
 
 # ---- 3 anchors
 ANCHOR_MARKERS="creatinine,${CONTROL_MARKERS}"
-run_step anchors_ventilated with_cohort imv       env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" Rscript code/22_biotrauma_fit.R
-run_step anchors_nosupport  with_cohort nosupport env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" Rscript code/22_biotrauma_fit.R
+run_step anchors_ventilated with_cohort imv       env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" uvr run code/22_biotrauma_fit.R
+run_step anchors_nosupport  with_cohort nosupport env PBWPFVC_JM_ANCHOR_ONLY=1 PBWPFVC_JM_MARKERS="$ANCHOR_MARKERS" uvr run code/22_biotrauma_fit.R
 
 # ---- 4 centres: the ventilated cohort's mean anchor per control marker, where each
 #      control fit reads its divergence (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R)
@@ -203,17 +205,17 @@ fi
 
 # ---- 6 comparison table and the figure
 FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi,sf"
-run_step comparison with_cohort imv Rscript code/27_control_comparison.R
+run_step comparison with_cohort imv uvr run code/27_control_comparison.R
 run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
-  Rscript code/24_biotrauma_figures.R
+  uvr run code/24_biotrauma_figures.R
 
 # ---- 7 the channel breakdown (supplement), after figure 4 so it cannot delay it: the
 #      ventilated divergence per log unit of each GLI piece, pooled by pooled_biotrauma.R
 #      from jm_level_contrast_channels_* (exposures ch_height, ch_age, ch_sex, ch_race)
 if [[ -n "$CHANNEL_MARKERS" && " ${FAILED[*]-} " != *" panel_imv "* ]]; then
-  run_step channels_fit    with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" Rscript code/22_biotrauma_fit.R
-  run_step channels_report with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" Rscript code/23_biotrauma_report.R
-  run_step channels_figure with_cohort imv env PBWPFVC_JM_MODIFIER=channels Rscript code/24_biotrauma_figures.R
+  run_step channels_fit    with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" uvr run code/22_biotrauma_fit.R
+  run_step channels_report with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" uvr run code/23_biotrauma_report.R
+  run_step channels_figure with_cohort imv env PBWPFVC_JM_MODIFIER=channels uvr run code/24_biotrauma_figures.R
 fi
 
 if [[ $DRY == 0 ]]; then

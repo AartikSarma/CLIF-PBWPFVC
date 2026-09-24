@@ -24,7 +24,7 @@
 # were cut on 2026-09-24 (docs/output_manifest.md): the manuscript does not read
 # the dose inside the band, which is confounded by indication.
 #
-# Usage: Rscript code/23_biotrauma_report.R     (PBWPFVC_JM_HORIZON, PBWPFVC_JM_BASELINE as in the fit)
+# Usage: uvr run code/23_biotrauma_report.R     (PBWPFVC_JM_HORIZON, PBWPFVC_JM_BASELINE as in the fit)
 # =============================================================================
 
 suppressPackageStartupMessages({
