@@ -9,7 +9,8 @@
 #       from hour 0 to the end of the window, the rate per day adjusted beside
 #       unadjusted, and the posterior probability of harm by day
 #   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: the
-#       difference-in-differences, ventilated against the no-support control
+#       difference-in-differences against each control, one panel each: every
+#       no-support patient, and the no-support patients hypoxemic on the index day
 #   biotrauma_fig_channels_{tag}.pdf   the channels form only: the contrast per
 #       GLI piece
 #
@@ -209,6 +210,10 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   #                                         patient, the rate read at the ventilated
   #                                         cohort's mean severity anchor (the sevstd_
   #                                         tables; PBWPFVC_JM_SEV_CENTER, 29_run_figure4.R)
+  #        No support, hypoxemic            the same control restricted to index-day
+  #                                         SF <= 315, the ventilated cohort's own gate
+  #                                         (the sevstd_sf0to315_ tables), so the two
+  #                                         arms differ in ventilation, not hypoxaemia
   #        Ventilated, SF <class>           the ventilated cohort by baseline SF
   #        Ventilated, all                  the ventilated cohort (panels A and C)
   #      The noninvasive cohort is deliberately NOT drawn: NIPPV delivers large, unlimited
@@ -245,20 +250,31 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   arms <- list()
   if (nzchar(ctrl_dir) && dir.exists(ctrl_dir)) {
     ctrl_site <- paste0(site_name, "_nosupport")
-    # only the severity-standardised control: floors and the unstandardised control are
-    # retired designs, and their tables on disk must not reach the figure
+    # only the severity-standardised controls: other control tables in the folder are ignored
     # its rate is per SD of log PFVC in the CONTROL's panel; on the figure it is put on
     # the ventilated cohort's unit (the SDs from 22_biotrauma_fit.R's jm_scale_* tables),
     # and without both SDs the control is not drawn
     scale_v <- read_if(file.path(fig_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
     scale_c <- read_if(file.path(ctrl_dir, paste0("jm_scale_", h_suffix, "_", ctrl_site, ".csv")))
-    if ("sevstd_" %in% restrictions_in(ctrl_dir, ctrl_site)) {
-      if (is.null(scale_v) || is.null(scale_c) || SIZE_EX != "log_pfvc_sd")
-        message("24_biotrauma_figures: control arm not drawn: its unit cannot be put on the ventilated cohort's ",
+    # each control arm: its restriction tag, its label and its place on the axis. Both
+    # are read at the ventilated severity and put on the ventilated cohort's unit with
+    # the whole control's SD of log PFVC (the hypoxemic fit keeps it, 22_biotrauma_fit.R)
+    control_arms <- list(
+      control           = list(restriction = "sevstd_", rank = 1,
+                               label = "No support,\nat ventilated\nseverity"),
+      control_hypoxemic = list(restriction = "sevstd_sf0to315_", rank = 2,
+                               label = "No support,\nhypoxemic,\nat ventilated\nseverity"))
+    for (arm_name in names(control_arms)) {
+      control_arm <- control_arms[[arm_name]]
+      if (!control_arm$restriction %in% restrictions_in(ctrl_dir, ctrl_site)) next
+      if (is.null(scale_v) || is.null(scale_c) || SIZE_EX != "log_pfvc_sd") {
+        message("24_biotrauma_figures: ", arm_name, " arm not drawn: its unit cannot be put on the ventilated cohort's ",
                 "(jm_scale_* missing, or the form is not pfvc)")
-      else arms[["control"]] <- list(folder = ctrl_dir, restriction = "sevstd_", site = ctrl_site,
-                                     label = "No support,\nat ventilated\nseverity", rank = 1,
-                                     unit_factor = scale_v$sd_log_pfvc / scale_c$sd_log_pfvc)
+        next
+      }
+      arms[[arm_name]] <- list(folder = ctrl_dir, restriction = control_arm$restriction, site = ctrl_site,
+                               label = control_arm$label, rank = control_arm$rank,
+                               unit_factor = scale_v$sd_log_pfvc / scale_c$sd_log_pfvc)
     }
   }
   sf_found <- restrictions_in(fig_dir, site_name)
@@ -266,7 +282,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   sf_lo <- as.numeric(str_match(sf_found, "^sf([0-9.]+)to")[, 2])
   sf_hi <- as.numeric(str_match(sf_found, "to([0-9.]+)_$")[, 2])
   for (k in order(-sf_lo)) {                                          # mildest hypoxaemia first
-    arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 3 + match(k, order(-sf_lo)) / 10,
+    arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 4 + match(k, order(-sf_lo)) / 10,
                                 label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("<= ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
   }
   arm_rate <- map_dfr(arms, function(a) {
@@ -320,19 +336,32 @@ if (n_distinct(lc0$horizon_h) >= 3) {
 }
 
 # ---- 5. the check behind figure 4's causal reading (pfvc form, unrestricted run):
-#      ventilated vs no support: the ventilated rate, the no-support control read at the
-#      ventilated severity, and their difference (27_control_comparison.R), all on the
-#      ventilated cohort's unit (per SD of its log PFVC).
+#      the ventilated rate, a control's rate read at the ventilated severity, and their
+#      difference (27_control_comparison.R), all on the ventilated cohort's unit (per SD
+#      of its log PFVC). One panel per control:
+#        A  every no-support patient (jm_control_did_*): the larger sample, but most of
+#           the control is not hypoxemic, so the difference contrasts ventilation and
+#           hypoxaemia together
+#        B  the no-support patients hypoxemic on the index day, SF <= 315
+#           (jm_hypoxemic_control_did_*): the arms differ in ventilation alone
 # Drawn toward injury: above zero = a smaller predicted lung does worse.
 # A marker whose estimates are missing is left out of the panel, not drawn as zero.
 if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
-  did_tbl <- read_if(file.path(fig_dir, paste0("jm_control_did_pfvc_", h_suffix, "_", site_name, ".csv")))
+  did_stub <- paste0("pfvc_", h_suffix, "_", site_name, ".csv")
+  did_tables <- list(
+    all = list(table = read_if(file.path(fig_dir, paste0("jm_control_did_", did_stub))),
+               control = "no support,\nall",
+               title = "Against every no-support patient",
+               subtitle = "read at the ventilated cohort's severity and unit"),
+    hypoxemic = list(table = read_if(file.path(fig_dir, paste0("jm_hypoxemic_control_did_", did_stub))),
+                     control = "no support,\nhypoxemic",
+                     title = "Against no-support patients hypoxemic on the index day",
+                     subtitle = "SF <= 315, so the arms differ in ventilation, not hypoxaemia"))
   toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
   check_order <- intersect(c("platelets", "bilirubin", "creatinine", "pressor_dose"),
-                           unique(did_tbl$marker))
+                           unique(unlist(map(did_tables, ~ .x$table$marker))))
   check_label <- function(m) factor(lab[m], lab[check_order])
-  checks <- list()
-  if (!is.null(did_tbl) && nrow(did_tbl)) {
+  did_panel <- function(did_tbl, control_label, title, subtitle) {
     did_rows <- did_tbl %>%
       transmute(marker, adjustment, s = toward_injury(marker),
                 v_e = divergence_estimate_ventilated, v_sd = divergence_sd_ventilated, v_ok = divergence_rhat_ventilated <= 1.1,
@@ -340,21 +369,25 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
                 d_e = did_estimate, d_lo = did_lo, d_hi = did_hi, d_ok = both_converged) %>%
       { bind_rows(
           transmute(., marker, adjustment, s, arm = "ventilated", e = v_e, l = v_e - 1.96 * v_sd, h = v_e + 1.96 * v_sd, ok = v_ok),
-          transmute(., marker, adjustment, s, arm = "no\nsupport", e = c_e, l = c_e - 1.96 * c_sd, h = c_e + 1.96 * c_sd, ok = c_ok),
+          transmute(., marker, adjustment, s, arm = control_label, e = c_e, l = c_e - 1.96 * c_sd, h = c_e + 1.96 * c_sd, ok = c_ok),
           transmute(., marker, adjustment, s, arm = "difference", e = d_e, l = d_lo, h = d_hi, ok = d_ok)) } %>%
       mutate(e = s * e, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h), ok = coalesce(ok, FALSE),
-             arm = factor(arm, c("ventilated", "no\nsupport", "difference")),
+             arm = factor(arm, c("ventilated", control_label, "difference")),
              marker_lab = check_label(marker))
-    checks$did <- ggplot(did_rows, aes(arm, e, colour = adjustment)) +
+    ggplot(did_rows, aes(arm, e, colour = adjustment)) +
       geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
       geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
       geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.5)) +
-      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
+      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y", drop = FALSE) +
       scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
       scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
-      labs(title = "With and without a ventilator (difference-in-differences)",
-           subtitle = "the control keeps every patient and is read at the ventilated cohort's severity and unit",
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+      labs(title = title, subtitle = subtitle, x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+  }
+  checks <- list()
+  for (control_name in names(did_tables)) {
+    did_entry <- did_tables[[control_name]]
+    if (!is.null(did_entry$table) && nrow(did_entry$table))
+      checks[[control_name]] <- did_panel(did_entry$table, did_entry$control, did_entry$title, did_entry$subtitle)
   }
   if (length(checks)) {
     ggsave(file.path(fig_dir, paste0("biotrauma_fig_checks_", tag, ".pdf")),
@@ -363,7 +396,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
                              title = paste0(site_name, ": is the lung-size divergence the ventilator's?"),
                              subtitle = "95% intervals; hollow points did not converge (R-hat > 1.1)") &
              theme(legend.position = "top", axis.text.x = element_text(size = 8)),
-           width = 3 + 2.6 * max(1, length(check_order)), height = 1.5 + 3.6 * length(checks))
+           width = max(8, 3 + 2.6 * length(check_order)), height = 1.5 + 3.6 * length(checks))
     message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
   } else message("24_biotrauma_figures: no DiD table for ", site_name, "; checks figure skipped")
 }
