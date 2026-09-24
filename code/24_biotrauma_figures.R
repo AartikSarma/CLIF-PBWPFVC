@@ -208,7 +208,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   #        No support                       the negative control (final/controls/): every
   #                                         patient, the rate read at the ventilated
   #                                         cohort's mean severity anchor (the sevstd_
-  #                                         tables; PBWPFVC_JM_SEV_CENTER, 29_run_figure4.sh)
+  #                                         tables; PBWPFVC_JM_SEV_CENTER, 29_run_figure4.R)
   #        Ventilated, SF <class>           the ventilated cohort by baseline SF
   #        Ventilated, all                  the ventilated cohort (panels A and C)
   #      The noninvasive cohort is deliberately NOT drawn: NIPPV delivers large, unlimited

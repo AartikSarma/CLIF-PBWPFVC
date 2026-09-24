@@ -20,7 +20,7 @@
 #                              the index day ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
-# These are the arms 29_run_figure4.sh fits. Tables from designs it no longer runs
+# These are the arms 29_run_figure4.R fits. Tables from designs it no longer runs
 # (severity floors, the unstandardised control, the noninvasive cohort, which is not a
 # control) are ignored even when present on disk, so an old run cannot add an arm.
 #
@@ -84,7 +84,7 @@ message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site
 message(paste0("  ", arms$arm, collapse = "\n"))
 
 # Each arm's table, with creatinine taken from its dialysis-as-third-cause fit
-# (the rrtcause_ twin, as 29_run_figure4.sh fits it) whenever that twin exists.
+# (the rrtcause_ twin, as 29_run_figure4.R fits it) whenever that twin exists.
 read_arm <- function(table_name, arm_row) {
   path <- file.path(arm_row$folder, paste0("jm_", table_name, "_", arm_row$restriction, file_stub(arm_row$site)))
   twin <- file.path(arm_row$folder, paste0("jm_", table_name, "_rrtcause_", arm_row$restriction, file_stub(arm_row$site)))

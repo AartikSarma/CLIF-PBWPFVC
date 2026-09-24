@@ -164,14 +164,14 @@ The `--` separates uvr's options from the runner's.
 |---|---|---|
 | `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
 | `cross_sectional` | `04`, `05` | minutes |
-| `injury` | `29_run_figure4.sh`: every analysis behind figure 4 and the figure itself (see below) | a few hours |
+| `injury` | `29_run_figure4.R`: every analysis behind figure 4 and the figure itself (see below) | a few hours |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
 what this runner has always done, so existing site instructions still work.
 
 ### Figure 4 in one command
 
-`code/29_run_figure4.sh` runs everything behind figure 4 for a site and draws it:
+`code/29_run_figure4.R` runs everything behind figure 4 for a site and draws it:
 
 - **Markers:** platelets, bilirubin, creatinine, vasopressor dose on pressor days, and
   the oxygen saturation index, each over the first 7 days, adjusted and unadjusted.
@@ -187,21 +187,17 @@ what this runner has always done, so existing site instructions still work.
   divergence term tests whether sicker controls diverge faster.
 
 It builds the control cohort when missing, reuses finished fits, carries on past a
-failed step and lists the failures at the end. After the figure it writes the
-difference-in-differences (ventilated minus control divergence) and runs the
-pre-intubation placebo, the lung-size divergence in the week before intubation beside
-the joint model's post-intubation rate. Then it fits the companion, every marker
-against VT/PFVC at the same VT/PBW (`VTPFVC_MARKERS`, empty skips it; tables and
-figure tagged `vtpfvc`). The difference-in-differences and the placebo exist for PFVC
-only: the controls and the pre-intubation days have no tidal volume.
-By default it runs 28 fits at 2,000
+failed step and lists the failures at the end. With the figure it writes the
+difference-in-differences (ventilated minus control divergence), and after it the
+channel breakdown for the supplement (`CHANNEL_MARKERS`, empty skips it).
+By default it runs 23 fits at 2,000
 iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
 7,000-patient site at 15-25 GB of memory, so four at once can need 60-100 GB: lower
 `PAR` on a smaller machine. `ITER` and `BURNIN` lengthen the chains.
-`bash code/29_run_figure4.sh --dry-run` lists every step.
+`uvr run code/29_run_figure4.R -- --dry-run` lists every step.
 
 ```bash
-caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
+caffeinate -i nohup uvr run code/29_run_figure4.R > figure4.out 2>&1 &
 ```
 
 The figure is `final/injury/biotrauma_fig_main_pfvc_7d_<site>.pdf`.
