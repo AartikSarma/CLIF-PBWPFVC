@@ -75,7 +75,7 @@
 #   full        both modified by age, plus DP x VT/PFVC
 #   age_band    cell means: DP and VT/PFVC slopes within each age band
 #
-# Companion: script 05's norm_age_interaction_ladder fits log DP * age + log PFVC
+# Companion: script 05's age-interaction ladder (cut 2026-09-24) fitted log DP * age + log PFVC
 # * age. This script replaces PFVC with the delivered strain (VT/PFVC), adds the
 # DP x VT/PFVC product, and reports the slopes by age.
 #

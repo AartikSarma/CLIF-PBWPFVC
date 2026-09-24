@@ -7,25 +7,16 @@
 #   biotrauma_fig_main_{tag}.pdf   THE figure, for a window with three or more
 #       horizons (the 7-day run): one row per marker, the contrast toward injury
 #       from hour 0 to the end of the window, the rate per day adjusted beside
-#       unadjusted, and the posterior probability of harm by day. The others are
-#       its supporting detail:
+#       unadjusted, and the posterior probability of harm by day
+#   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: the
+#       difference-in-differences, ventilated against the no-support control
+#   biotrauma_fig_channels_{tag}.pdf   the channels form only: the contrast per
+#       GLI piece
 #
-#   biotrauma_fig_level_contrast_{tag}.pdf   THE question: the joint model's marker
-#       difference at 24/48/72 h per SD LOWER log PFVC at a given VT/PBW, oriented
-#       so that right of zero is more injury for every marker (log units;
-#       odds ratio for any vasopressor), adjusted beside unadjusted, with P(harm)
-#   biotrauma_fig_estimators_{tag}.pdf   the marker difference per SD of log PFVC
-#       at each horizon from the three estimators side by side: the joint model
-#       (death before H modelled), the quick LME (longitudinal submodel alone),
-#       and the fixed-horizon comparator (survivors only), adjusted and unadjusted
-#   biotrauma_fig_divergence_{tag}.pdf   the rate term, log marker per day per
-#       SD of log PFVC, adjusted beside unadjusted: the part of the effect that
-#       the identification problem cannot reach
-#   biotrauma_fig_trajectory_{tag}.pdf   the joint model's predicted difference
-#       from the median-PFVC patient over the window at PFVC -1 L, median and +1 L
-#       (level + divergence x time), with the 95% band
-#   biotrauma_fig_pressor_{tag}.pdf      the any-pressor part as odds ratios per
-#       SD LOWER PFVC at each horizon, joint model beside the comparator
+# The level-contrast, divergence, trajectory, estimator and pressor figures were
+# cut on 2026-09-24 (docs/output_manifest.md): the main figure carries the same
+# estimates, and the estimator and pressor figures needed the 48-hour runner's
+# tables.
 #
 # A lower PFVC is the negative of every log-marker estimate; the figures label
 # the injury direction per marker so the eye does not have to flip signs.
@@ -43,7 +34,6 @@ MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column (pfvc_dose: at the median dose)
 SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)",
                     vtpfvc = "per point of VT/PFVC (% of predicted FVC) at a given VT/PBW", "per SD of log PFVC")
-TRAJ_STEP <- if (MOD_FORM == "vtpfvc") 2 else 1   # the trajectory figure's contrast: +/- 2 points of VT/PFVC, else +/- 1 SD
 FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
 fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", final_dir_for("injury"))
 tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
@@ -91,10 +81,6 @@ if (identical(Sys.getenv("PBWPFVC_JM_WITH_RRT", "0"), "1")) {
   }
 }
 if (is.null(lc) || is.null(es)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
-ih <- list.files(fig_dir, "^injury_at_horizon_[a-z_]+_.*\\.csv$", full.names = TRUE) %>%
-  discard(~ grepl("counts_", .x)) %>% map_dfr(read_if)
-ql <- list.files(fig_dir, "^quick_lme_[a-z_]+_.*\\.csv$", full.names = TRUE) %>% map_dfr(read_if) %>%
-  { if (nrow(.) && !"model_horizon_h" %in% names(.)) mutate(., model_horizon_h = horizon_h) else . }
 
 # ---- channels form: the size effect identified through each GLI input, from the joint model
 if (MOD_FORM == "channels") {
@@ -142,42 +128,7 @@ unit_lower <- switch(MOD_FORM, disc_level = "per SD HIGHER log PBW/PFVC (a lung 
 # for the discordance form a HIGHER discordance is the smaller lung: the injury direction flips
 if (FLIP_INJ) lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
                                                     p_lab = sprintf("P(harm) %.2f", p_harm)) %>% select(-i_lo)
-p0_cont <- lc0 %>% filter(!binary)
-p0_bin  <- lc0 %>% filter(binary)
-plot_level <- function(d, xvar, lovar, hivar, ref, xlab, title, log_x = FALSE) {
-  p <- ggplot(d, aes(.data[[xvar]], horizon, colour = adjustment)) +
-    geom_vline(xintercept = ref, linetype = 2, colour = "grey55") +
-    geom_pointrange(aes(xmin = .data[[lovar]], xmax = .data[[hivar]]), position = position_dodge(width = 0.6)) +
-    geom_text(aes(label = p_lab, x = .data[[hivar]]), position = position_dodge(width = 0.6), hjust = -0.15, size = 2.8,
-              show.legend = FALSE) +
-    facet_grid(marker_lab ~ ., scales = "free_x") +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    (if (log_x) scale_x_log10(expand = expansion(mult = c(0.05, 0.35))) else
-                scale_x_continuous(expand = expansion(mult = c(0.05, 0.35)))) +
-    labs(title = title, x = xlab, y = "Horizon") +
-    theme(legend.position = "top", strip.text.y = element_text(angle = 0))
-  p
-}
-p0_list <- list()
-if (nrow(p0_cont)) p0_list$cont <- plot_level(
-  p0_cont, "inj", "inj_lo", "inj_hi", 0,
-  xlab = paste0("difference in the log marker toward injury, ", unit_lower, " (95% interval)"),
-  title = "Injury markers")
-if (nrow(p0_bin)) p0_list$bin <- plot_level(
-  p0_bin %>% mutate(or = exp(inj), or_lo = exp(inj_lo), or_hi = exp(inj_hi)), "or", "or_lo", "or_hi", 1,
-  xlab = paste0("odds ratio of a vasopressor running, ", unit_lower, " (log scale)"),
-  title = "Any vasopressor", log_x = TRUE)
-if (!length(p0_list)) stop("no level contrasts for exposure ", SIZE_EX, " in tag ", tag)
-p0 <- wrap_plots(p0_list, ncol = 1, heights = c(if (nrow(p0_cont)) n_distinct(p0_cont$marker), if (nrow(p0_bin)) 1)) +
-  plot_layout(guides = "collect") +
-  plot_annotation(
-    title = paste0("Is a lower PFVC, at a given VT/PBW, associated with more injury? Joint model, ", unit_lower),
-    subtitle = paste0(site_name, ": right of the line = more injury; death before the horizon is modelled\n",
-                      "P(harm) = posterior probability that the contrast lies in the injury direction")) &
-  theme(legend.position = "top")
-ggsave(file.path(fig_dir, paste0("biotrauma_fig_level_contrast_", tag, ".pdf")), p0,
-       # one row per marker x horizon, so a 7-day run needs the height a 48-hour one did not
-       width = 10, height = 2.5 + 0.42 * nrow(distinct(lc0, marker, horizon_h)))
+if (!nrow(lc0)) stop("no level contrasts for exposure ", SIZE_EX, " in tag ", tag)
 
 # ---- 0b. THE figure: one row per marker, three panels (three or more horizons only)
 #      A  the contrast as it accumulates: the joint model's marker difference toward
@@ -369,112 +320,6 @@ if (n_distinct(lc0$horizon_h) >= 3) {
          width = 12 + 0.8 * n_distinct(rate_arms$arm), height = 2 + 2.2 * length(present))
 }
 
-# ---- 1. estimator comparison
-est <- bind_rows(
-  lc %>% filter(exposure == SIZE_EX, model == "main") %>%
-    transmute(marker, adjustment, horizon_h, estimate, lo, hi, estimator = "Joint model (death modelled)"),
-  if (nrow(ql)) ql %>% filter(exposure == SIZE_EX) %>%
-    transmute(marker, adjustment, horizon_h = model_horizon_h, estimate, lo, hi, estimator = "Longitudinal model only"),
-  if (nrow(ih)) ih %>% filter(exposure == SIZE_EX, outcome_type %in% c("log marker at H", "any pressor at H")) %>%
-    mutate(marker = if_else(outcome_type == "any pressor at H", "any_pressor", marker)) %>%
-    transmute(marker, adjustment, horizon_h, estimate, lo, hi, estimator = "Fixed horizon, survivors only")
-) %>%
-  filter(marker %in% names(lab)) %>%
-  # A comparison needs two estimators. Keep the markers this run's joint model covers,
-  # at the horizons where a second estimator exists for that marker. That drops hour 0
-  # (no comparator can exist at the baseline) and, in a 7-day run, the days beyond the
-  # comparators' 24/48/72 h, which the trend figure already shows for the joint model.
-  group_by(marker) %>% filter(any(estimator == "Joint model (death modelled)")) %>%
-  group_by(marker, horizon_h) %>% filter(n_distinct(estimator) >= 2) %>% ungroup() %>%
-  mutate(estimator = factor(estimator, c("Joint model (death modelled)", "Longitudinal model only", "Fixed horizon, survivors only")),
-         adjustment = factor(adjustment, c("adjusted", "unadjusted")),
-         horizon = factor(paste(horizon_h, "h"), paste(sort(unique(horizon_h)), "h")),
-         marker_lab = marker_label(marker))
-if (nrow(est)) {
-  p1 <- ggplot(est, aes(estimate, estimator, colour = adjustment)) +
-    geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-    geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.6)) +
-    facet_grid(marker_lab ~ horizon, scales = "free_x") +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    labs(title = paste0("Marker difference ", SIZE_LAB),
-         subtitle = paste0(site_name, if (FLIP_INJ) ": a larger lung for the dose is the negative of each estimate" else ": a LOWER PFVC is the negative of each estimate",
-                           "; log-odds for any vasopressor"),
-         x = paste0("log units ", SIZE_LAB, " (95% interval)"), y = NULL) +
-    theme(legend.position = "top", strip.text.y = element_text(angle = 0))
-  ggsave(file.path(fig_dir, paste0("biotrauma_fig_estimators_", tag, ".pdf")), p1,
-         width = max(9, 3 + 2.4 * n_distinct(est$horizon_h)), height = 2 + 1.6 * n_distinct(est$marker))
-} else message("24_biotrauma_figures: no horizon has two estimators for a modelled marker; estimator figure skipped")
-
-# ---- 2. divergence per day (the rate term), adjusted beside unadjusted
-div <- es %>% filter(block == "longitudinal", term %in% c(paste0("vent_day:", SIZE_EX), paste0(SIZE_EX, ":vent_day")),
-                     model == "main", marker %in% names(lab)) %>%
-  transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
-            marker_lab = marker_label(marker))
-lev <- es %>% filter(block == "longitudinal", term == SIZE_EX, model == "main", marker %in% names(lab)) %>%
-  transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")), estimate, lo, hi, rhat,
-            marker_lab = marker_label(marker))
-p2 <- (ggplot(lev, aes(estimate, marker_lab, colour = adjustment)) +
-         geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-         geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
-         scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-         labs(title = "Level: difference at the start", x = paste0("log units ", SIZE_LAB), y = NULL)) /
-      (ggplot(div, aes(estimate, marker_lab, colour = adjustment)) +
-         geom_vline(xintercept = 0, linetype = 2, colour = "grey55") +
-         geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
-         scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-         labs(title = "Divergence: change per day", x = paste0("log units per day ", SIZE_LAB), y = NULL)) +
-  plot_layout(guides = "collect") +
-  plot_annotation(title = paste0("The ", switch(MOD_FORM, vtpfvc = "VT/PFVC", disc_level = "PBW/PFVC", "PFVC"), " effect split into a level and a rate (joint model)"),
-                  subtitle = paste0(site_name, ": a rate that is the same adjusted and unadjusted is not the age channel")) &
-  theme(legend.position = "top")
-ggsave(file.path(fig_dir, paste0("biotrauma_fig_divergence_", tag, ".pdf")), p2, width = 8, height = 2.5 + 1.1 * n_distinct(div$marker))
-
-# ---- 3. predicted trajectory difference at PFVC -1 / 0 / +1 SD over the window
-TRAJ_LABELS <- if (MOD_FORM == "vtpfvc") c("-2 points (larger lung for the dose)", "median", "+2 points (smaller lung for the dose)") else
-               if (FLIP_INJ) c("-1 SD (larger lung for the dose)", "median", "+1 SD (smaller lung for the dose)") else
-                              c("-1 SD (smaller lung)", "median", "+1 SD (larger lung)")
-#         (level + divergence x t; the band is the interval of the sum at each t,
-#          taken from the posterior intervals of the two terms assuming independence,
-#          so it is approximate; the contrast table carries the exact intervals at 24/48/72 h)
-traj <- lev %>% transmute(marker, adjustment, level = estimate, level_se = (hi - lo) / 3.92) %>%
-  inner_join(div %>% transmute(marker, adjustment, slope = estimate, slope_se = (hi - lo) / 3.92),
-             by = c("marker", "adjustment")) %>%
-  crossing(t_day = seq(0, JM_HORIZON, by = STEP), pfvc_sd = c(-1, 0, 1)) %>%
-  mutate(diff = pfvc_sd * TRAJ_STEP * (level + slope * t_day),
-         se = abs(pfvc_sd) * TRAJ_STEP * sqrt(level_se^2 + (slope_se * t_day)^2),
-         lo = diff - 1.96 * se, hi = diff + 1.96 * se,
-         pfvc_lab = factor(TRAJ_LABELS[pfvc_sd + 2], TRAJ_LABELS),
-         marker_lab = marker_label(marker))
-p3 <- ggplot(traj %>% filter(pfvc_sd != 0), aes(t_day * 24, diff, colour = pfvc_lab, fill = pfvc_lab)) +
-  geom_hline(yintercept = 0, colour = "grey55") +
-  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.15, colour = NA) +
-  geom_line(linewidth = 1) +
-  facet_grid(marker_lab ~ adjustment, scales = "free_y") +
-  scale_colour_manual(values = if (FLIP_INJ) okabe[c(3, 4)] else okabe[c(4, 3)], name = if (MOD_FORM == "vtpfvc") "VT/PFVC" else if (MOD_FORM == "disc_level") "PBW/PFVC" else "PFVC") +
-  scale_fill_manual(values = if (FLIP_INJ) okabe[c(3, 4)] else okabe[c(4, 3)], name = if (MOD_FORM == "vtpfvc") "VT/PFVC" else if (MOD_FORM == "disc_level") "PBW/PFVC" else "PFVC") +
-  labs(title = paste0("Predicted marker difference from the median patient over the window (",
-                      switch(MOD_FORM, vtpfvc = "VT/PFVC at the same VT/PBW", disc_level = "PBW/PFVC", "PFVC"), ")"),
-       subtitle = paste0(site_name, ": joint model, level + divergence x time; approximate band"),
-       x = "Hours from the index", y = "difference in log marker (log-odds for any vasopressor)") +
-  theme(legend.position = "top", strip.text.y = element_text(angle = 0))
-ggsave(file.path(fig_dir, paste0("biotrauma_fig_trajectory_", tag, ".pdf")), p3, width = 9, height = 2 + 1.5 * n_distinct(traj$marker))
-
-# ---- 4. any vasopressor as odds ratios per SD LOWER PFVC, joint model beside comparator
-ap <- est %>% filter(marker == "any_pressor") %>%
-  mutate(or = exp(-estimate), or_lo = exp(-hi), or_hi = exp(-lo))
-if (nrow(ap)) {
-  p4 <- ggplot(ap, aes(or, estimator, colour = adjustment)) +
-    geom_vline(xintercept = 1, linetype = 2, colour = "grey55") +
-    geom_pointrange(aes(xmin = or_lo, xmax = or_hi), position = position_dodge(width = 0.6)) +
-    facet_wrap(~ horizon, nrow = 1) + scale_x_log10() +
-    scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-    labs(title = paste0("Odds of a vasopressor running ", unit_lower),
-         subtitle = paste0(site_name, ": the joint model's odds ratio is subject-specific, the comparator's marginal"),
-         x = paste0("odds ratio ", unit_lower, " (log scale)"), y = NULL) +
-    theme(legend.position = "top")
-  ggsave(file.path(fig_dir, paste0("biotrauma_fig_pressor_", tag, ".pdf")), p4, width = 9, height = 3.5)
-}
-
 # ---- 5. the check behind figure 4's causal reading (pfvc form, unrestricted run):
 #      ventilated vs no support: the ventilated rate, the no-support control read at the
 #      ventilated severity, and their difference (27_control_comparison.R), all on the
@@ -523,4 +368,4 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
     message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
   } else message("24_biotrauma_figures: no DiD table for ", site_name, "; checks figure skipped")
 }
-message("24_biotrauma_figures: ", n_distinct(est$marker), " markers, ", n_distinct(est$estimator), " estimators -> ", fig_dir)
+message("24_biotrauma_figures: ", n_distinct(lc0$marker), " markers -> ", fig_dir)

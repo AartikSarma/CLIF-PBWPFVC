@@ -8,8 +8,8 @@
 #     (22_biotrauma_fit.R, pfvc form: log PFVC as a level and a divergence over
 #     time beside the clinician's dose), adjusted and unadjusted, its report
 #     (jm_level_contrast_*, jm_estimates_*, jm_association_hr_*) and figures
-#     (biotrauma_fig_trajectory_* is the headline: the predicted marker
-#     difference from the median-PFVC patient at +/- 1 SD over the window)
+#     (biotrauma_fig_main_* is the headline: the marker difference toward
+#     injury per SD lower log PFVC at each horizon, with its rate per day)
 #   * the fixed-horizon comparator per marker (25_injury_at_horizon.R) and the
 #     longitudinal model alone (26_quick_lme.R), with the channel decomposition
 #
@@ -184,5 +184,5 @@ for H in $HORIZONS; do
   done
 done
 
-[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "headline figure -> $FINAL/biotrauma_fig_trajectory_pfvc_48h_${SITE}.pdf"; }
+[[ $DRY == 0 ]] && { echo; echo "---- status.tsv"; cat "$STATUS"; echo "headline figure -> $FINAL/biotrauma_fig_main_pfvc_48h_${SITE}.pdf"; }
 exit 0
