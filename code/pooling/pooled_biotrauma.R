@@ -71,13 +71,68 @@ message("Sites: ", paste(sites, collapse = ", "))
 # site labels: the project's anonymization (built from each site's cohort size)
 # when it can be built, otherwise the folder names
 anon <- identity
+site_levels <- sort(sites)          # largest cohort first once the alias table is built
 if (file.exists(here("utils", "site_anonymization.R"))) {
   source(here("utils", "site_anonymization.R"))
-  aliases <- tryCatch(build_site_aliases(file.path(root, sites))$aliases, error = function(e) NULL)
-  if (!is.null(aliases)) anon <- function(x) anonymize_site(x, aliases) else
-    message("site anonymization unavailable for this root (", "no cohort sizes); using folder names")
+  alias_tbl <- tryCatch(build_site_aliases(file.path(root, sites)), error = function(e) NULL)
+  if (!is.null(alias_tbl)) {
+    aliases <- alias_tbl$aliases
+    anon <- function(x) anonymize_site(x, aliases)
+    site_levels <- alias_tbl$table$site_label
+  } else message("site anonymization unavailable for this root (", "no cohort sizes); using folder names")
 }
+# the cross-sectional pooling's palette and ordering (pooled_estimates.R): Okabe-Ito
+# by cohort, largest first, so a cohort keeps its colour across every pooled figure;
+# the pooled estimate is a black diamond on a row at the foot of each panel
+okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
+POOLED_LABEL <- "Pooled (CE)"        # common effect (see pool_one)
+site_colors <- if (length(site_levels) > length(okabe_ito))
+  setNames(grDevices::colorRampPalette(okabe_ito)(length(site_levels)), site_levels) else
+  setNames(okabe_ito[seq_along(site_levels)], site_levels)
+forest_palette <- c(site_colors, setNames("#000000", POOLED_LABEL))
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#000000")
+
+# Injury is drawn upward in every pooled figure: a marker's estimate is per 0.1 log
+# units MORE predicted lung, so it is negated for a marker that is worse when higher,
+# and kept for one that is worse when lower. The result reads "change toward injury
+# per 10% smaller predicted lung" for every marker, and the strip names the marker
+# in words rather than by its column name.
+MARKER_LABELS <- c(platelets = "Platelets", creatinine = "Creatinine", bilirubin = "Bilirubin",
+                   pressor_dose = "Vasopressor dose\n(NE-equivalents per kg)", any_pressor = "Any vasopressor\n(log-odds)",
+                   ne_equiv_peak = "Peak vasopressor\n(NE-equivalents per kg)", osi = "Oxygen saturation index",
+                   sf = "SpO2 / FiO2", dp = "Driving pressure")
+MARKER_WORSE  <- c(platelets = "lower", creatinine = "higher", bilirubin = "higher", pressor_dose = "higher",
+                   any_pressor = "higher", ne_equiv_peak = "higher", osi = "higher", sf = "lower", dp = "higher")
+toward_injury <- function(d) {
+  unknown <- setdiff(unique(d$marker), names(MARKER_WORSE))
+  if (length(unknown)) stop("no injury direction for marker(s): ", paste(unknown, collapse = ", "))
+  d %>% mutate(sign = if_else(MARKER_WORSE[marker] == "higher", -1, 1),
+               estimate = sign * estimate, lo_new = pmin(sign * lo, sign * hi), hi = pmax(sign * lo, sign * hi), lo = lo_new,
+               marker_label = factor(MARKER_LABELS[marker], levels = MARKER_LABELS[names(MARKER_LABELS) %in% marker])) %>%
+    select(-sign, -lo_new)
+}
+# One forest in the cross-sectional style: sites as coloured points with capped
+# intervals, the pooled estimate as a black diamond at the foot, one row per marker
+# and one column per `column`, each column on its own x scale.
+draw_forest <- function(d, title, subtitle, x_label) {
+  d <- d %>% mutate(site = factor(site, levels = c(POOLED_LABEL, rev(site_levels))),
+                    kind = if_else(site == POOLED_LABEL, "Pooled", "Site"))
+  ggplot(d, aes(x = estimate, y = site, colour = site)) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+    geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.25, orientation = "y") +
+    geom_point(aes(size = kind, shape = kind)) +
+    facet_grid(marker_label ~ column, scales = "free_x", drop = FALSE) +
+    scale_colour_manual(values = forest_palette, guide = "none") +
+    scale_shape_manual(values = c(Site = 16, Pooled = 18), guide = "none") +
+    scale_size_manual(values = c(Site = 2.3, Pooled = 3.4), guide = "none") +
+    labs(title = title, subtitle = subtitle, x = x_label, y = "Cohort") +
+    theme_minimal(base_size = 11) +
+    theme(strip.text.x = element_text(face = "bold"),
+          strip.text.y = element_text(face = "bold", angle = 0),
+          panel.spacing = unit(0.6, "lines"),
+          panel.border = element_rect(colour = "grey60", fill = NA, linewidth = 0.5))
+}
+forest_height <- function(d) 2 + 0.28 * n_distinct(d$marker_label) * (n_distinct(d$site) + 1.5)
 
 # read one file family from every site, tagging the site; tolerant of absent files
 read_family <- function(pattern, folders = c("", "injury")) {
@@ -499,73 +554,70 @@ for (nm in names(pooled)) {
 }
 
 # --- figure 4 pooled: the divergence and the control contrast that tests it, site by
-#     site and pooled. Adjusted, main model, the daily panel, PFVC units only: the
-#     VT/PFVC divergence is on its own scale and gets its own row of panels.
+#     site and pooled, one file per adjustment. Main model, the daily panel, PFVC
+#     units only: the VT/PFVC divergence is on its own scale and is not drawn here.
 DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day", vtpfvc = canonical_term("vtpfvc_c:vent_day"))
-# the panel label is read from the calling environment (.env) so that no table column
+FIG4_COLUMNS <- c(divergence = "Ventilated cohort:\ndivergence by predicted lung size",
+                  did = "Ventilated minus no-support control\n(difference-in-differences)")
+# the column label is read from the calling environment (.env) so that no table column
 # of the same name can shadow it
-fig4_rows <- function(d, panel_label, keep = TRUE) {
+fig4_rows <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
-  d %>% filter(keep, adjustment == "adjusted", grepl("d$", panel_h)) %>%
-    transmute(marker, unit, quantity = .env$panel_label, site = anon(site), estimate,
-              lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, is_pooled = FALSE)
+  d %>% filter(keep, grepl("d$", panel_h)) %>%
+    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = anon(site),
+              estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se)
 }
-fig4_pooled <- function(d, panel_label, keep = TRUE) {
+fig4_pooled <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
-  d %>% filter(keep, adjustment == "adjusted", grepl("d$", panel_h)) %>%
-    transmute(marker, unit, quantity = .env$panel_label, site = "Pooled", estimate = pooled, lo, hi, is_pooled = TRUE)
+  d %>% filter(keep, grepl("d$", panel_h)) %>%
+    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = POOLED_LABEL,
+              estimate = pooled, lo, hi)
 }
 fd4 <- bind_rows(
-  fig4_rows(es, "divergence, ventilated", es$term == DIVERGENCE[["pfvc"]] & es$model == "main"),
-  fig4_pooled(pooled$longitudinal_terms, "divergence, ventilated",
+  fig4_rows(es, "divergence", es$term == DIVERGENCE[["pfvc"]] & es$model == "main"),
+  fig4_pooled(pooled$longitudinal_terms, "divergence",
               pooled$longitudinal_terms$term == DIVERGENCE[["pfvc"]] & pooled$longitudinal_terms$model == "main"),
-  fig4_rows(did, "difference in differences"), fig4_pooled(pooled$control_did, "difference in differences"))
+  fig4_rows(did, "did"), fig4_pooled(pooled$control_did, "did"))
 if (!is.null(fd4) && nrow(fd4)) {
   fd4 <- fd4 %>% filter(startsWith(unit, "per ")) %>%
-    mutate(site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")),
-           quantity = factor(quantity, c("divergence, ventilated", "difference in differences")))
-  worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", pressor_dose = "higher",
-             ne_equiv_peak = "higher", osi = "higher", any_pressor = "higher", sf = "lower", dp = "higher")
-  p4 <- ggplot(fd4, aes(estimate, site, shape = is_pooled)) +
-    geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
-    geom_pointrange(aes(xmin = lo, xmax = hi), colour = okabe[1]) +
-    facet_grid(paste0(marker, "\n(worse = ", worse[marker], ")") ~ quantity, scales = "free_x") +
-    scale_shape_manual(values = c(16, 18), guide = "none") +
-    labs(title = "Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation",
-         subtitle = paste0("log marker per day per ", PER_LOG_PFVC,
-                           " log units of PFVC (about a 10% smaller predicted lung); adjusted, common-effect pool"),
-         x = NULL, y = NULL) +
-    theme_minimal(base_size = 10)
-  ggsave(file.path(out_dir, "pooled_biotrauma_figure4.pdf"), p4,
-         width = 13, height = 2 + 1.1 * n_distinct(fd4$marker) * (1 + n_distinct(fd4$site) / 6), limitsize = FALSE)
+    mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
+    toward_injury()
+  for (adj in c("adjusted", "unadjusted")) {
+    d <- fd4 %>% filter(adjustment == adj)
+    if (!nrow(d)) next
+    p4 <- draw_forest(d,
+      title = paste0("Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation (", adj, ")"),
+      subtitle = paste0("log marker per day per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI; ",
+                        "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0)"),
+      x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
+    ggsave(file.path(out_dir, paste0("pooled_biotrauma_figure4", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
+           p4, width = 11, height = forest_height(d), limitsize = FALSE)
+  }
 }
 
-# --- forests: the PFVC-level contrast per marker and horizon, per site and pooled
+# --- forests: the PFVC-level contrast per marker and horizon, per site and pooled,
+#     one file per adjustment
 if (nrow(lc) && any(lc$form == "pfvc" & lc$panel_h == paste0(lc$horizon_h, "h"))) {
   # the primary read: the pfvc form's contrast at each contrast horizon, from the panel of the same length
   fd <- lc %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
-    transmute(marker, adjustment, horizon_h, site = anon(site), estimate, lo, hi, pooled = FALSE) %>%
+    transmute(marker, adjustment, horizon_h, unit, site = anon(site), estimate, lo, hi) %>%
     bind_rows(pooled$level_contrast %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
-                transmute(marker, adjustment, horizon_h, site = "Pooled", estimate = pooled, lo, hi, pooled = TRUE)) %>%
-    mutate(site = factor(site, levels = c(sort(unique(setdiff(site, "Pooled"))), "Pooled")),
-           adjustment = factor(adjustment, c("adjusted", "unadjusted")))
-  # one panel per marker x horizon with its own x scale (facet_grid shares x down a
-  # column, so the any-pressor log-odds would set the scale for the labs); the strip
-  # names the injury direction so the sign reads without flipping
-  worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
-             ne_equiv_peak = "higher", any_pressor = "higher")
-  fd <- fd %>% mutate(panel = factor(paste0(marker, " (worse = ", worse[marker], ")\n", horizon_h, " h"),
-                                     levels = unique(paste0(marker, " (worse = ", worse[marker], ")\n", horizon_h, " h")[order(marker, horizon_h)])))
-  p <- ggplot(fd, aes(estimate, site, colour = adjustment, shape = pooled)) +
-    geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
-    geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
-    facet_wrap(~ panel, scales = "free_x", ncol = n_distinct(fd$horizon_h), dir = "h") +
-    scale_colour_manual(values = okabe[1:2]) + scale_shape_manual(values = c(16, 18), guide = "none") +
-    labs(title = "Marker difference per SD of log PFVC at the horizon, joint model (death before H modelled)",
-         subtitle = "a lower PFVC is the negative of the estimate; log-odds scale for any_pressor",
-         x = "per SD of log PFVC", y = NULL) +
-    theme_minimal(base_size = 10)
-  ggsave(file.path(out_dir, "pooled_biotrauma_level_contrast.pdf"), p, width = 4 + 3.5 * n_distinct(fd$horizon_h),
-         height = 2 + 1.2 * n_distinct(fd$marker) * (1 + n_distinct(fd$site) / 6))
+                transmute(marker, adjustment, horizon_h, unit, site = POOLED_LABEL, estimate = pooled, lo, hi)) %>%
+    filter(startsWith(unit, "per ")) %>%
+    mutate(column = factor(paste0("Marker difference at ", horizon_h, " h"),
+                           levels = paste0("Marker difference at ", sort(unique(horizon_h)), " h"))) %>%
+    toward_injury()
+  for (adj in c("adjusted", "unadjusted")) {
+    d <- fd %>% filter(adjustment == adj)
+    if (!nrow(d)) next
+    p <- draw_forest(d,
+      title = paste0("Marker difference by predicted lung size at the horizon, joint model (", adj, ")"),
+      subtitle = paste0("log marker per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI, death before the horizon modelled; ",
+                        "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0); ",
+                        "any-vasopressor rows are log-odds"),
+      x_label = "difference toward injury per 10% smaller predicted lung (95% CI)")
+    ggsave(file.path(out_dir, paste0("pooled_biotrauma_level_contrast", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
+           p, width = 4 + 3.5 * n_distinct(d$horizon_h), height = forest_height(d), limitsize = FALSE)
+  }
 }
 message("pooled_biotrauma complete -> ", out_dir)
