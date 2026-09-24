@@ -25,7 +25,6 @@ dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 PBWPFVC_BIN_EDGES <- seq(0, 50, by = 1)
 AGE_BIN_EDGES     <- c(18, 30, 40, 50, 60, 70, 80, Inf)
 HEIGHT_BIN_EDGES  <- c(150, 155, 160, 165, 170, 175, 180, 185, 190, 210)
-DIST_MIN_CELL     <- 10   # group-level small-cell suppression (CLAUDE.md)
 
 # External (ARMA) constants for the DIFFERENCE parameterization of PBW vs PFVC (3d).
 # Fixed, not cohort-derived, so vt_excess_ml means the same thing at every site.
@@ -900,7 +899,7 @@ if (config$cohort == "nosupport") {
     hours_index_to_first_icu_q75 = c(quantile(previous_index$hours_to_first_icu, 0.75, na.rm = TRUE), NA),
     note = "counts before the 24-hour escalation landmark; negative hours = index after the first ICU admission",
     site = site_name)
-  write_csv(mask_small_counts(timing), file.path(final_dir, paste0("control_index_timing_", site_name, ".csv")))
+  write_csv(timing, file.path(final_dir, paste0("control_index_timing_", site_name, ".csv")))
   message("No-support index: previous rule ", nrow(previous_index), " patients, ", pct(sum(previous_index$in_icu), nrow(previous_index)),
           "% of indices inside the ICU (median ", round(median(previous_index$hours_to_first_icu, na.rm = TRUE), 1),
           " h to the first ICU admission); ICU-admission rule keeps ", nrow(icu_index), " patients")
@@ -1167,7 +1166,7 @@ message("Negative-control cohorts: ", paste(capture.output(print(table(nc_cohort
 # Aggregated summaries of the PBW:PFVC ratio by demographic group only -- no
 # row-level data leaves the site. (a) histograms on fixed bins (summable across
 # sites into a pooled distribution); (b) quantile summaries for exact per-site
-# boxplots. Groups with n < DIST_MIN_CELL are dropped entirely (CLAUDE.md n>=10).
+# boxplots.
 dist_groups <- bind_rows(
   cross_sectional %>% transmute(group_type = "sex",
     group_value = as.character(sex_category), value = pbwpfvc),
@@ -1182,9 +1181,6 @@ dist_groups <- bind_rows(
 ) %>%
   filter(!is.na(value), !is.na(group_value), group_value != "NA")
 
-dist_keep <- dist_groups %>% count(group_type, group_value) %>%
-  filter(n >= DIST_MIN_CELL)
-dist_groups <- dist_groups %>% semi_join(dist_keep, by = c("group_type", "group_value"))
 
 # (a) histograms with tails clamped into the edge bins so per-group totals == N
 .bin_lo <- min(PBWPFVC_BIN_EDGES); .bin_hi <- max(PBWPFVC_BIN_EDGES)

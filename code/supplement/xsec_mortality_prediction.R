@@ -253,7 +253,7 @@ print(as.data.frame(results %>% filter(startsWith(sample, "common"), form == "li
                       transmute(outcome, adjustment, label, log_or_per_log_unit, lo = log_or_per_log_unit - 1.96 * log_or_se,
                                 hi = log_or_per_log_unit + 1.96 * log_or_se) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-write_csv(mask_small_counts(results), file.path(final_dir, paste0("mortality_prediction_", site_name, ".csv")))
+write_csv(results, file.path(final_dir, paste0("mortality_prediction_", site_name, ".csv")))
 write_csv(pairwise, file.path(final_dir, paste0("mortality_prediction_pairwise_", site_name, ".csv")))
 
 # =============================================================================

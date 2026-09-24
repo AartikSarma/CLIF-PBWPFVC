@@ -39,6 +39,11 @@
 #   6 figure    27_control_comparison.R (with the difference-in-differences), then
 #               24_biotrauma_figures.R: figure 4 and the checks figure
 #               (biotrauma_fig_checks_*: the DiD)
+#   7 channels  the supplement's channel breakdown: the ventilated divergence read through
+#               each GLI piece of log PFVC (height, age, sex, race; 22's channels form, one
+#               fit per marker, the pieces standing in for the demographics), and its
+#               figure (biotrauma_fig_channels_*). CHANNEL_MARKERS, platelets by default;
+#               empty skips it
 # Fits already on disk with the same chain settings are reused, so a rerun after a
 # failure costs only what failed. A failed step is reported and the run continues.
 #
@@ -50,7 +55,8 @@
 #   caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 #   bash code/29_run_figure4.sh --dry-run
 # Site default (2026-09-24): 22 figure-4 fits (5 markers, creatinine, 3 control markers, control
-# creatinine and the hypoxemic control, each adjusted and unadjusted) at 2000 / 500 iterations, four at a time. At
+# creatinine and the hypoxemic control, each adjusted and unadjusted) plus 1 channel fit, at
+# 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
 # hazard blocks did not converge at any length tried.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
@@ -59,6 +65,7 @@
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
 #   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, platelets by default, creatinine not fitted there; empty skips it),
+#   CHANNEL_MARKERS (step 7, platelets by default; empty skips it),
 #   FORCE_BUILD, FORCE_PANEL. The VT/PFVC companion (form vtpfvc) was dropped on
 #   2026-09-24: at a fixed VT/PBW, VT/PFVC moves only with PBW/PFVC, whose variance
 #   after age, sex and race is a few percent (Claim 5a), so the companion re-reads the
@@ -71,6 +78,7 @@ cd "$(dirname "$0")/.." || exit 1
 MARKERS=${MARKERS:-osi,sf,pressor_dose,platelets,bilirubin}   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
 HYPOXEMIC_CONTROL_MARKERS=${HYPOXEMIC_CONTROL_MARKERS-platelets}   # the hypoxemic control arm; set empty to skip
+CHANNEL_MARKERS=${CHANNEL_MARKERS-platelets}   # step 7, the channel breakdown (supplement); set empty to skip
 CREATININE=${CREATININE:-1}
 SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-4}
@@ -197,6 +205,15 @@ FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),
 run_step comparison with_cohort imv Rscript code/27_control_comparison.R
 run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
   Rscript code/24_biotrauma_figures.R
+
+# ---- 7 the channel breakdown (supplement), after figure 4 so it cannot delay it: the
+#      ventilated divergence per log unit of each GLI piece, pooled by pooled_biotrauma.R
+#      from jm_level_contrast_channels_* (exposures ch_height, ch_age, ch_sex, ch_race)
+if [[ -n "$CHANNEL_MARKERS" && " ${FAILED[*]-} " != *" panel_imv "* ]]; then
+  run_step channels_fit    with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" Rscript code/22_biotrauma_fit.R
+  run_step channels_report with_cohort imv env PBWPFVC_JM_MODIFIER=channels PBWPFVC_JM_MARKERS="$CHANNEL_MARKERS" Rscript code/23_biotrauma_report.R
+  run_step channels_figure with_cohort imv env PBWPFVC_JM_MODIFIER=channels Rscript code/24_biotrauma_figures.R
+fi
 
 if [[ $DRY == 0 ]]; then
   echo

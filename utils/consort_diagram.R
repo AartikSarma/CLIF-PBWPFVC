@@ -22,9 +22,8 @@ render_consort <- function(attrition_tbl, title = NULL) {
   # Half the vertical gap between boxes, used to start/stop connector arrows.
   half_gap <- if (n > 1) (ys[1] - ys[2]) / 2 * 0.55 else 0.1
 
-  # counts of 1-9 arrive blanked (mask_small_counts, utils/config.R) and print as "<10";
   # the first step has no exclusion and no reason, so it draws no branch box
-  count_label <- function(n) ifelse(is.na(n), "<10", format(n, big.mark = ","))
+  count_label <- function(n) format(n, big.mark = ",")
   main <- tibble(
     x = main_x,
     y = ys,
@@ -38,7 +37,7 @@ render_consort <- function(attrition_tbl, title = NULL) {
     yend = tail(ys, -1) + half_gap
   )
 
-  excl_idx <- which(at$step_order > 1 & (is.na(at$n_excluded) | at$n_excluded > 0))
+  excl_idx <- which(!is.na(at$n_excluded) & at$n_excluded > 0)
   has_excl <- length(excl_idx) > 0
 
   if (has_excl) {

@@ -16,9 +16,9 @@
 #              04 section 4l), and the variance of log VT/PFVC split into the
 #              clinician's dose and the label's mis-sizing, pooled exactly from each
 #              site's moments (dose_variance_decomposition_*)
-#   Figure 3C  the worked example (crs_channels_estimates_*, supplement/xsec_crs_channels.R
-#              section 5): a Black woman of 160 cm against a white man of 180 cm, both 60,
-#              by Devine PBW, GLI PFVC at 60 and at 25, and measured compliance
+#   Figure 3C  the age-matched head-to-head (crs_channels_estimates_*, _tests_*,
+#              supplement/xsec_crs_channels.R): the Crs exponent on PFVC, PFVC at age 25
+#              and PBW with an age spline, pooled, and the summed AIC difference against PBW
 #
 # The formulas mirror script 03: Devine PBW = 50 (men) or 45.5 (women) + 2.3 kg per
 # inch over 60; race-specific GLI-2012 FVC (rspiro::pred_GLI, White = 1, Black = 2).
@@ -171,36 +171,39 @@ if (nrow(dose_hist) && nrow(dose_moments)) {
 } else message("Figure 2 skipped: no dose_vtpfvc_histograms_ or dose_variance_decomposition_ tables (04 section 4l)")
 
 # =============================================================================
-# Figure 3C: the worked example (formula ratios; measured compliance pooled)
+# Figure 3C: the age-matched head-to-head (pooled from the sites)
 # =============================================================================
+# The Crs exponent on log PFVC, log PFVC at age 25 and log PBW, each alone with an age
+# spline in every model, in everyone and in women below their site's median height
+# (xsec_crs_channels.R section 2), pooled by common-effect inverse variance; beside
+# it the AIC difference against PBW, summed across sites (negative favours the
+# alternative).
 crs <- read_sites("crs_channels_estimates_")
-if (nrow(crs) && any(crs$model == "worked example")) {
-  worked <- crs %>% filter(model == "worked example", sample == "all plateau-measured")
-  formula_rows <- worked %>% filter(is.na(se)) %>% distinct(term, estimate)
-  contrast <- worked %>% filter(startsWith(term, "log Crs ratio"), !is.na(se))
-  w <- 1 / contrast$se^2
-  pooled_contrast <- tibble(estimate = sum(w * contrast$estimate) / sum(w), se = sqrt(1 / sum(w)))
-  bars <- bind_rows(
-    formula_rows %>% transmute(measure = recode(term, "log PBW ratio, A / B (Devine)" = "PBW (Devine)",
-                                                "log PFVC ratio, A / B (GLI at the profiles' age)" = "PFVC (GLI, at 60)",
-                                                "log PFVC ratio, A / B (GLI at age 25)" = "Age-standardised PFVC (GLI at 25)"),
-                               ratio = exp(estimate), lo = NA_real_, hi = NA_real_, source = "formula"),
-    tibble(measure = "Measured compliance (pooled)", ratio = exp(pooled_contrast$estimate),
-           lo = exp(pooled_contrast$estimate - 1.96 * pooled_contrast$se),
-           hi = exp(pooled_contrast$estimate + 1.96 * pooled_contrast$se), source = "patients"),
-    contrast %>% transmute(measure = paste0("Measured compliance, ", site), ratio = exp(estimate),
-                           lo = exp(lo), hi = exp(hi), source = "patients"))
-  write_csv(bars, file.path(out_dir, "figure3c_worked_example.csv"))
-  fig_3c <- ggplot(bars, aes(ratio, fct_rev(fct_inorder(measure)), colour = source)) +
+crs_tests <- read_sites("crs_channels_tests_")
+if (nrow(crs) && nrow(crs_tests)) {
+  population_of <- function(x) if_else(str_detect(x, "women"), "Women below the median height", "Everyone")
+  h2h <- crs %>% filter(sample == "all plateau-measured", str_detect(model, "^head-to-head.*age spline")) %>%
+    mutate(population = population_of(model)) %>%
+    group_by(population, exposure) %>%
+    summarise(k = n(), pooled = sum(estimate / se^2) / sum(1 / se^2), se = sqrt(1 / sum(1 / se^2)), .groups = "drop") %>%
+    mutate(lo = pooled - 1.96 * se, hi = pooled + 1.96 * se)
+  aic <- crs_tests %>% filter(sample == "all plateau-measured", str_detect(test, "age spline"), str_detect(test, "AIC")) %>%
+    mutate(population = population_of(test), exposure = str_match(test, "AIC, (.*) minus PBW")[, 2]) %>%
+    group_by(population, exposure) %>% summarise(k_aic = n(), summed_delta_aic = sum(statistic), .groups = "drop")
+  write_csv(left_join(h2h, aic, by = c("population", "exposure")), file.path(out_dir, "figure3c_head_to_head.csv"))
+  fig_3c <- ggplot(h2h, aes(pooled, exposure, colour = exposure)) +
     geom_vline(xintercept = 1, colour = "grey30") +
-    geom_point(size = 2.8) + geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.2, orientation = "y", na.rm = TRUE) +
-    scale_colour_manual(values = c(formula = "#999999", patients = "#0072B2"), name = NULL) +
-    labs(title = "C. A Black woman of 160 cm against a white man of 180 cm, both 60",
-         subtitle = "her size as a fraction of his: each formula, and measured compliance\n(model contrast at each site's median covariates)",
-         x = "ratio, woman / man", y = NULL) +
-    theme(legend.position = "bottom")
-  ggsave(file.path(out_dir, "figure3c_worked_example.pdf"), fig_3c, width = 8, height = 3.5 + 0.25 * nrow(contrast))
-  message("Figure 3C -> ", file.path(out_dir, "figure3c_worked_example.pdf"))
-} else message("Figure 3C skipped: no worked-example rows in crs_channels_estimates_ (xsec_crs_channels.R section 5)")
+    geom_pointrange(aes(xmin = lo, xmax = hi)) +
+    geom_text(data = aic, aes(x = Inf, y = exposure, label = sprintf("dAIC vs PBW %+.0f", summed_delta_aic)),
+              hjust = 1.05, vjust = -0.8, size = 3, colour = "grey30", inherit.aes = FALSE) +
+    facet_wrap(~ population, ncol = 1) +
+    scale_colour_manual(values = c(PFVC = "#0072B2", `PFVC at age 25` = "#009E73", PBW = "#D55E00"), guide = "none") +
+    labs(title = "C. Which scaling does measured compliance follow, at a given age?",
+         subtitle = sprintf("Crs exponent on each size measure with an age spline, pooled across %d site(s); 1 = proportional",
+                            n_distinct(crs$site)),
+         x = "exponent of log Crs", y = NULL)
+  ggsave(file.path(out_dir, "figure3c_head_to_head.pdf"), fig_3c, width = 8, height = 5)
+  message("Figure 3C -> ", file.path(out_dir, "figure3c_head_to_head.pdf"))
+} else message("Figure 3C skipped: no crs_channels_estimates_ / _tests_ tables (supplement/xsec_crs_channels.R)")
 
 message("pooled_displays complete -> ", out_dir)

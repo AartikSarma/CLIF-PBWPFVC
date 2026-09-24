@@ -10,8 +10,11 @@
 #       log PFVC (or per log unit of each GLI piece) at each horizon, level plus
 #       divergence x time, from the joint posterior draws
 #   final/jm_movement_{tag}.csv         the observed mean change from baseline by
-#       day (descriptive; days with 10 or more patients), read by 27 before a
-#       control's divergence
+#       day (descriptive), read by 27 before a control's divergence
+#   final/jm_lme_check_{tag}.csv        the level and divergence terms from the joint
+#       model beside the same terms from the longitudinal submodel fitted alone (no
+#       death or extubation correction): whether the unconverged hazard and
+#       association blocks move the answer
 #   final/jm_association_hr_{tag}.csv   hazard ratio for death, extubation (and RRT)
 #       per SD of the current log marker (value) and per unit slope
 #   final/jm_heterogeneity_{tag}.csv    the hetero model only: the strain slope at
@@ -121,7 +124,7 @@ report_write <- function(new, name) {
       new <- bind_rows(as_text(old), as_text(new))
     }
   }
-  if (nrow(new)) write_csv(mask_small_counts(new), path)   # counts of 1-9 blanked (utils/config.R)
+  if (nrow(new)) write_csv(new, path)
 }
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
 message("=== 23_biotrauma_report (", out_tag, "): ", nrow(usable), " fits, of which ",
@@ -136,7 +139,7 @@ beta_draws <- function(jm, lme_fit) {
   b[, ref, drop = FALSE]
 }
 assoc_rows <- list(); hetero_rows <- list()
-level_rows <- list(); movement_rows <- list()
+level_rows <- list(); movement_rows <- list(); lme_check_rows <- list()
 # Horizons for the level contrast: one per day out to the run's own endpoint,
 # plus the endpoint itself when the horizon is not a whole number of days. Even
 # spacing, because the contrast is a level plus a rate times time and a reader
@@ -164,7 +167,7 @@ for (i in seq_len(nrow(usable))) {
   # How much the marker moves at all, by day: the observed change from baseline among
   # patients still observed (descriptive, survivor-selected, not a model quantity). A
   # control cohort whose marker does not move cannot show a divergence by lung size,
-  # so this is read BEFORE its divergence term. Days with under 10 patients are dropped.
+  # so this is read BEFORE its divergence term.
   # (the dose part has a change from baseline only for patients on a pressor at day 0)
   movement_rows[[length(movement_rows) + 1L]] <- ld %>%
     filter(if ("on_y0" %in% names(ld)) on_y0 == 1 else TRUE) %>%
@@ -176,7 +179,6 @@ for (i in seq_len(nrow(usable))) {
     group_by(day) %>%
     summarise(n_patients = n(), mean_change = mean(change), sd_change = sd(change),
               mean_abs_change = mean(abs(change)), mean_level = mean(level), .groups = "drop") %>%
-    filter(n_patients >= 10L) %>%
     mutate(marker = u$marker, model = u$model, adjustment = u$adjustment, binary = binary, .before = 1)
   sd_log_y <- if (binary) 1 else sd(ld$log_y)   # binary outcome: report on the log-odds scale
   gate <- u$status == "converged"
@@ -216,6 +218,33 @@ for (i in seq_len(nrow(usable))) {
         n_patients = u$n_patients, n_deaths = u$n_deaths,
         rhat_gate = gate_long, rhat_gate_exposure = gate_expo, longitudinal_rhat = u$longitudinal_rhat,
         exposure_rhat = u$exposure_rhat, association_rhat = u$association_rhat)
+    }
+  }
+
+  # ---- does the death correction move the answer? The fit bundle carries the
+  #      longitudinal submodel as fitted alone (nlme, before the joint model), so the
+  #      size terms can be read with and without the linkage to death and extubation.
+  #      The hazard block fails R-hat at 7 days and the association block sometimes
+  #      does; if the joint model's level and divergence agree with the LME's, the
+  #      unconverged blocks are not what the estimate rests on. Continuous markers only
+  #      (the any-pressor part is a GLMMadaptive fit on another scale).
+  if (!binary && inherits(b$lme, "lme")) {
+    fe <- nlme::fixef(b$lme); fe_v <- vcov(b$lme)
+    for (ex in intersect(c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS), colnames(draws))) {
+      rate <- intersect(c(paste0(ex, ":vent_day"), paste0("vent_day:", ex)), colnames(draws))
+      for (tm in c(ex, rate)) {
+        if (!tm %in% names(fe)) next
+        v <- draws[, tm]
+        lme_check_rows[[length(lme_check_rows) + 1L]] <- tibble(
+          marker = u$marker, model = u$model, adjustment = u$adjustment, exposure = ex,
+          term = if (tm == ex) "level" else "divergence per day",
+          jm_estimate = mean(v), jm_lo = quantile(v, 0.025), jm_hi = quantile(v, 0.975),
+          lme_estimate = unname(fe[[tm]]), lme_se = sqrt(fe_v[tm, tm]),
+          lme_lo = lme_estimate - 1.96 * lme_se, lme_hi = lme_estimate + 1.96 * lme_se,
+          jm_minus_lme_in_lme_se = (jm_estimate - lme_estimate) / lme_se,
+          exposure_rhat = u$exposure_rhat, association_rhat = u$association_rhat, hazard_rhat = u$hazard_rhat,
+          n_patients = u$n_patients, n_deaths = u$n_deaths)
+      }
     }
   }
 
@@ -261,6 +290,14 @@ if (nrow(level_contrast)) {
                         mutate(across(where(is.numeric), ~ signif(., 3)))), row.names = FALSE)
 }
 if (nrow(movement)) report_write(movement, "movement")
+lme_check <- bind_rows(lme_check_rows) %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, site = site_name)
+if (nrow(lme_check)) {
+  report_write(lme_check, "lme_check")
+  message("--- the size terms with and without the death correction (joint model against the LME alone)")
+  print(as.data.frame(lme_check %>% select(marker, adjustment, exposure, term, jm_estimate, lme_estimate, jm_minus_lme_in_lme_se,
+                                           association_rhat, hazard_rhat) %>% mutate(across(where(is.numeric), ~ signif(., 3)))),
+        row.names = FALSE)
+}
 report_write(association_hr,  "association_hr")
 if (nrow(heterogeneity)) report_write(heterogeneity, "heterogeneity")
 

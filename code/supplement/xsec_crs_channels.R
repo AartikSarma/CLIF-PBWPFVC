@@ -51,11 +51,6 @@
 # 4. The figure's model on the log scale: log Crs on log PFVC with ns(age, 4), sex and
 #    race, the height-identified exponent.
 #
-# 5. The worked example of figure 3C: a Black woman of 160 cm and a white man of
-#    180 cm, both 60. The ratio of their PBWs, of their PFVCs (at 60 and at 25), and
-#    of their compliance: the site's model contrast between the two profiles, and the
-#    observed mean log Crs of patients within 5 cm of each profile.
-#
 # Covariates in every model: log SF, SOFA, PEEP (compliance depends on the volume
 # PEEP holds), BMI (Crs includes the chest wall; BMI enters because the outcome is
 # a pressure-derived measure). Sample: the plateau-measured index timepoint
@@ -90,18 +85,6 @@ final_dir <- final_dir_for("supplement")
 source(here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, channels_equal_p()
 
 DP_FLOOR_SENSITIVITY <- 5   # cmH2O
-# the worked example of figure 3C (section 5): two profiles at one age, and the ratio of
-# their predicted sizes by each formula (Devine PBW; race-specific GLI-2012 FVC as in
-# script 03, at the profiles' age and at age 25)
-WORKED_EXAMPLE <- tibble(height_cm = c(160L, 180L), sex = c("Female", "Male"), race = c("BLACK", "WHITE"))
-WORKED_EXAMPLE_AGE <- 60L
-worked_pbw  <- if_else(WORKED_EXAMPLE$sex == "Male", 50, 45.5) + 2.3 * (WORKED_EXAMPLE$height_cm / 2.54 - 60)
-worked_gli  <- function(age) rspiro::pred_GLI(age = rep(age, 2), height = WORKED_EXAMPLE$height_cm / 100,
-                                             gender = if_else(WORKED_EXAMPLE$sex == "Male", 1, 2),
-                                             ethnicity = if_else(WORKED_EXAMPLE$race == "BLACK", 2, 1), param = "FVC")
-WORKED_EXAMPLE_FORMULA_RATIOS <- c(log(worked_pbw[1] / worked_pbw[2]),
-                                   log(worked_gli(WORKED_EXAMPLE_AGE)[1] / worked_gli(WORKED_EXAMPLE_AGE)[2]),
-                                   log(worked_gli(25)[1] / worked_gli(25)[2]))
 GLI_HEIGHT_ELASTICITY <- c(Male = 2.41, Female = 2.26)
 OKABE_ITO <- c(height = "#0072B2", age = "#E69F00", sex = "#009E73", race = "#CC79A7",
                PFVC = "#0072B2", PBW = "#D55E00")
@@ -247,46 +230,6 @@ analyse_sample <- function(dat, sample_label) {
   demo_fit <- fit_strict(lm(as.formula(paste("log_crs ~ log_pfvc +", DEMOGRAPHICS, "+", COVARIATES)), data = dat))
   estimates$demographic_adjusted <- coef_rows(demo_fit, "log_pfvc", "log PFVC + ns(age, 4), sex, race", sample_label, 1)
 
-  # ---- 5. the worked example (figure 3C): two patients of the same age, a Black woman
-  #      of 160 cm and a white man of 180 cm. How much smaller is the woman by each
-  #      formula, and by measured compliance? The formula ratios are the same at every
-  #      site; the compliance ratio is this site's model contrast between the two
-  #      profiles at the cohort's median covariates (height as a spline, so the
-  #      contrast does not borrow GLI's or Devine's height function), and beside it the
-  #      observed mean log Crs of the patients near each profile (within 5 cm, any age).
-  profile_crs <- fit_strict(lm(as.formula(paste("log_crs ~ ns(height_cm, 3) + sex_category + race_category + ns(age10, 4) +",
-                                                COVARIATES)), data = dat))
-  profiles <- tibble(profile = c("A", "B"), height_cm = WORKED_EXAMPLE$height_cm,
-                     sex_category = factor(WORKED_EXAMPLE$sex, levels = levels(dat$sex_category)),
-                     race_category = factor(WORKED_EXAMPLE$race, levels = levels(dat$race_category)),
-                     age10 = WORKED_EXAMPLE_AGE / 10, log_sf = median(dat$log_sf), sofa_total = median(dat$sofa_total),
-                     peep_set = median(dat$peep_set), bmi = median(dat$bmi))
-  profile_x <- model.matrix(delete.response(terms(profile_crs)),
-                            model.frame(delete.response(terms(profile_crs)), profiles, xlev = profile_crs$xlevels))
-  contrast_x <- profile_x[1, ] - profile_x[2, ]
-  crs_contrast <- sum(contrast_x * coef(profile_crs))
-  crs_contrast_se <- sqrt(as.numeric(t(contrast_x) %*% vcov(profile_crs) %*% contrast_x))
-  near <- function(i) dat %>% filter(sex_category == WORKED_EXAMPLE$sex[i], race_category == WORKED_EXAMPLE$race[i],
-                                     abs(height_cm - WORKED_EXAMPLE$height_cm[i]) <= 5)
-  observed <- map_dfr(1:2, function(i) {
-    cell <- near(i)
-    tibble(term = paste0("log Crs, patients near profile ", c("A", "B")[i], " (observed mean)"),
-           estimate = if (nrow(cell)) mean(cell$log_crs) else NA_real_,
-           se = if (nrow(cell) > 1) sd(cell$log_crs) / sqrt(nrow(cell)) else NA_real_,
-           n_patients = nrow(cell), median_age = if (nrow(cell)) median(cell$age_at_admission) else NA_real_)
-  })
-  estimates$worked_example <- bind_rows(
-    tibble(term = c("log PBW ratio, A / B (Devine)", "log PFVC ratio, A / B (GLI at the profiles' age)",
-                    "log PFVC ratio, A / B (GLI at age 25)"),
-           estimate = WORKED_EXAMPLE_FORMULA_RATIOS, se = NA_real_, n_patients = nrow(dat)),
-    tibble(term = "log Crs ratio, A / B (model contrast at the site's median covariates)",
-           estimate = crs_contrast, se = crs_contrast_se, n_patients = nobs(profile_crs)),
-    observed) %>%
-    mutate(sample = sample_label, model = "worked example", lo = estimate - 1.96 * se, hi = estimate + 1.96 * se,
-           p = NA_real_, predicted = NA_real_,
-           scale = sprintf("log ratio; A = Black woman %d cm, B = white man %d cm, both age %d",
-                           WORKED_EXAMPLE$height_cm[1], WORKED_EXAMPLE$height_cm[2], WORKED_EXAMPLE_AGE))
-
   list(estimates = bind_rows(estimates), tests = bind_rows(tests))
 }
 results <- imap(SAMPLES, analyse_sample)
@@ -298,8 +241,8 @@ print(as.data.frame(estimates %>% select(sample, model, term, estimate, lo, hi, 
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 message("\nTests:")
 print(as.data.frame(tests %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-write_csv(mask_small_counts(estimates), file.path(final_dir, paste0("crs_channels_estimates_", site_name, ".csv")))
-write_csv(mask_small_counts(tests), file.path(final_dir, paste0("crs_channels_tests_", site_name, ".csv")))
+write_csv(estimates, file.path(final_dir, paste0("crs_channels_estimates_", site_name, ".csv")))
+write_csv(tests, file.path(final_dir, paste0("crs_channels_tests_", site_name, ".csv")))
 
 # =============================================================================
 # Figure

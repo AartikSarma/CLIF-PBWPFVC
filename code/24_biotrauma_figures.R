@@ -158,8 +158,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
               .groups = "drop")
   counts <- es %>% filter(model == "main") %>% distinct(marker, n_patients, n_deaths) %>%
     group_by(marker) %>% slice(1) %>% ungroup()
-  # a count suppressed as under 10 (mask_small_counts) reads "<10", not "NA"
-  show_count <- function(x) ifelse(is.na(x), "<10", formatC(x, big.mark = ",", format = "d"))
+  show_count <- function(x) formatC(x, big.mark = ",", format = "d")
   row_label <- function(m) {
     paste0(marker_label(m),
            sprintf("\nn = %s, deaths = %s", show_count(counts$n_patients[match(m, counts$marker)]),

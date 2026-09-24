@@ -887,8 +887,8 @@ message("CONSORT diagram saved")
 # 03k). Every model is fit with linear age AND with ns(age, 4): what remains of the
 # ratio after linear age, sex and race is height plus the convex part of the age
 # curve, so a residual ratio effect where height is null is read against the spline.
-# Outcomes: in-hospital death (logistic) and 60-day all-cause death (Cox). Cells
-# with < 10 deaths are skipped; counts under 10 are suppressed in the exports.
+# Outcomes: in-hospital death (logistic) and 60-day all-cause death (Cox). A cell
+# with fewer than NC_MIN_EVENTS deaths is not fitted.
 nc_file <- file.path(output_dir, "analysis_negative_control.parquet")
 nc_data <- read_parquet(nc_file) %>%
   select(hospitalization_id, nc_cohort, age_at_admission, sex_category, race_category,
@@ -945,7 +945,6 @@ nc_fit_one <- function(df, expo, cohort_lab) {
 nc_results <- map_dfr(nc_cohort_levels, function(cl)
   map_dfr(names(nc_exposures), function(e) nc_fit_one(nc_frames, e, cl))) %>%
   mutate(adjustment = "sex + race + age (linear or ns4)", site = site_name)
-suppress10 <- function(x) if_else(x < 10, NA_integer_, as.integer(x))
 nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
   summarise(n = n(), deaths_inhosp = sum(deceased == 1, na.rm = TRUE),
             deaths_60d = sum(mortality_event_60 == 1, na.rm = TRUE),
@@ -957,10 +956,7 @@ nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
             q75_vtpbw = quantile(vtpbw, .75, na.rm = TRUE), pct_vtpbw_over_8 = mean(vtpbw > 8, na.rm = TRUE),
             median_vtpfvc = median(vtpfvc, na.rm = TRUE), pct_vtpfvc_over_11 = mean(vtpfvc > 11, na.rm = TRUE),
             .groups = "drop") %>%
-  mutate(across(c(n, deaths_inhosp, deaths_60d, n_with_vt), suppress10),
-         across(c(median_vtpbw, q25_vtpbw, q75_vtpbw, pct_vtpbw_over_8, median_vtpfvc, pct_vtpfvc_over_11),
-                ~ if_else(is.na(n_with_vt), NA_real_, .x)),
-         cohort = factor(cohort, nc_cohort_levels)) %>% arrange(cohort)
+  mutate(cohort = factor(cohort, nc_cohort_levels)) %>% arrange(cohort)
 write_csv(nc_results, file.path(final_dir, paste0("negative_control_", site_name, ".csv")))
 write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", site_name, ".csv")))
 
