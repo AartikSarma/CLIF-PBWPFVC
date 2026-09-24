@@ -31,7 +31,11 @@
 #    nearly in proportion, so the two models differ where the formulas part: short
 #    women, where Devine's height elasticity (2.8 to 3.4) departs most from GLI's
 #    (about 2.3). The head-to-head is repeated in women shorter than the median woman.
-#    log PBW and log PFVC are never entered together.
+#    log PBW and log PFVC are never entered together. A third exposure, PFVC at age
+#    25 (GLI's height, sex and race scaling without its age decline; script 03's
+#    pfvc_age25), and a second version of every model with ns(age, 4) added, followed
+#    MIMIC's first run (2026-09-23), where Crs tracked PFVC's height piece but not its
+#    age piece and PBW won the head-to-head.
 #
 # 3. Height elasticity by sex: d log Crs / d log height within each sex, beside
 #    GLI's height elasticity (2.41 men, 2.26 women) and Devine's at the sex's median
@@ -85,13 +89,13 @@ fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
 # =============================================================================
 mechanics_all <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
   filter(!is.na(crs), crs > 0, !is.na(dp), dp > 0) %>%
-  filter(!is.na(pfvc), pfvc > 0, !is.na(pbw), pbw > 0, !is.na(height_cm), !is.na(age_at_admission),
+  filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0, !is.na(pbw), pbw > 0, !is.na(height_cm), !is.na(age_at_admission),
          !is.na(sex_category), !is.na(race_category), !is.na(sf_ratio), sf_ratio > 0,
          !is.na(sofa_total), !is.na(peep_set), !is.na(bmi)) %>%
   mutate(sex_category  = factor(sex_category, levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          age10 = age_at_admission / 10,
-         log_crs = log(crs), log_pfvc = log(pfvc), log_pbw = log(pbw),
+         log_crs = log(crs), log_pfvc = log(pfvc), log_pfvc25 = log(pfvc_age25), log_pbw = log(pbw),
          log_height = log(height_cm), log_sf = log(sf_ratio))
 if (nrow(mechanics_all) < 100) stop("fewer than 100 patients with a measured plateau and every covariate")
 SAMPLES <- list(`all plateau-measured` = mechanics_all,
@@ -136,18 +140,27 @@ analyse_sample <- function(dat, sample_label) {
            n_patients = nobs(channel_fit)))
 
   # ---- 2. head-to-head: log PFVC against log PBW, identical covariates, no demographics
-  head_to_head <- function(sub_dat, subgroup) {
-    pfvc_fit <- fit_strict(lm(as.formula(paste("log_crs ~ log_pfvc +", COVARIATES)), data = sub_dat))
-    pbw_fit  <- fit_strict(lm(as.formula(paste("log_crs ~ log_pbw +", COVARIATES)), data = sub_dat))
-    list(estimates = bind_rows(coef_rows(pfvc_fit, "log_pfvc", paste("head-to-head,", subgroup), sample_label, 1),
-                               coef_rows(pbw_fit, "log_pbw", paste("head-to-head,", subgroup), sample_label, 1)),
-         tests = tibble(sample = sample_label, test = paste0("head-to-head AIC, ", subgroup, " (PFVC minus PBW; < 0 favours PFVC)"),
-                        statistic = AIC(pfvc_fit) - AIC(pbw_fit), df = NA_real_, p = NA_real_, n_patients = nobs(pfvc_fit)))
+  # three exposures, each on its own, against PBW: PFVC; PFVC at age 25 (GLI's height,
+  # sex and race scaling with its age decline removed, script 03's pfvc_age25); PBW.
+  # Fitted without demographics, and again with ns(age, 4) in every model, which asks
+  # whether the formulas differ once age is held fixed (MIMIC, 2026-09-23: Crs follows
+  # PFVC's height piece but not its age piece, so PFVC lost to PBW overall).
+  H2H_EXPOSURES <- c(PFVC = "log_pfvc", `PFVC at age 25` = "log_pfvc25", PBW = "log_pbw")
+  head_to_head <- function(sub_dat, subgroup, age_adjusted) {
+    label <- paste0("head-to-head, ", subgroup, if (age_adjusted) ", age spline in every model" else "")
+    fits <- map(H2H_EXPOSURES, function(exposure)
+      fit_strict(lm(as.formula(paste("log_crs ~", exposure, "+", if (age_adjusted) "ns(age10, 4) +", COVARIATES)), data = sub_dat)))
+    list(estimates = imap_dfr(fits, ~ coef_rows(.x, H2H_EXPOSURES[[.y]], label, sample_label, 1) %>% mutate(exposure = .y)),
+         tests = imap_dfr(fits[names(fits) != "PBW"], ~ tibble(
+           sample = sample_label, test = paste0(label, ": AIC, ", .y, " minus PBW (< 0 favours ", .y, ")"),
+           statistic = AIC(.x) - AIC(fits$PBW), df = NA_real_, p = NA_real_, n_patients = nobs(.x))))
   }
   female_median_height <- median(dat$height_cm[dat$sex_category == "Female"])
   short_women <- dat %>% filter(sex_category == "Female", height_cm < female_median_height)
-  h2h <- list(head_to_head(dat, "everyone"),
-              if (nrow(short_women) >= 50) head_to_head(short_women, sprintf("women shorter than %.0f cm", female_median_height)))
+  short_women_label <- sprintf("women shorter than %.0f cm", female_median_height)
+  h2h <- list(head_to_head(dat, "everyone", FALSE), head_to_head(dat, "everyone", TRUE),
+              if (nrow(short_women) >= 50) head_to_head(short_women, short_women_label, FALSE),
+              if (nrow(short_women) >= 50) head_to_head(short_women, short_women_label, TRUE))
   estimates$head_to_head <- map_dfr(compact(h2h), "estimates")
   tests$head_to_head <- map_dfr(compact(h2h), "tests")
 
@@ -198,13 +211,13 @@ channel_panel <- estimates %>% filter(model == "channels") %>%
        x = "d log Crs / d log PFVC (piece)", y = NULL) +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
 h2h_panel <- estimates %>% filter(startsWith(model, "head-to-head"), sample == primary) %>%
-  mutate(exposure = if_else(term == "log_pfvc", "PFVC", "PBW"), model = sub("head-to-head, ", "", model)) %>%
+  mutate(model = sub("head-to-head, ", "", sub(", age spline in every model", ",\nage spline", model))) %>%
   ggplot(aes(estimate, model, colour = exposure)) +
   geom_vline(xintercept = 1, colour = "grey30") +
   geom_pointrange(aes(xmin = lo, xmax = hi), position = position_dodge(width = 0.5)) +
-  scale_colour_manual(values = OKABE_ITO[c("PFVC", "PBW")], name = NULL) +
-  labs(title = "B. Head-to-head: Crs exponent on log PFVC and on log PBW",
-       subtitle = "identical covariates, no demographics", x = "exponent", y = NULL) +
+  scale_colour_manual(values = c(PFVC = "#0072B2", `PFVC at age 25` = "#009E73", PBW = "#D55E00"), name = NULL) +
+  labs(title = "B. Head-to-head: Crs exponent on log PFVC, PFVC at age 25 and PBW",
+       subtitle = "identical covariates; with and without an age spline", x = "exponent", y = NULL) +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
 elasticity_panel <- estimates %>% filter(startsWith(model, "height elasticity"), sample == primary) %>%
   mutate(sex = sub("height elasticity, ", "", model)) %>%
