@@ -49,7 +49,8 @@
 # Usage (from anywhere; the script moves to the repo root):
 #   caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 #   bash code/29_run_figure4.sh --dry-run
-# Site default (2026-09-24): 20 figure-4 fits at 2000 / 500 iterations, four at a time. At
+# Site default (2026-09-24): 22 figure-4 fits (5 markers, creatinine, 3 control markers, control
+# creatinine and the hypoxemic control, each adjusted and unadjusted) at 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
 # hazard blocks did not converge at any length tried.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
