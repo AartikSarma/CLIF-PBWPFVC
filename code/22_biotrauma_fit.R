@@ -90,10 +90,13 @@ JM_CORES   <- min(N_CHAINS, N_CORES)
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 stopifnot(BASELINE_FORM %in% c("free", "offset"))
 # Association structure and sampler. ASSOC = "value" (current value on each
-# cause-specific hazard) or "value_slope" (adds the current slope). MALA = 1 uses
+# cause-specific hazard; the default on every grid since 2026-09-24) or "value_slope"
+# (adds the current slope). Over 7 days a control patient's marker barely moves, so
+# its slope carries almost no information: in the MIMIC no-support platelet arm the
+# slope associations reached R-hat 11.7 and 6.4. MALA = 1 uses
 # JMbayes2's gradient-based (MALA) update for the fixed effects, which mixes
 # better on the beta-random-effect ridge that random intercepts create.
-ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", if (JM_GRID == "6h") "value" else "value_slope")
+ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value")
 stopifnot(ASSOC_FORM %in% c("value", "value_slope"))
 USE_MALA   <- identical(Sys.getenv("PBWPFVC_JM_MALA", "0"), "1")
 # With the within-between decomposition the patient mean already carries the
@@ -138,8 +141,20 @@ HAS_DOSE <- config$cohort == "imv"
 if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "disc_level", "vtpfvc", "pfvc_dose"))
   stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc or channels for the ", config$cohort, " cohort")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
-# Hazard interaction VT/PBW x log PFVC (secondary; 0 = the paper's main-effects set)
-HAZARD_INT <- identical(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "0"), "1")
+# The survival submodel (2026-09-24). Its job is the correction for who leaves the
+# panel (death, extubation, escalation), not the size effect, which the mortality
+# analyses estimate. It carries the severity covariates (non-respiratory SOFA,
+# baseline log SF, BMI) and age, sex and race, standardised, in every fit, adjusted
+# or not: adjustment is a property of the longitudinal size term, and the dropout
+# model is the same nuisance model throughout. Log PFVC and VT/PBW are left out. Log
+# PFVC is a fixed function of height, age, sex and race, so beside the demographics
+# it is identified only by height and the curvature of GLI's age term, and its
+# hazard coefficients never converged (R-hat 1.8 to 2.3 at MIMIC and UCSF, at every
+# chain length tried). HAZARD_SPEC is stored with each fit, so a fit made under an
+# earlier hazard is refitted rather than reused.
+if (nzchar(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "")))
+  stop("PBWPFVC_JM_HAZARD_INT is retired: the hazard no longer carries VT/PBW or log PFVC (2026-09-24)")
+HAZARD_SPEC <- paste0("severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
 # Renal replacement as a third competing cause, for creatinine only. Off by
 # default because it redefines the other two: with RRT in, the death hazard is
 # the hazard of death BEFORE dialysis, on a risk set that empties faster.
@@ -167,9 +182,8 @@ N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
 # beside the all-parameter maximum so a nuisance term cannot hide a converged read.
 KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
                "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd", "^ch_", "vent_day:ch_",
-               "^vtpfvc_c", "vent_day:vtpfvc_c", "vtpfvc_idx:strata\\(strata\\)death", "sev_anchor_c",
-               "value\\(log_y\\):stratadeath", "log_pfvc:strata\\(strata\\)death",
-               "vtpbw_idx:strata\\(strata\\)death")
+               "^vtpfvc_c", "vent_day:vtpfvc_c", "sev_anchor_c",
+               "value\\(log_y\\):stratadeath")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -351,7 +365,7 @@ restricted_patients <- function(mk) {
 }
 
 DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
-DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10",
+DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10_z",
                                     "+ sex_category + race_category")
 # Severity covariates of the longitudinal submodel. Non-respiratory SOFA (log SF
 # carries the respiratory component). BMI ONLY for the pressure-derived marker:
@@ -462,6 +476,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     rule_on_disk <- if (is.null(r$entry_rule)) "two_values" else r$entry_rule
     panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
     other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
+                  if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
                   if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
     if (nzchar(other_data)) {
       stamp("result on disk is on other data (", other_data, "); refitting")
@@ -537,8 +552,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stamp(sum(n_per$n == 1L), " patients enter with one creatinine value because RRT starts in the window")
   ld <- ld %>% filter(hospitalization_id %in% n_per$hospitalization_id)
 
-  # --- survival rows for those patients; hazard exposures = index VT/PBW (dose)
-  #     and log PFVC (size), the paper's primary parameterization
+  # --- survival rows for those patients (the hazard's covariates: see HAZARD_SPEC)
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
     filter(if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE, !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
@@ -684,18 +698,18 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stamp("LME converged")
   }
 
-  # --- survival submodel: cause-specific stratified Cox (death vs extubation)
+  # --- survival submodel: cause-specific stratified Cox (death vs extubation),
+  #     covariates standardised within the fit's patients so the sampler's steps
+  #     are on one scale (raw BMI had a coefficient near 0.01)
+  zscore <- function(x) (x - mean(x)) / sd(x)
+  sd_ <- sd_ %>% mutate(np_sofa_z = zscore(np_sofa), log_sf_0_z = zscore(log_sf_0), bmi_z = zscore(bmi),
+                        age10_z = zscore(age10))
   surv_cr <- crisk_setup(as.data.frame(sd_), statusVar = "event_factor", censLevel = "censored")
   surv_cr$id <- factor(surv_cr$id, levels = lv)
   # Baseline covariates of the hazard. The SF model drops log_sf_0: it is that
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
-  # channels form: the size term of the hazard is the four pieces too, in place of log PFVC and the demographics
-  size_haz <- if (MOD_FORM == "channels") CHANNELS else if (MOD_FORM == "vtpfvc") "vtpfvc_idx" else
-              if (HAZARD_INT) "vtpbw_idx * log_pfvc" else "log_pfvc"
-  cox_rhs <- paste(c(if (HAS_DOSE && (!HAZARD_INT || MOD_FORM == "channels")) "vtpbw_idx", size_haz,
-                     "np_sofa", if (mk$y != "sf") "log_sf_0", "bmi",
-                     if (adjusted && MOD_FORM != "channels") DEMO_RHS_HAZARD()), collapse = " + ")
+  cox_rhs <- paste(c("np_sofa_z", if (mk$y != "sf") "log_sf_0_z", "bmi_z", DEMO_RHS_HAZARD()), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
@@ -804,7 +818,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
-                 entry_rule = entry_rule_for(mk))
+                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC)
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
   saveRDS(result, result_file(mk$name, model, adj_lab))
@@ -872,7 +886,7 @@ manifest <- map_dfr(results, function(r)
                       hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
                       worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
                       acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
-  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, modifier_form = MOD_FORM,
+  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,
