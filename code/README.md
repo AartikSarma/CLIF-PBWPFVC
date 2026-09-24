@@ -44,10 +44,16 @@ to change; that stops once sites have returned `final/` folders.
 
   ```bash
   mkdir -p results/fig4/MIMIC results/fig4/UCSF     # results/ is gitignored
-  cp -R output/MIMIC_output/final/injury results/fig4/MIMIC/
-  cp -R output/UCSF_output/final/injury  results/fig4/UCSF/
+  cp -R output/MIMIC_output/final/injury output/MIMIC_output/final/supplement results/fig4/MIMIC/
+  cp -R output/UCSF_output/final/injury  output/UCSF_output/final/supplement  results/fig4/UCSF/
   PBWPFVC_RESULTS_ROOT=results/fig4 Rscript code/pooling/pooled_biotrauma.R
   ```
+
+  The same script pools the supplement's contrasts from each site's `supplement/`: the
+  mortality control contrast and its GLI channel breakdown (converted to per 0.1 log
+  units with each site's exported SD; the pieces' agreement tested by multivariate
+  common-effect pooling of each site's covariance) and the compliance channels (the
+  head-to-head AIC differences summed across sites).
 - `supplement/` holds standalone supplementary analyses, run by hand and not by the
   pipeline; each is prefixed by the block it supports and writes to `final/supplement/`.
   `xsec_dp_vtpfvc_additive.R` asks whether driving pressure is a sufficient surrogate

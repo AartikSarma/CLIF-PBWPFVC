@@ -79,7 +79,9 @@
 #   pfvc_age_control_channels_{site}.csv   the channel control contrast: each GLI piece's
 #                                          coefficient per cohort and ventilated minus
 #                                          no support; pfvc_age_control_channel_tests_
-#                                          {site}.csv, whether the differences agree
+#                                          {site}.csv, whether the differences agree;
+#                                          pfvc_age_control_channel_vcov_{site}.csv, the
+#                                          differences' covariance, for the pooled test
 #   pfvc_age_control_code_status_{site}.csv  patients and deaths by code status at the
 #                                          index and later limitation, per cohort
 #   pfvc_age_control_hypoxemia_{site}.csv  the hypoxemia pathway in the control: onset
@@ -491,9 +493,10 @@ contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
          ratio = exp(log_ratio), ratio_lo = exp(log_ratio - 1.96 * se), ratio_hi = exp(log_ratio + 1.96 * se),
          p = 2 * pnorm(-abs(log_ratio / se)), severity = SEVERITY_LABELS[severity],
          population = POPULATIONS[population],
-         scale = "per SD of log PFVC (ventilated cohort SD)", site = site_name) %>%
+         scale = "per SD of log PFVC (ventilated cohort SD)",
+         ventilated_log_pfvc_sd = ventilated_log_pfvc_sd, site = site_name) %>%
   select(population, outcome, ratio_type, adjustment, severity, quantity, ratio, ratio_lo, ratio_hi, p, log_ratio, se,
-         n_patients, n_deaths, note, scale, site)
+         n_patients, n_deaths, note, scale, ventilated_log_pfvc_sd, site)
 
 # =============================================================================
 # The control's escalation hazard by PFVC
@@ -685,7 +688,7 @@ fit_channels <- function(population, cohort_now, outcome_key, model) {
 piece_rows <- function(b, V, b_one, se_one, quantity, n_patients, n_deaths) tibble(
   quantity = quantity, piece = c(sub("^ch_", "", CHANNELS), "all four (one beta)"),
   log_ratio = c(unname(b), b_one), se = c(sqrt(diag(V)), se_one), n_patients = n_patients, n_deaths = n_deaths)
-channel_rows <- list(); channel_tests <- list()
+channel_rows <- list(); channel_tests <- list(); channel_vcov <- list()
 for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))) {
   outcome_key <- CHANNEL_OUTCOMES$outcome_key[k]; model <- CHANNEL_OUTCOMES$model[k]
   fits <- map(set_names(COHORTS), ~ fit_channels(population, .x, outcome_key, model))
@@ -693,6 +696,13 @@ for (population in names(POPULATIONS)) for (k in seq_len(nrow(CHANNEL_OUTCOMES))
   ventilated <- fits[["Ventilated"]]; control <- fits[["No support"]]
   difference_b <- ventilated$b - control$b
   difference_V <- ventilated$V + control$V          # independent cohorts
+  # exported so the pool can test the pieces' agreement across sites (it needs the
+  # covariance between pieces, not only their standard errors)
+  channel_vcov[[length(channel_vcov) + 1]] <- as_tibble(as.table(difference_V), .name_repair = "minimal") %>%
+    set_names(c("piece_row", "piece_col", "covariance")) %>%
+    mutate(across(c(piece_row, piece_col), ~ sub("^ch_", "", .x)),
+           population = POPULATIONS[[population]], outcome = CHANNEL_OUTCOMES$outcome[k],
+           quantity = "ventilated minus no support", .before = 1)
   channel_rows[[length(channel_rows) + 1]] <- bind_rows(
     piece_rows(ventilated$b, ventilated$V, ventilated$b_one, ventilated$se_one, "Ventilated",
                ventilated$n_patients, ventilated$n_deaths),
@@ -720,6 +730,7 @@ channel_contrast <- bind_rows(channel_rows) %>%
          site = site_name) %>%
   relocate(population, outcome, ratio_type, quantity, piece)
 channel_tests <- bind_rows(channel_tests) %>% mutate(site = site_name)
+channel_vcov <- bind_rows(channel_vcov) %>% mutate(site = site_name)
 
 # how far the control's standardised estimate extrapolates
 anchor_overlap <- both_cohorts %>% group_by(cohort) %>%
@@ -751,6 +762,7 @@ print(as.data.frame(channel_contrast %>%
 print(as.data.frame(channel_tests %>% mutate(p = signif(p, 3))), row.names = FALSE)
 write_csv(mask_small_counts(channel_contrast), file.path(final_dir, paste0("pfvc_age_control_channels_", site_name, ".csv")))
 write_csv(channel_tests, file.path(final_dir, paste0("pfvc_age_control_channel_tests_", site_name, ".csv")))
+write_csv(channel_vcov, file.path(final_dir, paste0("pfvc_age_control_channel_vcov_", site_name, ".csv")))
 write_csv(mask_small_counts(code_status_counts),
           file.path(final_dir, paste0("pfvc_age_control_code_status_", site_name, ".csv")))
 

@@ -44,6 +44,10 @@
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
 #   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF <= 315)
+#   pfvc_age_control_channels_*, _channel_vcov_*, _contrast_*   the mortality control
+#                          contrast and its GLI channel breakdown (supplement/)
+#   crs_channels_estimates_*, crs_channels_tests_*   the compliance channels and the
+#                          compliance head-to-head (supplement/)
 #   fingerprint_*, fingerprint_did_*   the height fingerprint (28): the rate per log
 #                          unit of PBW/PFVC moved by height within sex, the whole
 #                          ratio's rate it is read against, and the DiD
@@ -75,12 +79,13 @@ if (file.exists(here("utils", "site_anonymization.R"))) {
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F0E442", "#000000")
 
 # read one file family from every site, tagging the site; tolerant of absent files
-read_family <- function(pattern) {
+read_family <- function(pattern, folders = c("", "injury")) {
   map_dfr(sites, function(s) {
-    # a returned final/ is sorted by block; the tables pooled here are in injury/. controls/
-    # is never listed, so a control cohort cannot enter a pool of the ventilated one. The
-    # site folder itself is listed too, for a flat (older) return.
-    fs <- list.files(file.path(root, s, c("", "injury")), pattern = pattern, full.names = TRUE)
+    # a returned final/ is sorted by block; most tables pooled here are in injury/, the
+    # supplement's in supplement/ (folders = c("", "supplement")). controls/ is never
+    # listed, so a control cohort cannot enter a pool of the ventilated one. The site
+    # folder itself is listed too, for a flat (older) return.
+    fs <- list.files(file.path(root, s, folders), pattern = pattern, full.names = TRUE)
     if (!length(fs)) return(NULL)
     map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5) %>%
               mutate(site = s, file = basename(f), .before = 1))
@@ -296,6 +301,96 @@ if (nrow(fp)) {
     pooled$fingerprint_did <- fp_did %>% transmute(site, marker, shared_df, adjustment, estimate = did_estimate, se = did_se) %>%
       pool_by(marker, shared_df, adjustment) %>%
       mutate(scale = "ventilated minus no-support fingerprint rate, log marker per day per log unit of PBW/PFVC")
+}
+
+# --- 9. the supplement's contrasts (2026-09-24): the mortality control contrast and its
+#        channel breakdown (supplement/xsec_pfvc_age_control.R), and the compliance
+#        channels (supplement/xsec_crs_channels.R). Read from each site's supplement/.
+#   channels     each GLI piece per cohort and ventilated minus no support, per log
+#                unit of the piece: the same unit at every site, pooled as it stands.
+#                The pooled test that the pieces' differences agree needs each site's
+#                covariance between pieces (pfvc_age_control_channel_vcov_*), pooled by
+#                multivariate common-effect inverse variance; a site without that table
+#                enters the per-piece pools but not the test, and the test row names the
+#                sites it used.
+#   contrast     per SD of log PFVC in each site's own ventilated cohort; converted to
+#                per 0.1 log units with the site's exported SD, and kept per site SD,
+#                labelled and never pooled with converted rows, where the SD is missing
+#   compliance   Crs exponents (unitless) pooled as they stand; the head-to-head AIC
+#                differences summed across sites (AIC is additive over independent
+#                samples), with the count of sites and how many favoured each side
+SUPPLEMENT <- c("", "supplement")
+equal_test_p <- function(b, V, contrast_matrix) {
+  d <- contrast_matrix %*% b
+  as.numeric(pchisq(t(d) %*% solve(contrast_matrix %*% V %*% t(contrast_matrix)) %*% d,
+                    df = nrow(contrast_matrix), lower.tail = FALSE))
+}
+PIECES <- c("height", "age", "sex", "race")
+
+channels_tbl <- read_family("^pfvc_age_control_channels_.*\\.csv$", SUPPLEMENT)
+if (nrow(channels_tbl)) {
+  pooled$age_control_channels <- channels_tbl %>% filter(!is.na(log_ratio), !is.na(se)) %>%
+    transmute(site, population, outcome, ratio_type, quantity, piece, estimate = log_ratio, se) %>%
+    pool_by(population, outcome, ratio_type, quantity, piece) %>%
+    mutate(ratio_per_0.1 = exp(0.1 * pooled), lo_per_0.1 = exp(0.1 * lo), hi_per_0.1 = exp(0.1 * hi),
+           scale = "log ratio per log unit of the GLI piece; ratio_per_0.1 per 0.1 log units (about 10% of PFVC)")
+  vcov_tbl <- read_family("^pfvc_age_control_channel_vcov_.*\\.csv$", SUPPLEMENT)
+  if (nrow(vcov_tbl)) {
+    differences <- channels_tbl %>% filter(quantity == "ventilated minus no support", piece %in% PIECES)
+    pooled$age_control_channel_tests <- vcov_tbl %>% distinct(population, outcome) %>%
+      pmap_dfr(function(population, outcome) {
+        per_site <- map(unique(vcov_tbl$site), function(s) {
+          b <- differences %>% filter(site == s, .data$population == .env$population, .data$outcome == .env$outcome)
+          V <- vcov_tbl %>% filter(site == s, .data$population == .env$population, .data$outcome == .env$outcome)
+          if (nrow(b) != 4 || nrow(V) != 16 || anyNA(b$log_ratio)) return(NULL)
+          b_vec <- setNames(b$log_ratio, b$piece)[PIECES]
+          V_mat <- matrix(NA_real_, 4, 4, dimnames = list(PIECES, PIECES))
+          V_mat[cbind(V$piece_row, V$piece_col)] <- V$covariance
+          list(site = s, b = b_vec, W = solve(V_mat))
+        }) %>% compact()
+        if (!length(per_site)) return(NULL)
+        W_sum <- Reduce(`+`, map(per_site, "W"))
+        V_pooled <- solve(W_sum)
+        b_pooled <- as.numeric(V_pooled %*% Reduce(`+`, map(per_site, ~ .x$W %*% .x$b)))
+        names(b_pooled) <- PIECES
+        four_equal <- rbind(c(1, -1, 0, 0), c(1, 0, -1, 0), c(1, 0, 0, -1))
+        size_equal <- rbind(c(1, 0, -1, 0), c(1, 0, 0, -1))    # height = sex = race, age left out
+        tibble(population = population, outcome = outcome, k = length(per_site),
+               sites = paste(map_chr(per_site, "site"), collapse = ";"),
+               test = c("the four differences are equal (3 df)", "height = sex = race differences (2 df)"),
+               p = c(equal_test_p(b_pooled, V_pooled, four_equal), equal_test_p(b_pooled, V_pooled, size_equal)))
+      })
+  }
+}
+
+contrast_tbl <- read_family("^pfvc_age_control_contrast_.*\\.csv$", SUPPLEMENT)
+if (nrow(contrast_tbl)) {
+  if (!"ventilated_log_pfvc_sd" %in% names(contrast_tbl)) contrast_tbl$ventilated_log_pfvc_sd <- NA_real_
+  pooled$age_control_contrast <- contrast_tbl %>% filter(!is.na(log_ratio), !is.na(se)) %>%
+    mutate(converted = !is.na(ventilated_log_pfvc_sd) & !grepl("x anchor", quantity),
+           scale_factor = if_else(converted, PER_LOG_PFVC / ventilated_log_pfvc_sd, 1),
+           unit = case_when(grepl("x anchor", quantity) ~ "PFVC x anchor term, per site SD (not harmonised)",
+                            converted ~ paste0("per ", PER_LOG_PFVC, " log PFVC"),
+                            TRUE ~ "per site SD of log PFVC (not harmonised)"),
+           estimate = log_ratio * scale_factor, se = se * scale_factor) %>%
+    select(site, population, outcome, ratio_type, adjustment, severity, quantity, unit, estimate, se) %>%
+    pool_by(population, outcome, ratio_type, adjustment, severity, quantity, unit) %>%
+    mutate(ratio = exp(pooled), ratio_lo = exp(lo), ratio_hi = exp(hi))
+}
+
+crs_tbl <- read_family("^crs_channels_estimates_.*\\.csv$", SUPPLEMENT)
+if (nrow(crs_tbl)) {
+  pooled$crs_channels <- crs_tbl %>% filter(!is.na(estimate), !is.na(se)) %>%
+    select(site, sample, model, term, estimate, se) %>%
+    pool_by(sample, model, term) %>%
+    mutate(scale = "exponent of log Crs (1 = proportional scaling)")
+  crs_tests <- read_family("^crs_channels_tests_.*\\.csv$", SUPPLEMENT)
+  if (nrow(crs_tests)) pooled$crs_channel_aic <- crs_tests %>% filter(grepl("AIC", test)) %>%
+    group_by(sample, test) %>%
+    summarise(k = n(), summed_delta_aic = sum(statistic), sites_below_zero = sum(statistic < 0),
+              sites = paste(site, collapse = ";"), site_delta_aic = paste(round(statistic, 1), collapse = ";"),
+              .groups = "drop") %>%
+    mutate(note = "AIC differences summed across sites (additive over independent samples); below 0 favours the non-PBW exposure")
 }
 
 # --- write
