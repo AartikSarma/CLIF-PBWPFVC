@@ -29,9 +29,13 @@
 #   adjustment each measure alone, and given VT/PBW (beside a 3-df spline of log
 #              VT/PBW, the dose the clinician set: does the measure add anything once
 #              the dose is known?). Given VT/PBW, VT/PFVC carries the PBW/PFVC ratio.
+#              Third, given VT/PBW, sex and race: the structural ratio (VT/PFVC at
+#              age 25) is then mostly height's sex-specific hump.
+#   sign       the linear-in-log form reports each measure's log-odds per log unit
 #   metrics    10-fold cross-validated AUC, Brier score and log loss (out-of-fold
 #              predictions, the same folds for every measure), in-sample AIC, and
-#              the AUC difference from VT/PBW alone with a paired bootstrap interval
+#              the AUC difference from the adjustment's base model (VT/PBW; VT/PBW
+#              with sex and race in the third) with a paired bootstrap interval
 #              (patients resampled, the out-of-fold predictions kept); within each
 #              family, the PBW, PFVC and PFVC-at-age-25 scalings against each other
 # A model that warns stops the script.
@@ -88,7 +92,9 @@ fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
 # Data
 # =============================================================================
 cross_sectional <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
-  select(hospitalization_id, all_of(MEASURES$column), deceased, mortality_event_60)
+  select(hospitalization_id, all_of(MEASURES$column), deceased, mortality_event_60, sex_category, race_category) %>%
+  mutate(sex_category = factor(sex_category, levels = c("Male", "Female")),
+         race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")))
 
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable, so death is simulated
 # independently of every measure (35%), as the other supplement scripts do. The run
@@ -102,7 +108,8 @@ if (grepl("^synthetic_clif", site_name)) {
 # a measure is usable where it is positive and finite (every one is logged)
 usable <- cross_sectional %>%
   mutate(across(all_of(MEASURES$column), ~ if_else(is.finite(.x) & .x > 0, .x, NA_real_)))
-common_ids <- usable %>% filter(if_all(all_of(MEASURES$column), ~ !is.na(.x))) %>% pull(hospitalization_id)
+common_ids <- usable %>% filter(if_all(all_of(MEASURES$column), ~ !is.na(.x)), !is.na(sex_category), !is.na(race_category)) %>%
+  pull(hospitalization_id)
 message(sprintf("=== xsec_mortality_prediction, %s: %d patients; %d with every measure (the common sample) ===",
                 site_name, nrow(usable), length(common_ids)))
 print(as.data.frame(tibble(measure = MEASURES$label,
@@ -137,8 +144,15 @@ cross_validated <- function(dat, folds, rhs) {
 # difference from it is the measure's gain over the dose. Given VT/PBW, log VT/PFVC =
 # log VT/PBW + log PBW/PFVC, so VT/PFVC carries the PBW/PFVC ratio and its age-25
 # version the ratio's structural part.
-ADJUSTMENTS <- c(alone = "", given_vtpbw = " + ns(log_vtpbw, 3)")
-ADJUSTMENT_LABELS <- c(alone = "alone", given_vtpbw = "given VT/PBW")
+# A third adjustment adds sex and race to the second (2026-09-23): given VT/PBW, the
+# structural ratio (VT/PFVC at age 25) is sex, race and height's small sex-specific
+# hump, and sex and race predict death through routes other than the ventilator. Its
+# base model is VT/PBW with sex and race, and every row's difference is from that base.
+ADJUSTMENTS <- c(alone = "", given_vtpbw = " + ns(log_vtpbw, 3)",
+                 given_vtpbw_sex_race = " + ns(log_vtpbw, 3) + sex_category + race_category")
+# what the VT/PBW row carries in each adjustment: it is the base model
+BASE_EXTRA <- c(alone = "", given_vtpbw = "", given_vtpbw_sex_race = " + sex_category + race_category")
+ADJUSTMENT_LABELS <- c(alone = "alone", given_vtpbw = "given VT/PBW", given_vtpbw_sex_race = "given VT/PBW, sex and race")
 # the three size scalings within each family, compared pairwise on the common sample
 FAMILY_TRIPLETS <- list(dose = c("vtpbw", "vtpfvc", "vtpfvc_age25"),
                         elastance = c("ers_pbw", "ers_pfvc", "ers_pfvc_age25"),
@@ -151,20 +165,28 @@ evaluate_sample <- function(sample_label, ids_for) {
       map_dfr(names(ADJUSTMENTS), function(adjustment) {
         per_measure <- map(MEASURES$column, function(measure) {
           dat <- usable %>% filter(hospitalization_id %in% ids_for(measure), !is.na(.data[[outcome]]), !is.na(vtpbw)) %>%
-            transmute(hospitalization_id, y = .data[[outcome]], log_x = log(.data[[measure]]), log_vtpbw = log(vtpbw))
+            transmute(hospitalization_id, y = .data[[outcome]], log_x = log(.data[[measure]]), log_vtpbw = log(vtpbw),
+                      sex_category, race_category) %>%
+            filter(!is.na(sex_category), !is.na(race_category))
           if (sum(dat$y == 1) < MIN_DEATHS || sum(dat$y == 0) < MIN_DEATHS) return(NULL)
           # VT/PBW given VT/PBW is VT/PBW alone: the base model
-          rhs <- paste0(FORMS[[form]], if (measure != "vtpbw") ADJUSTMENTS[[adjustment]] else "")
+          # VT/PBW in each adjustment is that adjustment's base model
+          rhs <- paste0(FORMS[[form]], if (measure != "vtpbw") ADJUSTMENTS[[adjustment]] else BASE_EXTRA[[adjustment]])
           folds <- sample(rep_len(seq_len(N_FOLDS), nrow(dat)))
           predicted <- cross_validated(dat, folds, rhs)
           full_fit <- fit_strict(glm(as.formula(paste("y ~", rhs)), family = binomial, data = dat))
-          list(ids = dat$hospitalization_id, y = dat$y, predicted = predicted, aic = AIC(full_fit))
+          # the sign: log-odds per log unit of the measure, in the linear-in-log form
+          slope <- if (form == "linear") coef(full_fit)[["log_x"]] else NA_real_
+          slope_se <- if (form == "linear") sqrt(vcov(full_fit)["log_x", "log_x"]) else NA_real_
+          list(ids = dat$hospitalization_id, y = dat$y, predicted = predicted, aic = AIC(full_fit),
+               slope = slope, slope_se = slope_se)
         }) %>% set_names(MEASURES$column)
         present <- compact(per_measure)
         rows_here <- imap_dfr(present, function(m, measure) tibble(
           measure = measure, n_patients = length(m$y), n_deaths = sum(m$y == 1),
           auc = auc_of(m$y, m$predicted), brier = mean((m$predicted - m$y)^2),
-          log_loss = log_loss_of(m$y, m$predicted), aic = m$aic))
+          log_loss = log_loss_of(m$y, m$predicted), aic = m$aic,
+          log_or_per_log_unit = m$slope, log_or_se = m$slope_se))
         # paired bootstrap: on the common sample every measure holds the same patients in
         # the same order, so one resample of rows serves all twelve
         if (sample_label == "common" && !is.null(present$vtpbw)) {
@@ -215,7 +237,7 @@ pairwise <- common_results$pairwise %>%
 
 for (adjustment_label in ADJUSTMENT_LABELS) {
   message("\nCross-validated AUC on the common sample, spline form, ", adjustment_label,
-          " (difference from VT/PBW alone, with a paired bootstrap interval):")
+          " (difference from the base model, with a paired bootstrap interval):")
   print(as.data.frame(results %>% filter(startsWith(sample, "common"), form == "spline", adjustment == adjustment_label) %>%
                         arrange(outcome, desc(auc)) %>%
                         select(outcome, label, auc, auc_lo, auc_hi, delta_auc_vs_vtpbw, delta_auc_lo, delta_auc_hi,
@@ -225,6 +247,11 @@ for (adjustment_label in ADJUSTMENT_LABELS) {
 message("\nWithin each family, the size scalings against each other (spline form, AUC difference, paired bootstrap):")
 print(as.data.frame(pairwise %>% filter(form == "spline") %>%
                       select(outcome, adjustment, contrast, delta_auc, lo, hi) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+message("\nThe sign of the dose measures (linear in log, log-odds per log unit; positive = higher value, more death):")
+print(as.data.frame(results %>% filter(startsWith(sample, "common"), form == "linear", family == "dose") %>%
+                      transmute(outcome, adjustment, label, log_or_per_log_unit, lo = log_or_per_log_unit - 1.96 * log_or_se,
+                                hi = log_or_per_log_unit + 1.96 * log_or_se) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 write_csv(mask_small_counts(results), file.path(final_dir, paste0("mortality_prediction_", site_name, ".csv")))
 write_csv(pairwise, file.path(final_dir, paste0("mortality_prediction_pairwise_", site_name, ".csv")))
@@ -239,7 +266,7 @@ auc_panel <- ggplot(figure_rows, aes(auc, label, colour = family)) +
   geom_pointrange(aes(xmin = auc_lo, xmax = auc_hi)) +
   facet_wrap(~ adjustment) +
   scale_colour_manual(values = FAMILY_COLOURS, name = NULL) +
-  labs(title = "Cross-validated AUC for in-hospital death, each measure alone and given VT/PBW",
+  labs(title = "Cross-validated AUC for in-hospital death: each measure alone, given VT/PBW, and given VT/PBW, sex and race",
        subtitle = sprintf("3-df spline of the log measure (and of log VT/PBW); %d-fold cross-validation; the same patients for every measure", N_FOLDS),
        x = "AUC (95% bootstrap interval)", y = NULL) +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
@@ -248,8 +275,9 @@ delta_panel <- ggplot(figure_rows, aes(delta_auc_vs_vtpbw, label, colour = famil
   geom_pointrange(aes(xmin = delta_auc_lo, xmax = delta_auc_hi)) +
   facet_wrap(~ adjustment) +
   scale_colour_manual(values = FAMILY_COLOURS, guide = "none") +
-  labs(title = "Difference from VT/PBW alone", x = "AUC minus the AUC of VT/PBW alone (paired bootstrap)", y = NULL) +
+  labs(title = "Difference from the base model (VT/PBW; with sex and race in the third panel)",
+       x = "AUC minus the base model's AUC (paired bootstrap)", y = NULL) +
   theme_minimal(base_size = 10)
 ggsave(file.path(final_dir, paste0("mortality_prediction_", site_name, ".pdf")),
-       patchwork::wrap_plots(auc_panel, delta_panel, ncol = 1), width = 11, height = 10)
+       patchwork::wrap_plots(auc_panel, delta_panel, ncol = 1), width = 14, height = 10)
 message("xsec_mortality_prediction complete -> ", final_dir)
