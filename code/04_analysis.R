@@ -54,8 +54,8 @@ cross_sectional <- cross_sectional %>%
 
 # The whole cohort, one row per characteristic (continuous: median and quartiles) or
 # per level (categorical: count and percent). The pooled Table 1 is the cohort by
-# site, so the table is not stratified; a level of 1-9 patients is blanked with its
-# percent (mask_small_counts, utils/config.R).
+# site, so the table is not stratified. Small cells are not masked yet: a
+# deterministic masking step will be applied once the outputs are locked.
 TABLE1_CONTINUOUS <- c(age_at_admission = "Age (years)", height_cm = "Height (cm)",
                        pbw = "PBW (kg)", pfvc = "PFVC (L)", pbwpfvc = "PBW/PFVC (kg/L)",
                        vtpbw = "VT/PBW (mL/kg)", vtpfvc = "VT/PFVC (%)",
@@ -77,17 +77,9 @@ table1_categorical <- imap_dfr(TABLE1_CATEGORICAL, function(label, v) {
     transmute(characteristic = label, level, n_patients, percent = 100 * n_patients / n_cohort,
               median = NA_real_, q1 = NA_real_, q3 = NA_real_)
 })
-# complementary suppression: the levels of a characteristic sum to the cohort, so a
-# single blanked level could be recovered by subtraction; the next-smallest is blanked too
-table1_categorical <- table1_categorical %>% mask_small_counts() %>%
-  group_by(characteristic) %>%
-  mutate(n_patients = if (sum(is.na(n_patients)) == 1)
-           replace(n_patients, which(n_patients == min(n_patients, na.rm = TRUE))[1], NA) else n_patients) %>%
-  ungroup()
 table1_long <- bind_rows(tibble(characteristic = "Patients", level = NA_character_, n_patients = n_cohort),
                          table1_continuous, table1_categorical) %>%
-  mask_small_counts() %>%
-  mutate(percent = if_else(is.na(n_patients), NA_real_, percent), site = site_name, .before = 1)
+  mutate(site = site_name, .before = 1)
 write_csv(table1_long, file.path(final_dir, paste0("table1_", site_name, ".csv")))
 message("Table 1 written (", n_cohort, " patients)")
 
@@ -1189,5 +1181,63 @@ if (sz_ok) {
 } else {
   message("4k skipped: no outcome with >= 10 events, or fewer than 100 complete rows in the analytic cohort")
 }
+
+# =============================================================================
+# 4l. Figure 2: the strain the protocol delivers inside the band
+# =============================================================================
+# VT/PFVC (% of predicted FVC) = VT/PBW (mL/kg) x PBW/PFVC (kg/L) / 10, so in logs the
+# delivered strain is the clinician's dose plus the label's mis-sizing:
+#   log VT/PFVC = log VT/PBW + log PBW/PFVC - log 10
+#   Var(log VT/PFVC) = Var(log VT/PBW) + Var(log PBW/PFVC) + 2 Cov
+# (A) the distribution of VT/PFVC inside the 6-8 mL/kg band, by sex, race, age band
+#     and height band, as histograms on fixed 0.5-point bins (tails clamped into the
+#     edge bins) so they sum across sites; the 11% line (ARMA's low-VT arm near its
+#     75th percentile) is drawn centrally.
+# (B) the variance decomposition, exported as moments (n, means, variances,
+#     covariance) so the pooled decomposition is exact: pooled variance is the
+#     within-site variance plus the spread of the site means.
+VTPFVC_BIN_EDGES <- seq(4, 25, by = 0.5)
+dose_band <- cross_sectional %>%
+  filter(vtpbw > 0, pbwpfvc > 0, vtpfvc > 0) %>%
+  mutate(l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_vtpfvc = log(vtpfvc))
+stopifnot(max(abs(dose_band$l_vtpfvc - (dose_band$l_vtpbw + dose_band$l_ratio - log(10)))) < 1e-6)
+dose_groups <- bind_rows(
+  dose_band %>% transmute(group_type = "overall", group_value = "all", value = vtpfvc),
+  dose_band %>% transmute(group_type = "sex", group_value = as.character(sex_category), value = vtpfvc),
+  dose_band %>% transmute(group_type = "race", group_value = as.character(race_category), value = vtpfvc),
+  dose_band %>% transmute(group_type = "age_bin",
+                          group_value = as.character(cut(age_at_admission, c(18, 40, 50, 60, 70, 80, Inf), right = FALSE)),
+                          value = vtpfvc),
+  dose_band %>% transmute(group_type = "height_bin",
+                          group_value = as.character(cut(height_cm, c(150, 160, 170, 180, 190, 210), right = FALSE)),
+                          value = vtpfvc)) %>%
+  filter(!is.na(group_value))
+dose_histograms <- dose_groups %>%
+  mutate(value = pmin(pmax(value, min(VTPFVC_BIN_EDGES)), max(VTPFVC_BIN_EDGES) - 1e-9),
+         bin_i = findInterval(value, VTPFVC_BIN_EDGES, rightmost.closed = TRUE)) %>%
+  count(group_type, group_value, bin_i, name = "count") %>%
+  transmute(site = site_name, group_type, group_value, bin_left = VTPFVC_BIN_EDGES[bin_i],
+            bin_right = VTPFVC_BIN_EDGES[bin_i + 1], count)
+write_csv(dose_histograms, file.path(final_dir, paste0("dose_vtpfvc_histograms_", site_name, ".csv")))
+
+dose_moments <- function(d, group_type, group_value) tibble(
+  group_type = group_type, group_value = group_value, n = nrow(d),
+  mean_log_vtpbw = mean(d$l_vtpbw), mean_log_ratio = mean(d$l_ratio),
+  var_log_vtpbw = var(d$l_vtpbw), var_log_ratio = var(d$l_ratio), cov_log_vtpbw_ratio = cov(d$l_vtpbw, d$l_ratio))
+dose_decomposition <- bind_rows(
+  dose_moments(dose_band, "overall", "all"),
+  map_dfr(c("sex_category", "race_category"), function(g)
+    map_dfr(sort(unique(as.character(dose_band[[g]]))), function(v)
+      dose_moments(dose_band[as.character(dose_band[[g]]) == v, ], sub("_category$", "", g), v)))) %>%
+  mutate(var_log_vtpfvc = var_log_vtpbw + var_log_ratio + 2 * cov_log_vtpbw_ratio,
+         share_clinician = var_log_vtpbw / var_log_vtpfvc,
+         share_missizing = var_log_ratio / var_log_vtpfvc,
+         share_covariance = 2 * cov_log_vtpbw_ratio / var_log_vtpfvc,
+         site = site_name, .before = 1)
+write_csv(dose_decomposition, file.path(final_dir, paste0("dose_variance_decomposition_", site_name, ".csv")))
+with(dose_decomposition %>% filter(group_type == "overall"),
+     message(sprintf("4l: VT/PFVC variance inside the band: %.0f%% mis-sizing, %.0f%% clinician, %.0f%% covariance (n = %d)",
+                     100 * share_missizing, 100 * share_clinician, 100 * share_covariance, n)))
+
 message("All outputs saved to: ", final_dir)
 message("Script 04 complete.")

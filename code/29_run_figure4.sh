@@ -8,7 +8,9 @@
 #
 #   markers   platelets, bilirubin, creatinine (dialysis, continuous or intermittent,
 #             as a third competing cause; ESRD censored at day 0), vasopressor dose on
-#             pressor days, oxygen saturation index
+#             pressor days, oxygen saturation index, and the SF ratio (panel C, the
+#             positive control for mechanics: a larger VT/PFVC recruits lung, so SF
+#             should be better early in the smaller predicted lung, then reverse)
 #   arms      ventilated, all patients           (panels A, B and C)
 #             no respiratory support             (panel B, the negative control): every
 #                                                patient, the divergence read at the
@@ -37,8 +39,6 @@
 #   6 figure    27_control_comparison.R (with the difference-in-differences), then
 #               24_biotrauma_figures.R: figure 4 and the checks figure
 #               (biotrauma_fig_checks_*: the DiD)
-#   7 VT/PFVC   the companion: every marker against VT/PFVC at the same VT/PBW, creatinine
-#               with dialysis as a third cause (VTPFVC_MARKERS; empty skips), tagged vtpfvc
 # Fits already on disk with the same chain settings are reused, so a rerun after a
 # failure costs only what failed. A failed step is reported and the run continues.
 #
@@ -49,7 +49,8 @@
 # Usage (from anywhere; the script moves to the repo root):
 #   caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 #   bash code/29_run_figure4.sh --dry-run
-# Site default (2026-09-21): 18 figure-4 fits plus 10 VT/PFVC fits, at 2000 / 500 iterations, four at a time. At
+# Site default (2026-09-24): 22 figure-4 fits (5 markers, creatinine, 3 control markers, control
+# creatinine and the hypoxemic control, each adjusted and unadjusted) at 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
 # hazard blocks did not converge at any length tried.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
@@ -58,17 +59,19 @@
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
 #   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, platelets by default, creatinine not fitted there; empty skips it),
-#   VTPFVC_MARKERS, FORCE_BUILD, FORCE_PANEL.
+#   FORCE_BUILD, FORCE_PANEL. The VT/PFVC companion (form vtpfvc) was dropped on
+#   2026-09-24: at a fixed VT/PBW, VT/PFVC moves only with PBW/PFVC, whose variance
+#   after age, sex and race is a few percent (Claim 5a), so the companion re-reads the
+#   pfvc form on a scale the data cannot identify. 22-24 still accept the form.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-MARKERS=${MARKERS:-osi,pressor_dose,platelets,bilirubin}   # creatinine runs on its own, with RRT as a third cause
+MARKERS=${MARKERS:-osi,sf,pressor_dose,platelets,bilirubin}   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS=${CONTROL_MARKERS:-pressor_dose,platelets,bilirubin}
 HYPOXEMIC_CONTROL_MARKERS=${HYPOXEMIC_CONTROL_MARKERS-platelets}   # the hypoxemic control arm; set empty to skip
 CREATININE=${CREATININE:-1}
-VTPFVC_MARKERS=${VTPFVC_MARKERS-$MARKERS}   # the VT/PFVC companion (step 7): every marker; set empty to skip
 SF_BANDS=${SF_BANDS:-}                   # e.g. "235,315 115,235 0,115"; off by default
 ITER=${ITER:-2000}; BURNIN=${BURNIN:-500}; CHAINS=${CHAINS:-3}; THIN=${THIN:-5}; PAR=${PAR:-4}
 FORCE_BUILD=${FORCE_BUILD:-0}
@@ -190,27 +193,10 @@ if [[ -n "$SEV_CENTER" && -n "$HYPOXEMIC_CONTROL_MARKERS" ]]; then
 fi
 
 # ---- 6 comparison table and the figure
-FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi"
+FIG_MARKERS="platelets,bilirubin$([[ $CREATININE == 1 ]] && echo ",creatinine"),pressor_dose,osi,sf"
 run_step comparison with_cohort imv Rscript code/27_control_comparison.R
 run_step figure with_cohort imv env PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_MARKERS="$FIG_MARKERS" \
   Rscript code/24_biotrauma_figures.R
-
-# ---- 7 companion: the same question told the reader's way round (22_biotrauma_fit.R,
-#      form vtpfvc): at the same mean VT/PBW, does a patient receiving more VT/PFVC (percent
-#      of predicted FVC, patient mean, centred) diverge? Ventilated only (the controls and the
-#      control has no tidal volume, so there is no VT/PFVC DiD), after
-#      figure 4 so it cannot delay it; tagged vtpfvc. Creatinine is fitted as in figure 4, with
-#      dialysis as a third competing cause. VTPFVC_MARKERS="" skips the step.
-if [[ -n "$VTPFVC_MARKERS" && " ${FAILED[*]-} " != *" panel_imv "* ]]; then
-  run_step vtpfvc_fit    with_cohort imv env PBWPFVC_JM_MODIFIER=vtpfvc PBWPFVC_JM_MARKERS="$VTPFVC_MARKERS" Rscript code/22_biotrauma_fit.R
-  run_step vtpfvc_report with_cohort imv env PBWPFVC_JM_MODIFIER=vtpfvc PBWPFVC_JM_MARKERS="$VTPFVC_MARKERS" Rscript code/23_biotrauma_report.R
-  if [[ $CREATININE == 1 ]]; then
-    run_step vtpfvc_creatinine_fit    with_cohort imv env PBWPFVC_JM_MODIFIER=vtpfvc PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 Rscript code/22_biotrauma_fit.R
-    run_step vtpfvc_creatinine_report with_cohort imv env PBWPFVC_JM_MODIFIER=vtpfvc PBWPFVC_JM_MARKERS=creatinine PBWPFVC_JM_RRT_EVENT=1 Rscript code/23_biotrauma_report.R
-  fi
-  run_step vtpfvc_figure with_cohort imv env PBWPFVC_JM_MODIFIER=vtpfvc PBWPFVC_JM_WITH_RRT=1 PBWPFVC_FIG_CONTROLS_DIR="" \
-    PBWPFVC_FIG_MARKERS="$VTPFVC_MARKERS$([[ $CREATININE == 1 ]] && echo ",creatinine")" Rscript code/24_biotrauma_figures.R
-fi
 
 if [[ $DRY == 0 ]]; then
   echo

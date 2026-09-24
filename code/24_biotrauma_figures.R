@@ -42,7 +42,7 @@ theme_set(theme_minimal(base_size = 11))
 worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
            ne_equiv_peak = "higher", pressor_dose = "higher", ne_equiv = "higher", any_pressor = "higher",
            osi = "higher", oi = "higher")
-lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio",
+lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio\n(positive control:\nrecruitment, not injury)",
          dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents per kg,\nzero days included)",
          pressor_dose = "Vasopressor dose\n(NE-equivalents per kg,\ndays on a pressor)", ne_equiv = "NE-equivalents",
          any_pressor = "Any vasopressor (log-odds)",

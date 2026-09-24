@@ -19,25 +19,26 @@ to change; that stops once sites have returned `final/` folders.
 | `01_cohort_identification.R` | prep | Filters the CLIF tables to the eligible cohort (ventilated, or a control cohort under `PBWPFVC_COHORT`) | |
 | `02_quality_checks.R` | prep | Outlier thresholds and QC summaries | nothing in `final/`; its summaries stay in `intermediate/summary_stats/` |
 | `03_variable_derivation.R` | prep | PBW, PFVC, SOFA, SF and PF ratios, tidal-volume metrics | `attrition_log_`, `dist_` |
-| `04_analysis.R` | figures 1–3, tables 1–2 | Demographic bias of PBW, mechanics, mortality regressions and survival (log PFVC the primary size term), negative controls, E-values | `table1_`, `regression_results_long_`, `aic_comparison_all_`, `evalues_`, `consort_diagram_`, `negative_control_`, `size_` |
+| `04_analysis.R` | figures 1–3, tables 1–2 | Demographic bias of PBW, mechanics, mortality regressions and survival (log PFVC the primary size term), negative controls, E-values, and figure 2's delivered-strain distribution and variance decomposition | `table1_`, `regression_results_long_`, `aic_comparison_all_`, `evalues_`, `consort_diagram_`, `negative_control_`, `size_`, `dose_` (figure 2) |
 | `05_normalization_analysis.R` | figure 3, supplement | PBW versus PFVC normalization of elastance and mechanical power: discordance, tertile reclassification, prognostic fit | `norm_discordance_`, `norm_prognostic_` |
-| `10_panel_common.R` | figure 4 | The daily patient-day panel. Sourced by 21 and 25, never run; writes nothing | |
+| `10_panel_common.R` | figure 4 | The daily patient-day panel. Sourced by 21, never run; writes nothing | |
 | `20_biotrauma_grid.R` | figure 4 | Time grid and the cohort-restriction knobs shared by 21–27. Sourced | |
 | `21_biotrauma_panel.R` | figure 4 | Longitudinal and survival tables for the joint models | `jm_panel_summary_` |
 | `22_biotrauma_fit.R` | figure 4 | One joint model per organ-injury marker | `jm_manifest_`, `jm_estimates_`, `jm_scale_`, `jm_severity_anchor_` |
 | `23_biotrauma_report.R` | figure 4 | Level contrasts by horizon, marker movement, hazard associations | `jm_level_contrast_`, `jm_movement_`, `jm_association_hr_` |
 | `24_biotrauma_figures.R` | figure 4 | Figure 4 and its DiD check, from the aggregate tables only | `biotrauma_fig_main_`, `biotrauma_fig_checks_` |
-| `25_injury_at_horizon.R` | figure 4, robustness | Fixed-horizon comparator among survivors: what the joint model is compared against | `injury_` |
-| `26_quick_lme.R` | figure 4, robustness | The longitudinal submodel alone, without the death correction | `quick_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control, and minus the control hypoxemic on the index day) | `jm_control_comparison_`, `jm_control_did_`, `jm_hypoxemic_control_did_` |
 | `28_height_fingerprint.R` | Claim 5c.2 | The height fingerprint: at a fixed VT/PBW, does the marker follow the ratio's sex-reversed height curve beyond a height function the sexes share? Platelets by default, on the 7-day panel; run for the no-support control first to get the DiD | `fingerprint_`, `fingerprint_ladder_`, `fingerprint_curves_`, `fingerprint_did_` |
-| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity | |
-| `29_run_biotrauma.sh` | figure 4, robustness | Runner for the 48-hour fits and the comparators 25 and 26; not in the pipeline | |
+| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control | |
 
 ## Folders
 
 - `pooling/` holds the coordinator's cross-site pooling. It is never run at a site.
-  `pooled_biotrauma.R` is tracked; `pooled_estimates.R` is kept local and gitignored.
+  `pooled_biotrauma.R` and `pooled_displays.R` are tracked; `pooled_estimates.R` is kept
+  local and gitignored. `pooled_displays.R` draws figure 1C and the ratio's height
+  channel from the GLI and Devine formulas alone, figure 2 from each site's `dose_`
+  tables (the variance decomposition pooled exactly from site moments), and figure 3C's
+  worked example from each site's `crs_channels_estimates_`.
   Figure 4's estimates pool per 0.1 log units of PFVC, converted from each site's own
   SD with that site's `jm_scale_{h}_{site}.csv`, by common-effect inverse variance
   (two or three sites cannot support a random-effects variance), gated at rhat <= 1.1:
@@ -65,7 +66,8 @@ to change; that stops once sites have returned `final/` folders.
   `xsec_crs_channels.R` asks whether measured compliance scales like predicted FVC,
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
-  height elasticity of Crs by sex beside GLI's and Devine's.
+  height elasticity of Crs by sex beside GLI's and Devine's, and figure 3C's worked
+  example (a Black woman of 160 cm against a white man of 180 cm, both 60).
   `xsec_mortality_prediction.R` asks which dose or mechanics measure, alone and without
   covariates, predicts death best: VT/PBW, VT/PFVC, VT/PFVC at age 25, Ers scaled by
   each, mechanical power raw and scaled by Crs, PBW, PFVC and PFVC at age 25, and driving
@@ -100,6 +102,12 @@ its aggregates to `final/controls/`, whatever the block, inside the site's one o
 folder, and tags the file names `<site>_<cohort>`.
 
 ## What was removed, and how to get it back
+
+On 2026-09-24 the 48-hour runs went: `25_injury_at_horizon.R`, `26_quick_lme.R` and
+`29_run_biotrauma.sh` (the fixed-horizon comparator, the longitudinal submodel alone
+and their runner), with their pooling blocks. So did the VT/PFVC companion fits of
+figure 4 (22-24 still accept the `vtpfvc` form). Bring them back from the commit
+before their removal with `git log --diff-filter=D -- code/25_injury_at_horizon.R`.
 
 On 2026-09-19 the repository was pruned to the scripts above. Figure 5 (causal
 inference) is not in the paper yet, so the target trial emulation and the preference
