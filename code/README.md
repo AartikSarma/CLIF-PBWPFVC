@@ -29,7 +29,7 @@ to change; that stops once sites have returned `final/` folders.
 | `24_biotrauma_figures.R` | figure 4 | Figure 4 and its DiD check, from the aggregate tables only | `biotrauma_fig_main_`, `biotrauma_fig_checks_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control, and minus the control hypoxemic on the index day) | `jm_control_comparison_`, `jm_control_did_`, `jm_hypoxemic_control_did_` |
 | `28_height_fingerprint.R` | Claim 5c.2 | The height fingerprint: at a fixed VT/PBW, does the marker follow the ratio's sex-reversed height curve beyond a height function the sexes share? Platelets by default, on the 7-day panel; run for the no-support control first to get the DiD | `fingerprint_`, `fingerprint_ladder_`, `fingerprint_curves_`, `fingerprint_did_` |
-| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control, and the channel breakdown (supplement) | |
+| `29_run_figure4.R` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control, and the channel breakdown (supplement) | |
 
 ## Folders
 
@@ -75,8 +75,7 @@ to change; that stops once sites have returned `final/` folders.
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
   where kidney injury is expected (by ESRD, dialysis procedures and pressor dose; aggregates
-  only), and the two `migrate_*.sh` helpers move outputs written
-  under older folder layouts. Delete the helpers once every site folder is migrated.
+  only).
 - `archive/` is gitignored local scratch.
 
 Every file each script writes to `final/`, its reader and the claim it supports are

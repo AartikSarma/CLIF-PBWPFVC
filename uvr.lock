@@ -140,20 +140,6 @@ url = "https://cran.r-project.org/src/contrib/S7_0.2.2.tar.gz"
 checksum = "md5:6a40d3eae470be0f06a03737b9391269"
 
 [[package]]
-name = "V8"
-version = "8.2.0"
-source = "cran"
-raw_version = "8.2.0"
-url = "https://cran.r-project.org/src/contrib/V8_8.2.0.tar.gz"
-checksum = "md5:c8d926eb2f59ebe63debc864fa6a5096"
-requires = [
-    "Rcpp",
-    "jsonlite",
-    "curl",
-    "Rcpp",
-]
-
-[[package]]
 name = "abind"
 version = "1.4.8"
 source = "cran"
@@ -214,14 +200,6 @@ url = "https://cran.r-project.org/src/contrib/base64enc_0.1-6.tar.gz"
 checksum = "md5:2c4ecc969451a673ee05eb2e725fcbaf"
 
 [[package]]
-name = "bigD"
-version = "0.3.1"
-source = "cran"
-raw_version = "0.3.1"
-url = "https://cran.r-project.org/src/contrib/bigD_0.3.1.tar.gz"
-checksum = "md5:6c26ee252cb28371682705cb237a4066"
-
-[[package]]
 name = "bit"
 version = "4.6.0"
 source = "cran"
@@ -237,14 +215,6 @@ raw_version = "4.8.6"
 url = "https://cran.r-project.org/src/contrib/bit64_4.8.6.tar.gz"
 checksum = "md5:8c4fb59f92ce6b09ecdc8e0f7a186504"
 requires = ["bit"]
-
-[[package]]
-name = "bitops"
-version = "1.1.0"
-source = "cran"
-raw_version = "1.1-0"
-url = "https://cran.r-project.org/src/contrib/bitops_1.1-0.tar.gz"
-checksum = "md5:6e2f8d461c60c5187313a4bce28dbf39"
 
 [[package]]
 name = "blob"
@@ -334,43 +304,6 @@ requires = [
 ]
 
 [[package]]
-name = "cards"
-version = "0.9.0"
-source = "cran"
-raw_version = "0.9.0"
-url = "https://cran.r-project.org/src/contrib/cards_0.9.0.tar.gz"
-checksum = "md5:9b380b8462d6cd62e030467464528bdd"
-requires = [
-    "cli",
-    "dplyr",
-    "glue",
-    "lifecycle",
-    "pillar",
-    "rlang",
-    "tibble",
-    "tidyr",
-    "tidyselect",
-    "vctrs",
-]
-
-[[package]]
-name = "cardx"
-version = "0.3.4"
-source = "cran"
-raw_version = "0.3.4"
-url = "https://cran.r-project.org/src/contrib/cardx_0.3.4.tar.gz"
-checksum = "md5:ea53317978d7acd59f39280826e77c54"
-requires = [
-    "cards",
-    "cli",
-    "dplyr",
-    "glue",
-    "lifecycle",
-    "rlang",
-    "tidyr",
-]
-
-[[package]]
 name = "cellranger"
 version = "1.1.0"
 source = "cran"
@@ -418,14 +351,6 @@ requires = [
     "Rcpp",
     "Rcpp",
 ]
-
-[[package]]
-name = "commonmark"
-version = "2.0.0"
-source = "cran"
-raw_version = "2.0.0"
-url = "https://cran.r-project.org/src/contrib/commonmark_2.0.0.tar.gz"
-checksum = "md5:ac18da7841af62e8c457dd4872cce1ba"
 
 [[package]]
 name = "conflicted"
@@ -747,36 +672,6 @@ checksum = "md5:36945ab8dce4ece13c0b245541bd4785"
 requires = ["gtable"]
 
 [[package]]
-name = "gt"
-version = "1.3.0"
-source = "cran"
-raw_version = "1.3.0"
-url = "https://cran.r-project.org/src/contrib/gt_1.3.0.tar.gz"
-checksum = "md5:81c2eb281461bb8423faaca8dbd1b640"
-requires = [
-    "base64enc",
-    "bigD",
-    "bitops",
-    "cli",
-    "commonmark",
-    "dplyr",
-    "fs",
-    "glue",
-    "htmltools",
-    "htmlwidgets",
-    "juicyjuice",
-    "magrittr",
-    "markdown",
-    "reactable",
-    "rlang",
-    "sass",
-    "scales",
-    "tidyselect",
-    "vctrs",
-    "xml2",
-]
-
-[[package]]
 name = "gtable"
 version = "0.3.6"
 source = "cran"
@@ -788,26 +683,6 @@ requires = [
     "glue",
     "lifecycle",
     "rlang",
-]
-
-[[package]]
-name = "gtsummary"
-version = "2.6.1"
-source = "cran"
-raw_version = "2.6.1"
-url = "https://cran.r-project.org/src/contrib/gtsummary_2.6.1.tar.gz"
-checksum = "md5:5c2234b3f554a369d9b2a600be9b6ff6"
-requires = [
-    "cards",
-    "cardx",
-    "cli",
-    "dplyr",
-    "glue",
-    "gt",
-    "lifecycle",
-    "rlang",
-    "tidyr",
-    "vctrs",
 ]
 
 [[package]]
@@ -878,21 +753,6 @@ requires = [
 ]
 
 [[package]]
-name = "htmlwidgets"
-version = "1.6.4"
-source = "cran"
-raw_version = "1.6.4"
-url = "https://cran.r-project.org/src/contrib/htmlwidgets_1.6.4.tar.gz"
-checksum = "md5:e1ea7f9774ad7a79fcf31e52c2074fd1"
-requires = [
-    "htmltools",
-    "jsonlite",
-    "knitr",
-    "rmarkdown",
-    "yaml",
-]
-
-[[package]]
 name = "httr"
 version = "1.4.9"
 source = "cran"
@@ -950,15 +810,6 @@ url = "https://cran.r-project.org/src/contrib/jsonlite_2.0.0.tar.gz"
 checksum = "md5:3e54e6fbc0c9063936e3d01e91419c14"
 
 [[package]]
-name = "juicyjuice"
-version = "0.1.0"
-source = "cran"
-raw_version = "0.1.0"
-url = "https://cran.r-project.org/src/contrib/juicyjuice_0.1.0.tar.gz"
-checksum = "md5:bf3db84d36b3734e9c323eb0e9b0b4a3"
-requires = ["V8"]
-
-[[package]]
 name = "knitr"
 version = "1.52.0"
 source = "cran"
@@ -1001,18 +852,6 @@ requires = [
 ]
 
 [[package]]
-name = "litedown"
-version = "0.11.0"
-source = "cran"
-raw_version = "0.11"
-url = "https://cran.r-project.org/src/contrib/litedown_0.11.tar.gz"
-checksum = "md5:f1faa1676570c7c4a4dad09b4d0986e9"
-requires = [
-    "commonmark",
-    "xfun",
-]
-
-[[package]]
 name = "lubridate"
 version = "1.9.5"
 source = "cran"
@@ -1031,18 +870,6 @@ source = "cran"
 raw_version = "2.0.5"
 url = "https://cran.r-project.org/src/contrib/magrittr_2.0.5.tar.gz"
 checksum = "md5:4ee23a88bc1589527696d777d7e68dfc"
-
-[[package]]
-name = "markdown"
-version = "2.0.0"
-source = "cran"
-raw_version = "2.0"
-url = "https://cran.r-project.org/src/contrib/markdown_2.0.tar.gz"
-checksum = "md5:c282c06e61ae9df4fe66d484792fe2b7"
-requires = [
-    "xfun",
-    "litedown",
-]
 
 [[package]]
 name = "mathjaxr"
@@ -1292,30 +1119,6 @@ source = "cran"
 raw_version = "0.3.4"
 url = "https://cran.r-project.org/src/contrib/rappdirs_0.3.4.tar.gz"
 checksum = "md5:a990a3ddcfa9eb422cd406f78084fbd8"
-
-[[package]]
-name = "reactR"
-version = "0.6.1"
-source = "cran"
-raw_version = "0.6.1"
-url = "https://cran.r-project.org/src/contrib/reactR_0.6.1.tar.gz"
-checksum = "md5:cdec5a3166bc410e898710b295b26a5e"
-requires = ["htmltools"]
-
-[[package]]
-name = "reactable"
-version = "0.4.5"
-source = "cran"
-raw_version = "0.4.5"
-url = "https://cran.r-project.org/src/contrib/reactable_0.4.5.tar.gz"
-checksum = "md5:5cd4cc9b65f88e5c7cfe3a611c6ad553"
-requires = [
-    "digest",
-    "htmltools",
-    "htmlwidgets",
-    "jsonlite",
-    "reactR",
-]
 
 [[package]]
 name = "readr"

@@ -20,7 +20,7 @@
 #                              the index day ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
-# These are the arms 29_run_figure4.sh fits. Tables from designs it no longer runs
+# These are the arms 29_run_figure4.R fits. Tables from designs it no longer runs
 # (severity floors, the unstandardised control, the noninvasive cohort, which is not a
 # control) are ignored even when present on disk, so an old run cannot add an arm.
 #
@@ -84,7 +84,7 @@ message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site
 message(paste0("  ", arms$arm, collapse = "\n"))
 
 # Each arm's table, with creatinine taken from its dialysis-as-third-cause fit
-# (the rrtcause_ twin, as 29_run_figure4.sh fits it) whenever that twin exists.
+# (the rrtcause_ twin, as 29_run_figure4.R fits it) whenever that twin exists.
 read_arm <- function(table_name, arm_row) {
   path <- file.path(arm_row$folder, paste0("jm_", table_name, "_", arm_row$restriction, file_stub(arm_row$site)))
   twin <- file.path(arm_row$folder, paste0("jm_", table_name, "_rrtcause_", arm_row$restriction, file_stub(arm_row$site)))
@@ -174,11 +174,16 @@ if (is.na(to_vent_sd)) {
 # the whole control mostly is not, so the primary difference also contrasts hypoxemia;
 # against the hypoxemic control the arms differ in ventilation alone. Both use the
 # control's whole-panel SD of log PFVC (a restricted fit keeps it, 22_biotrauma_fit.R).
-did_against <- function(control_arm) comparison %>%
-  filter(!is.na(to_vent_sd), arm %in% c("Ventilated", control_arm)) %>%
-  mutate(side = if_else(cohort == "imv", "ventilated", "control"),
-         # the control on the ventilated cohort's unit (the ventilated rows are multiplied by 1)
-         unit_factor = if_else(side == "control", to_vent_sd, 1),
+# No difference exists without both sides (the SD rescaling missing, or no fit on
+# one side): that is an empty table, which the callers report, not an error.
+did_against <- function(control_arm) {
+  both_arms <- comparison %>%
+    filter(!is.na(to_vent_sd), arm %in% c("Ventilated", control_arm)) %>%
+    mutate(side = if_else(cohort == "imv", "ventilated", "control"))
+  if (!all(c("ventilated", "control") %in% both_arms$side)) return(tibble())
+  both_arms %>%
+  # the control on the ventilated cohort's unit (the ventilated rows are multiplied by 1)
+  mutate(unit_factor = if_else(side == "control", to_vent_sd, 1),
          divergence_estimate = divergence_estimate * unit_factor, divergence_sd = divergence_sd * unit_factor) %>%
   select(marker, adjustment, side, divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model")) %>%
   pivot_wider(names_from = side, values_from = c(divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model"))) %>%
@@ -190,6 +195,7 @@ did_against <- function(control_arm) comparison %>%
          both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
          control_to_ventilated_sd = to_vent_sd, control_arm = control_arm,
          unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
+}
 did <- did_against("No support, at ventilated severity")
 HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF <= 315"
 hypoxemic_did_path <- file.path(final_dir, paste0("jm_hypoxemic_control_did_", out_stub, ".csv"))
@@ -201,7 +207,7 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
     print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                                     control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                                     lo = signif(did_lo, 3), hi = signif(did_hi, 3), both_converged)), row.names = FALSE)
-  }
+  } else unlink(hypoxemic_did_path)
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
   write_csv(did, did_path)
@@ -210,7 +216,10 @@ if (nrow(did)) {
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                         lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
                                         both_converged)), row.names = FALSE)
-} else message("--- no marker has both a ventilated and a severity-standardised control fit: no difference-in-differences")
+} else {
+  message("--- no marker has both a ventilated and a severity-standardised control fit: no difference-in-differences")
+  unlink(did_path)
+}
 
 message("--- divergence per day per SD of log PFVC (log marker units), adjusted")
 print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%

@@ -319,11 +319,11 @@ if (nrow(severity_anchor)) {
   write_csv(severity_anchor, anchor_path)
   message("Severity anchor by marker (index-day SOFA components, own component left out; bands of 10 or more):")
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
-                        select(marker, anchor, sev_anchor_from, sev_anchor_to, n_patients, pct, pct_at_or_above_from)), row.names = FALSE)
+                        select(marker, anchor, sev_anchor, n_patients, pct, pct_at_or_above)), row.names = FALSE)
 }
 # The ventilated cohort's mean anchor per marker, among patients with that marker's
 # baseline: the centre the control's severity-modified divergence is read at
-# (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R). 29_run_figure4.sh passes it on.
+# (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R). 29_run_figure4.R passes it on.
 if (config$cohort == "imv") {
   anchor_mean <- map_dfr(markers, function(mk) {
     anchor_values <- anchor_of(surv_all %>% filter(!is.na(.data[[mk$y0]])), mk$name)

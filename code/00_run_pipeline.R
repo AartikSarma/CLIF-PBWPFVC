@@ -16,7 +16,7 @@
 #                            mechanics, mortality
 #   injury           20-27   figure 4: organ-injury markers over 7 days, in the ventilated
 #                            cohort, its baseline SF classes and the no-support controls,
-#                            unmatched and matched on severity (29_run_figure4.sh: builds
+#                            unmatched and matched on severity (29_run_figure4.R: builds
 #                            the control cohort, sets the severity floors, fits, draws)
 #
 # The default is "prep,cross_sectional", which is what this runner has always done.
@@ -25,7 +25,7 @@
 # Cross-cohort pooling (code/pooling/) is a separate, centrally-run step and is
 # intentionally not invoked here.
 #
-# Usage (from the project root, or anywhere — the script locates the repo):
+# Usage (from anywhere inside the repository, where uvr finds uvr.toml):
 #   uvr run code/00_run_pipeline.R
 #   uvr run code/00_run_pipeline.R -- --site_name my_site --site_path /data/clif [--file_type parquet]
 #   uvr run code/00_run_pipeline.R -- --stages injury
@@ -156,16 +156,14 @@ if (!uvr_library %in% normalizePath(.libPaths()))
 message("[00] Packages synced.\n")
 
 # --- 2. Run the numbered pipeline scripts in order ---------------------------
-# Each step is a command line: an R script, or one of the shell runners.
-r_step  <- function(script) list(label = script, bin = "Rscript", args = shQuote(file.path("code", script)))
-sh_step <- function(script, ...) list(label = paste(script, ...), bin = "bash", args = c(shQuote(file.path("code", script)), ...))
+# Each step is an R script in code/.
 stage_steps <- list(
-  prep = list(r_step("01_cohort_identification.R"), r_step("02_quality_checks.R"), r_step("03_variable_derivation.R")),
-  cross_sectional = list(r_step("04_analysis.R"),                # bias, mechanics, mortality (figures 1-3)
-                         r_step("05_normalization_analysis.R")), # PBW vs PFVC normalization of the injury metrics
-  injury = list(sh_step("29_run_figure4.sh"))
+  prep = c("01_cohort_identification.R", "02_quality_checks.R", "03_variable_derivation.R"),
+  cross_sectional = c("04_analysis.R",                # bias, mechanics, mortality (figures 1-3)
+                      "05_normalization_analysis.R"), # PBW vs PFVC normalization of the injury metrics
+  injury = "29_run_figure4.R"
 )
-pipeline_steps <- unlist(stage_steps[stages], recursive = FALSE)
+pipeline_steps <- unlist(stage_steps[stages], use.names = FALSE)
 if (analysis_only) {
   # the analyses read script 03's outputs; refuse to start if they are not on disk
   site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
@@ -202,13 +200,12 @@ if (Sys.getenv("PBWPFVC_COHORT", "imv") == "imv" && any(c("prep", "cross_section
 
 rscript_bin <- file.path(R.home("bin"), "Rscript")
 
-for (step in pipeline_steps) {
-  script_name <- step$label
+for (script_name in pipeline_steps) {
   message("=============================================================")
   message("[00] Running ", script_name, " ...")
   message("=============================================================")
 
-  status <- system2(if (step$bin == "Rscript") rscript_bin else step$bin, args = step$args)
+  status <- system2(rscript_bin, shQuote(file.path("code", script_name)))
 
   if (!identical(status, 0L)) {
     stop("Pipeline halted: ", script_name, " exited with status ", status,
