@@ -173,6 +173,25 @@ if (analysis_only) {
 # pipeline. It is run centrally by the study coordinator after every site returns
 # its `final/` outputs, and is kept local (not in the repository).
 
+# --- Clear the cross-sectional block before it is rewritten --------------------
+# Scripts 03-05 rewrite final/cross_sectional/ whole, so a file an older version of
+# the code wrote there (and this one no longer does) would otherwise travel with the
+# site's return. Cleared: everything when prep runs; everything but script 03's own
+# tables when only the analyses run. final/injury/ is never cleared: its tables are
+# merged on write and cache the joint-model fits. The control cohorts' folder
+# (final/controls/) is not touched.
+if (Sys.getenv("PBWPFVC_COHORT", "imv") == "imv" && any(c("prep", "cross_sectional") %in% stages)) {
+  site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
+                  else jsonlite::fromJSON("config/config.json")$site_name
+  block_dir <- file.path("output", paste0(site_for_dir, "_output"), "final", "cross_sectional")
+  old_files <- list.files(block_dir, full.names = TRUE)
+  if (!("prep" %in% stages)) old_files <- old_files[!grepl("^(attrition_log_|dist_)", basename(old_files))]
+  if (length(old_files)) {
+    message("[00] Clearing ", length(old_files), " file(s) from ", block_dir, " before the rerun")
+    unlink(old_files)
+  }
+}
+
 rscript_bin <- file.path(R.home("bin"), "Rscript")
 
 for (step in pipeline_steps) {

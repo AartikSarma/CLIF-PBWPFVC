@@ -24,9 +24,6 @@
 #   Markers: creatinine, platelets, bilirubin, sf, dp, ne_equiv_peak (log dose per kg,
 #   flagged: it carries -2 log(height)), any_pressor (the hurdle's binary part:
 #   a logistic mixed model of any vasoactive running, the vasopressor read).
-#   Q3  the log PFVC (and VT/PBW) coefficient on the death hazard in the plain
-#       cause-specific Cox (no linkage) versus inside the JM (with linkage):
-#       "association absorbed by the trajectory", not proportion mediated
 #
 # Model set per marker:
 #   main      full cohort, adjusted (age spline, sex, race) and unadjusted
@@ -39,7 +36,6 @@
 #
 # Inputs:  intermediate/jm_long_{H}d.parquet, jm_surv_{H}d.parquet (21_biotrauma_panel.R)
 # Outputs: final/jm_estimates_{H}d_{site}.csv   every coefficient of every fit (poolable)
-#          final/jm_absorption_{H}d_{site}.csv  Q3 table
 #          final/jm_manifest_{H}d_{site}.csv    fit status, counts, R-hat gate
 #          intermediate/jm_fit_{marker}_{model}_{adj}_{H}d.rds   fit bundles
 #          (patient-level rows inside, so never in final/)
@@ -801,24 +797,6 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                 hazard_rhat, if (gate_of(hazard_rhat)) "pass" else "FAIL", max_rhat,
                 paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
-  # --- Q3: the hazard exposures on the DEATH hazard, plain Cox vs inside the JM.
-  #     log PFVC is the paper's primary size term (the absorption read); VT/PBW
-  #     is the dose and is reported beside it.
-  cox_tbl <- summary(cox_cr)$coefficients
-  absorption <- map_dfr(c("log_pfvc", "vtpbw_idx", "vtpfvc_idx"), function(tm) {
-    cox_row <- grep(paste0("^", tm, ":strata\\(strata\\)death$"), rownames(cox_tbl))
-    jm_row  <- est %>% filter(block == "survival", grepl(paste0("^", tm, ":"), term), grepl("death", term))
-    tibble(marker = mk$name, model = model, adjustment = adj_lab, term = tm,
-           cox_log_hr = if (length(cox_row) == 1L) cox_tbl[cox_row, "coef"] else NA_real_,
-           cox_se     = if (length(cox_row) == 1L) cox_tbl[cox_row, "se(coef)"] else NA_real_,
-           jm_log_hr  = if (nrow(jm_row) == 1L) jm_row$estimate else NA_real_,
-           jm_sd      = if (nrow(jm_row) == 1L) jm_row$sd else NA_real_)
-  }) %>%
-    mutate(absorbed = cox_log_hr - jm_log_hr,
-           absorbed_frac = if_else(is.finite(cox_log_hr) & cox_log_hr != 0, absorbed / cox_log_hr, NA_real_),
-           n_patients = n_pts, n_deaths = n_deaths, baseline_form = BASELINE_FORM,
-           horizon_days = JM_HORIZON, site = site_name)
-
   # terms with predvars: carries the ns() knots so the report can rebuild the
   # fixed-effects design on a prediction grid without re-deriving the basis
   # slim bundle: the posterior draws the report uses (fixed effects, association),
@@ -835,7 +813,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
           bundle_file)
   rm(jm_fit, surv_cr, cox_cr); invisible(gc())
   result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
-                 counts = counts, estimates = est, absorption = absorption, scaling = scaling,
+                 counts = counts, estimates = est, scaling = scaling,
                  max_rhat = max_rhat, key_rhat = key_rhat,
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
@@ -918,7 +896,6 @@ manifest <- map_dfr(results, function(r)
          # "115 to 235", not "115,235": a CSV reader takes the comma for a thousands separator
          sf_band = if (nzchar(SF_BAND)) paste(sf_band_limits, collapse = " to ") else NA_character_, site = site_name)
 estimates  <- map_dfr(results, "estimates")
-absorption <- map_dfr(results, "absorption")
 scaling    <- map_dfr(results, "scaling")
 
 # Output tag: non-default forms (baseline offset, saturated or no modifier) get
@@ -971,7 +948,7 @@ if (SHAPE_ONLY) {
 # the full set can be assembled from several runs (a lab-only rerun, a longer-
 # chain rerun of one marker). PBWPFVC_JM_FRESH=1 discards the existing tables.
 if (identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1"))
-  for (nm in c("manifest", "estimates", "absorption", "scaling"))
+  for (nm in c("manifest", "estimates", "scaling"))
     unlink(file.path(final_dir, paste0("jm_", nm, "_", out_tag, ".csv")))
 merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
@@ -993,7 +970,6 @@ merge_write <- function(new, name) {
 }
 merge_write(manifest,   "manifest")
 merge_write(estimates,  "estimates")
-merge_write(absorption, "absorption")
 merge_write(scaling,    "scaling")
 
 message("\n========== 22_biotrauma_fit SUMMARY (", h_suffix, ") ==========")

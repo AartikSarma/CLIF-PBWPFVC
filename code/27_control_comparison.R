@@ -35,7 +35,6 @@
 #
 # Outputs, in final/injury/:
 #   jm_control_comparison_{form}_{tag}_{site}.csv
-#   jm_control_movement_{form}_{tag}_{site}.csv
 #   jm_control_comparison_{form}_{tag}_{site}.pdf
 #   jm_control_did_{form}_{h}_{site}.csv            ventilated minus the control
 #   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated minus the hypoxemic control
@@ -143,8 +142,6 @@ comparison <- size_terms %>%
 stopifnot(all(comparison$n_patients >= 10L, na.rm = TRUE))
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
 write_csv(mask_small_counts(comparison), file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
-if (nrow(movement)) write_csv(movement %>% filter(model == "main"),
-                              file.path(final_dir, paste0("jm_control_movement_", out_stub, ".csv")))
 
 # ---- the difference-in-differences: ventilated divergence minus control divergence
 # First difference: at a fixed VT/PBW the PBW formula, which omits age and race,

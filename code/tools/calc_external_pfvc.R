@@ -26,7 +26,6 @@
 # Every assumption (column match, race mapping, height + VT units, dropped rows) is PRINTED for audit.
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(rspiro) })
-read_csv("~/Research/CLIF/CLIF_projects/ARDSNet_to_CLIF/rawdata/arma/")
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) stop("Usage: Rscript code/tools/calc_external_pfvc.R <input.csv> [output.csv]")
 in_path  <- args[1]
