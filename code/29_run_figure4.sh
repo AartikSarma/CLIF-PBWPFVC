@@ -58,7 +58,8 @@
 # creatinine and the hypoxemic control, each adjusted and unadjusted) plus 1 channel fit, at
 # 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
-# hazard blocks did not converge at any length tried.
+# hazard blocks did not converge at any length tried; the survival submodel was simplified
+# on 2026-09-24 for that reason (22_biotrauma_fit.R, HAZARD_SPEC), so every fit refits once.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
 #   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
 #   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
