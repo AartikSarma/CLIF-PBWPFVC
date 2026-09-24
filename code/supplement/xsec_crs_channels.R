@@ -37,6 +37,13 @@
 #    MIMIC's first run (2026-09-23), where Crs tracked PFVC's height piece but not its
 #    age piece and PBW won the head-to-head.
 #
+# 2b. Specific elastance (Ers x predicted size) as a second outcome throughout. Stress
+#    = specific elastance x strain, so the two are interchangeable only where specific
+#    elastance is constant. Its exponent through a GLI piece is 1 minus that piece's
+#    Crs exponent, tested against 0: a non-zero value says the formula's predicted
+#    size difference and the pressure per unit of relative distension part company
+#    through that input. Age is where a loss of elastic recoil would show.
+#
 # 3. Height elasticity by sex: d log Crs / d log height within each sex, beside
 #    GLI's height elasticity (2.41 men, 2.26 women) and Devine's at the sex's median
 #    height (a line with an intercept, so its elasticity falls as height rises).
@@ -54,7 +61,9 @@
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/supplement/
 #   crs_channels_estimates_{site}.csv   every exponent: model, term, estimate, SE,
-#                                       CI, p, the value predicted before the data
+#                                       CI, p, the value predicted before the data;
+#                                       the specific-elastance rows carry their own
+#                                       null (0) and the spread of log(Ers x size)
 #   crs_channels_tests_{site}.csv       Wald tests of the channels, AIC head-to-head
 #   crs_channels_{site}.pdf             channel exponents, head-to-head, height
 #                                       elasticity by sex
@@ -96,7 +105,17 @@ mechanics_all <- read_parquet(file.path(config$output_dir, "analysis_cross_secti
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          age10 = age_at_admission / 10,
          log_crs = log(crs), log_pfvc = log(pfvc), log_pfvc25 = log(pfvc_age25), log_pbw = log(pbw),
-         log_height = log(height_cm), log_sf = log(sf_ratio))
+         log_height = log(height_cm), log_sf = log(sf_ratio),
+         # specific elastance: Ers x the predicted size, the pressure it takes to
+         # double the lung's volume. log Espec = log Ers + log PFVC = log PFVC - log Crs
+         # (plus the constant that carries Crs from mL to L), so its exponent through a
+         # GLI piece is 1 minus that piece's Crs exponent (a piece moves log PFVC by one
+         # unit and log Crs by its exponent), and the two models are one model read two
+         # ways, up to the small GLI remainder. Both are fitted, because the test
+         # differs: a Crs
+         # exponent of 1 is the same statement as an Espec exponent of 0, and the
+         # second is the one a reader weighs against "specific elastance is constant".
+         log_espec = log(ers * pfvc), log_espec25 = log(ers * pfvc_age25))
 if (nrow(mechanics_all) < 100) stop("fewer than 100 patients with a measured plateau and every covariate")
 SAMPLES <- list(`all plateau-measured` = mechanics_all,
                 `driving pressure >= 5` = mechanics_all %>% filter(dp >= DP_FLOOR_SENSITIVITY))
@@ -122,22 +141,37 @@ wald <- function(fit, contrast_matrix, rhs, test_label, sample_label) {
 analyse_sample <- function(dat, sample_label) {
   estimates <- list(); tests <- list()
 
-  # ---- 1. channels: log Crs on the four GLI pieces of log PFVC
+  # ---- 1. channels: log Crs, and log specific elastance, on the four GLI pieces of
+  #        log PFVC. Compliance answers "does the formula's predicted size difference
+  #        show up at the bedside?" (exponent 1 = proportional); specific elastance
+  #        answers "does the pressure per unit of relative distension differ by group?"
+  #        (exponent 0 = constant specific elastance, so stress tracks strain through
+  #        that input). Stress = specific elastance x strain, so an input with a
+  #        non-zero Espec exponent breaks the proportionality between them.
   pieces <- bind_cols(dat, pfvc_channels(dat, "log_pfvc"))
-  channel_fit <- fit_strict(lm(as.formula(paste("log_crs ~", paste(CHANNELS, collapse = " + "), "+", COVARIATES)), data = pieces))
-  estimates$channels <- coef_rows(channel_fit, CHANNELS, "channels", sample_label,
-                                  predicted = c(1, NA, 1, 1)) %>%
-    mutate(term = sub("^ch_", "", term),
-           channel_sd = sapply(pieces[CHANNELS], sd))
   size_channels <- c("ch_height", "ch_sex", "ch_race")
-  tests$channels <- bind_rows(
-    wald(channel_fit, rbind(c(1, -1, 0), c(1, 0, -1)) %>% `colnames<-`(size_channels), c(0, 0),
-         "height = sex = race (the lung-size inputs agree)", sample_label),
-    map_dfr(size_channels, ~ wald(channel_fit, matrix(1, 1, 1, dimnames = list(NULL, .x)), 1,
-                                  paste(sub("^ch_", "", .x), "exponent = 1"), sample_label)),
-    tibble(sample = sample_label, test = "all four equal (height, age, sex, race)",
-           statistic = NA_real_, df = 3, p = channels_equal_p(coef(channel_fit)[CHANNELS], vcov(channel_fit)[CHANNELS, CHANNELS]),
-           n_patients = nobs(channel_fit)))
+  OUTCOMES <- tribble(
+    ~outcome,            ~model,            ~null_value, ~scale,
+    "log_crs",           "channels",        1,           "exponent of log Crs (1 = proportional to predicted FVC)",
+    "log_espec",         "espec channels",  0,           "exponent of log specific elastance (0 = constant specific elastance)")
+  channel_fits <- list()
+  for (row_i in seq_len(nrow(OUTCOMES))) {
+    outcome <- OUTCOMES$outcome[row_i]; model_label <- OUTCOMES$model[row_i]; null_value <- OUTCOMES$null_value[row_i]
+    fit <- fit_strict(lm(as.formula(paste(outcome, "~", paste(CHANNELS, collapse = " + "), "+", COVARIATES)), data = pieces))
+    channel_fits[[model_label]] <- fit
+    estimates[[model_label]] <- coef_rows(fit, CHANNELS, model_label, sample_label,
+                                          predicted = if (null_value == 1) c(1, NA, 1, 1) else c(0, NA, 0, 0)) %>%
+      mutate(term = sub("^ch_", "", term), channel_sd = sapply(pieces[CHANNELS], sd), scale = OUTCOMES$scale[row_i])
+    tests[[model_label]] <- bind_rows(
+      wald(fit, rbind(c(1, -1, 0), c(1, 0, -1)) %>% `colnames<-`(size_channels), c(0, 0),
+           paste0(model_label, ": height = sex = race (the lung-size inputs agree)"), sample_label),
+      map_dfr(CHANNELS, ~ wald(fit, matrix(1, 1, 1, dimnames = list(NULL, .x)), null_value,
+                               sprintf("%s: %s exponent = %g", model_label, sub("^ch_", "", .x), null_value), sample_label)),
+      tibble(sample = sample_label, test = paste0(model_label, ": all four equal (height, age, sex, race)"),
+             statistic = NA_real_, df = 3, p = channels_equal_p(coef(fit)[CHANNELS], vcov(fit)[CHANNELS, CHANNELS]),
+             n_patients = nobs(fit)))
+  }
+  channel_fit <- channel_fits[["channels"]]
 
   # ---- 2. head-to-head: log PFVC against log PBW, identical covariates, no demographics
   # three exposures, each on its own, against PBW: PFVC; PFVC at age 25 (GLI's height,
@@ -146,6 +180,9 @@ analyse_sample <- function(dat, sample_label) {
   # whether the formulas differ once age is held fixed (MIMIC, 2026-09-23: Crs follows
   # PFVC's height piece but not its age piece, so PFVC lost to PBW overall).
   H2H_EXPOSURES <- c(PFVC = "log_pfvc", `PFVC at age 25` = "log_pfvc25", PBW = "log_pbw")
+  # the same head-to-head on specific elastance: which scaling makes Ers x size most
+  # nearly constant across patients (the Chiumello reading of a correct normaliser)
+  ESPEC_EXPOSURES <- c(PFVC = "log_espec", `PFVC at age 25` = "log_espec25")
   head_to_head <- function(sub_dat, subgroup, age_adjusted) {
     label <- paste0("head-to-head, ", subgroup, if (age_adjusted) ", age spline in every model" else "")
     fits <- map(H2H_EXPOSURES, function(exposure)
@@ -163,6 +200,18 @@ analyse_sample <- function(dat, sample_label) {
               if (nrow(short_women) >= 50) head_to_head(short_women, short_women_label, TRUE))
   estimates$head_to_head <- map_dfr(compact(h2h), "estimates")
   tests$head_to_head <- map_dfr(compact(h2h), "tests")
+
+  # ---- 2b. is specific elastance more nearly constant under one scaling than the other?
+  #      The spread of log(Ers x size) across patients, and its residual spread after the
+  #      covariates: a smaller spread means the normaliser leaves less unexplained
+  #      variation in the pressure per unit of relative distension.
+  estimates$espec_spread <- imap_dfr(ESPEC_EXPOSURES, function(column, label) {
+    fit <- fit_strict(lm(as.formula(paste(column, "~", COVARIATES)), data = dat))
+    tibble(sample = sample_label, model = "specific elastance spread", term = label,
+           estimate = sd(dat[[column]]), se = NA_real_, lo = NA_real_, hi = NA_real_, p = NA_real_,
+           predicted = NA_real_, n_patients = nrow(dat), residual_sd = sd(resid(fit)),
+           scale = "SD of log specific elastance (smaller = the scaling leaves less unexplained)")
+  })
 
   # ---- 3. height elasticity by sex, beside GLI's and Devine's
   estimates$height_by_sex <- map_dfr(c("Male", "Female"), function(sx) {
