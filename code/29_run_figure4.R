@@ -18,7 +18,7 @@
 #                                                cohort's own gate), read at the ventilated severity:
 #                                                the arms then differ in ventilation, not
 #                                                hypoxemia (27 writes its DiD separately;
-#                                                HYPOXEMIC_CONTROL_MARKERS, platelets by default)
+#                                                HYPOXEMIC_CONTROL_MARKERS, the control's markers by default)
 #             optional: ventilated by baseline SF class (SF_BANDS; off by default)
 #   The control is standardised, not matched (2026-09-21): severity cannot confound a
 #   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
@@ -35,9 +35,11 @@
 #               mean anchor per marker (final/injury/jm_severity_anchor_mean_*)
 #   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm
-#   6 figure    27_control_comparison.R (with the difference-in-differences), then
-#               24_biotrauma_figures.R: figure 4 and the checks figure
-#               (biotrauma_fig_checks_*: the DiD)
+#   6 figure    supplement/xsec_pfvc_age_control.R (death against each control, the
+#               checks figure's mortality rows), 27_control_comparison.R (the
+#               difference-in-differences), then 24_biotrauma_figures.R: figure 4 and
+#               the checks figure (biotrauma_fig_checks_*: every outcome against each
+#               control)
 #   7 channels  the supplement's channel breakdown: the ventilated divergence read through
 #               each GLI piece of log PFVC (height, age, sex, race; 22's channels form, one
 #               fit per marker, the pieces standing in for the demographics), and its
@@ -55,8 +57,9 @@
 # through the library path `uvr run` sets.
 #   caffeinate -i nohup uvr run code/29_run_figure4.R > figure4.out 2>&1 &
 #   uvr run code/29_run_figure4.R -- --dry-run
-# Site default (2026-09-24): 22 figure-4 fits (5 markers, creatinine, 3 control markers, control
-# creatinine and the hypoxemic control, each adjusted and unadjusted) plus 1 channel fit, at
+# Site default: 28 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
+# and creatinine in each control, the whole one and the hypoxemic one; each adjusted and
+# unadjusted) plus 1 channel fit, at
 # 2000 / 500 iterations, four at a time. At
 # MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
 # hazard blocks did not converge at any length tried; the survival submodel was simplified
@@ -66,7 +69,8 @@
 #   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
 #   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
-#   control arm, platelets by default, creatinine not fitted there; empty skips it),
+#   control arm, CONTROL_MARKERS by default, with creatinine as in the other arms; empty
+#   skips it),
 #   CHANNEL_MARKERS (step 7, platelets by default; empty skips it),
 #   FORCE_BUILD, FORCE_PANEL. The VT/PFVC companion (form vtpfvc) was dropped on
 #   2026-09-24: at a fixed VT/PBW, VT/PFVC moves only with PBW/PFVC, whose variance
@@ -94,7 +98,7 @@ knob_or_skip <- function(name, default) Sys.getenv(name, unset = default)
 
 MARKERS                   <- knob("MARKERS", "osi,sf,pressor_dose,platelets,bilirubin")   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS           <- knob("CONTROL_MARKERS", "pressor_dose,platelets,bilirubin")
-HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", "platelets")   # the hypoxemic control arm
+HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", CONTROL_MARKERS)   # the hypoxemic control arm
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
 CREATININE  <- knob("CREATININE", "1") == "1"
 SF_BANDS    <- strsplit(trimws(knob("SF_BANDS", "")), "[[:space:]]+")[[1]]   # e.g. "235,315 115,235 0,115"; off by default
@@ -252,14 +256,18 @@ for (band in SF_BANDS)
   fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
   fit_arm("nosupport", "nosupport", CONTROL_MARKERS, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER))
-  # the hypoxemic control: the same control, index-day SF <= 315, without the creatinine fits
+  # the hypoxemic control: the same control, index-day SF <= 315, with the same markers
   if (nzchar(HYPOXEMIC_CONTROL_MARKERS))
     fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_CONTROL_MARKERS,
-            c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"), with_creatinine = FALSE)
+            c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"))
 }
 
 # ---- 6 comparison table and the figure
 FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",pressor_dose,osi,sf")
+# death against each control: the PFVC association with death in the ventilated cohort
+# and in the no-support control, everyone and hypoxemic at the index (the checks
+# figure's mortality rows); it reads both cohorts' tables and the control's 7-day panel
+run_step("mortality_contrast", "code/supplement/xsec_pfvc_age_control.R")
 run_step("comparison", "code/27_control_comparison.R")
 run_step("figure", "code/24_biotrauma_figures.R", "imv",
          c(PBWPFVC_JM_WITH_RRT = "1", PBWPFVC_FIG_MARKERS = FIG_MARKERS))

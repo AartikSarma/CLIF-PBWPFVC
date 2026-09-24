@@ -8,9 +8,10 @@
 #       horizons (the 7-day run): one row per marker, the contrast toward injury
 #       from hour 0 to the end of the window, the rate per day adjusted beside
 #       unadjusted, and the posterior probability of harm by day
-#   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: the
-#       difference-in-differences against each control, one panel each: every
-#       no-support patient, and the no-support patients hypoxemic on the index day
+#   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: every
+#       outcome against each control (every no-support patient, and the no-support
+#       patients hypoxemic on the index day): the markers' difference-in-differences,
+#       and 60-day death (supplement/xsec_pfvc_age_control.R)
 #   biotrauma_fig_channels_{tag}.pdf   the channels form only: the contrast per
 #       GLI piece
 #
@@ -344,6 +345,11 @@ if (n_distinct(lc0$horizon_h) >= 3) {
 #           hypoxaemia together
 #        B  the no-support patients hypoxemic on the index day, SF <= 315
 #           (jm_hypoxemic_control_did_*): the arms differ in ventilation alone
+#      and beneath each, 60-day all-cause death against the same control: the hazard
+#      ratio per SD lower log PFVC in each cohort and their difference, read at the
+#      ventilated severity (pfvc_age_control_contrast_*, final/supplement/; its
+#      hypoxemic population is SF < 315). The oxygen saturation index has no control:
+#      it needs a mean airway pressure.
 # Drawn toward injury: above zero = a smaller predicted lung does worse.
 # A marker whose estimates are missing is left out of the panel, not drawn as zero.
 if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
@@ -383,11 +389,44 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
       scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
       labs(title = title, subtitle = subtitle, x = NULL, y = "change per day toward injury\nper SD of log PFVC")
   }
+  # 60-day death against each control, from the supplement's contrast table: log hazard
+  # ratio per SD of log PFVC (the ventilated cohort's SD) in each cohort, and the
+  # difference, turned toward harm (a smaller lung) and to ventilated minus control
+  death_contrast <- if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) NULL else
+    read_if(file.path(config$final_root, "supplement", paste0("pfvc_age_control_contrast_", site_name, ".csv")))
+  DEATH_POPULATIONS <- c(all = "everyone", hypoxemic = "hypoxemic at the index (SF < 315)")
+  death_panel <- function(population, control_label) {
+    if (is.null(death_contrast)) return(NULL)
+    rows <- death_contrast %>%
+      filter(population == !!population, outcome == "60-day death, all",
+             severity == "standardised to ventilated severity",
+             quantity %in% c("Ventilated", "No support", "no support minus ventilated"))
+    if (!nrow(rows)) return(NULL)
+    rows <- rows %>%
+      transmute(adjustment,
+                arm = factor(recode(quantity, Ventilated = "ventilated", `No support` = control_label,
+                                    `no support minus ventilated` = "difference"),
+                             c("ventilated", control_label, "difference")),
+                # toward harm: per SD LOWER log PFVC; the difference row is already
+                # no support minus ventilated, which is ventilated minus control toward harm
+                e = if_else(quantity == "no support minus ventilated", log_ratio, -log_ratio),
+                lo = e - 1.96 * se, hi = e + 1.96 * se, marker_lab = "60-day death")
+    ggplot(rows, aes(arm, e, colour = adjustment)) +
+      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
+      geom_point(size = 2.2, position = position_dodge(width = 0.5)) +
+      facet_wrap(~ marker_lab) +
+      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+      labs(title = NULL, subtitle = "60-day all-cause death, at the ventilated severity (Cox)",
+           x = NULL, y = "log hazard ratio toward harm\nper SD lower log PFVC")
+  }
   checks <- list()
   for (control_name in names(did_tables)) {
     did_entry <- did_tables[[control_name]]
     if (!is.null(did_entry$table) && nrow(did_entry$table))
       checks[[control_name]] <- did_panel(did_entry$table, did_entry$control, did_entry$title, did_entry$subtitle)
+    death <- death_panel(DEATH_POPULATIONS[[control_name]], did_entry$control)
+    if (!is.null(death)) checks[[paste0(control_name, "_death")]] <- death
   }
   if (length(checks)) {
     ggsave(file.path(fig_dir, paste0("biotrauma_fig_checks_", tag, ".pdf")),
