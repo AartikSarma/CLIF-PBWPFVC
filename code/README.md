@@ -60,6 +60,10 @@ to change; that stops once sites have returned `final/` folders.
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
   height elasticity of Crs by sex beside GLI's and Devine's.
+  `xsec_mortality_prediction.R` asks which dose or mechanics measure, alone and without
+  covariates, predicts death best: VT/PBW, VT/PFVC, VT/PFVC at age 25, Ers scaled by
+  each, mechanical power raw and scaled by Crs, PBW, PFVC and PFVC at age 25, and driving
+  pressure, by cross-validated AUC on the patients who have every measure.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
