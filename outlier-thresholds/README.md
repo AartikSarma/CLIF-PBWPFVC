@@ -31,3 +31,7 @@ Examples of how thresholds might be stored:
 
 Choose the format that best aligns with your project's needs and your team's workflow.
 
+
+## This project's thresholds
+
+`outlier_thresholds_respiratory_support.csv` also holds two derived quantities, `driving_pressure` (cmH2O, plateau minus set PEEP) and `compliance` (mL/cmH2O, set tidal volume over driving pressure). No column carries them, so `02_quality_checks.R` applies them separately: where either falls outside its range it removes that row's plateau, and no driving pressure, compliance, elastance or mechanical power is derived from it.

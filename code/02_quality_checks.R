@@ -132,6 +132,31 @@ for (i in seq_len(nrow(resp_thresholds))) {
   }
 }
 
+# Driving pressure (cmH2O) and compliance (mL/cmH2O) are derived, not charted, so the
+# loop above never meets them. Their ranges sit in the same file. Each row's driving
+# pressure is plateau minus set PEEP, and its compliance is set VT over that driving
+# pressure, as script 03 computes them. Where either falls outside its range the
+# plateau is removed: it is the one recorded measurement of the three, and without it
+# no driving pressure, compliance, elastance or mechanical power is derived downstream
+# (03, 10, 21). Plateau <= PEEP is left alone here; 03 blanks the driving pressure and
+# counts those rows as a sign of a mapping error.
+derived_limits <- resp_thresholds %>%
+  filter(variable_name %in% c("driving_pressure", "compliance")) %>%
+  { setNames(map2(.$lower_limit, .$upper_limit, c), .$variable_name) }
+if (!setequal(names(derived_limits), c("driving_pressure", "compliance")))
+  stop("outlier_thresholds_respiratory_support.csv needs driving_pressure and compliance rows")
+row_dp  <- resp_waterfall_clean$plateau_pressure_obs - resp_waterfall_clean$peep_set
+row_crs <- resp_waterfall_clean$tidal_volume_set / row_dp
+dp_out  <- !is.na(row_dp) & row_dp > 0 &
+  (row_dp < derived_limits$driving_pressure[1] | row_dp > derived_limits$driving_pressure[2])
+crs_out <- !is.na(row_crs) & row_dp > 0 & !dp_out &
+  (row_crs < derived_limits$compliance[1] | row_crs > derived_limits$compliance[2])
+message("driving_pressure: ", sum(dp_out), " plateau(s) removed, driving pressure outside ",
+        derived_limits$driving_pressure[1], "-", derived_limits$driving_pressure[2], " cmH2O")
+message("compliance: ", sum(crs_out), " further plateau(s) removed, compliance outside ",
+        derived_limits$compliance[1], "-", derived_limits$compliance[2], " mL/cmH2O")
+resp_waterfall_clean$plateau_pressure_obs[dp_out | crs_out] <- NA_real_
+
 # =============================================================================
 # Save cleaned data
 # =============================================================================
