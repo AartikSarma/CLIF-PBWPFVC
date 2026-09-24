@@ -130,10 +130,7 @@ recl_tbl <- bind_rows(
   reclassify(ers_data, "ers_pbw", "ers_pfvc", "Normalized elastance (Goligher)"),
   reclassify(mp_data,  "mp_pbw",  "mp_pfvc",  "Mechanical power (Gattinoni)")
 ) %>%
-  # a stratum of 1-9 patients is blanked, with its percentage
-  rename(n_patients = n) %>% mask_small_counts() %>%
-  mutate(pct_reclassified = if_else(is.na(n_patients), NA_real_, pct_reclassified),
-         site = site_name, .before = 1)
+  mutate(site = site_name, .before = 1)
 write_csv(recl_tbl,
           file.path(final_dir, paste0("norm_discordance_reclassification_", site_name, ".csv")))
 

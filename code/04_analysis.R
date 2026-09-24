@@ -54,8 +54,8 @@ cross_sectional <- cross_sectional %>%
 
 # The whole cohort, one row per characteristic (continuous: median and quartiles) or
 # per level (categorical: count and percent). The pooled Table 1 is the cohort by
-# site, so the table is not stratified; a level of 1-9 patients is blanked with its
-# percent (mask_small_counts, utils/config.R).
+# site, so the table is not stratified. Small cells are not masked yet: a
+# deterministic masking step will be applied once the outputs are locked.
 TABLE1_CONTINUOUS <- c(age_at_admission = "Age (years)", height_cm = "Height (cm)",
                        pbw = "PBW (kg)", pfvc = "PFVC (L)", pbwpfvc = "PBW/PFVC (kg/L)",
                        vtpbw = "VT/PBW (mL/kg)", vtpfvc = "VT/PFVC (%)",
@@ -77,17 +77,9 @@ table1_categorical <- imap_dfr(TABLE1_CATEGORICAL, function(label, v) {
     transmute(characteristic = label, level, n_patients, percent = 100 * n_patients / n_cohort,
               median = NA_real_, q1 = NA_real_, q3 = NA_real_)
 })
-# complementary suppression: the levels of a characteristic sum to the cohort, so a
-# single blanked level could be recovered by subtraction; the next-smallest is blanked too
-table1_categorical <- table1_categorical %>% mask_small_counts() %>%
-  group_by(characteristic) %>%
-  mutate(n_patients = if (sum(is.na(n_patients)) == 1)
-           replace(n_patients, which(n_patients == min(n_patients, na.rm = TRUE))[1], NA) else n_patients) %>%
-  ungroup()
 table1_long <- bind_rows(tibble(characteristic = "Patients", level = NA_character_, n_patients = n_cohort),
                          table1_continuous, table1_categorical) %>%
-  mask_small_counts() %>%
-  mutate(percent = if_else(is.na(n_patients), NA_real_, percent), site = site_name, .before = 1)
+  mutate(site = site_name, .before = 1)
 write_csv(table1_long, file.path(final_dir, paste0("table1_", site_name, ".csv")))
 message("Table 1 written (", n_cohort, " patients)")
 
