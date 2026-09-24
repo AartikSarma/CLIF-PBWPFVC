@@ -212,7 +212,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   #                                         cohort's mean severity anchor (the sevstd_
   #                                         tables; PBWPFVC_JM_SEV_CENTER, 29_run_figure4.R)
   #        No support, hypoxemic            the same control restricted to index-day
-  #                                         SF <= 315, the ventilated cohort's own gate
+  #                                         SF < 315, the ventilated cohort's own gate
   #                                         (the sevstd_sf0to315_ tables), so the two
   #                                         arms differ in ventilation, not hypoxaemia
   #        Ventilated, SF <class>           the ventilated cohort by baseline SF
@@ -284,7 +284,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   sf_hi <- as.numeric(str_match(sf_found, "to([0-9.]+)_$")[, 2])
   for (k in order(-sf_lo)) {                                          # mildest hypoxaemia first
     arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 4 + match(k, order(-sf_lo)) / 10,
-                                label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("<= ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
+                                label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("< ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
   }
   arm_rate <- map_dfr(arms, function(a) {
     est <- read_arm(a$folder, a$restriction, a$site)
@@ -343,12 +343,12 @@ if (n_distinct(lc0$horizon_h) >= 3) {
 #        A  every no-support patient (jm_control_did_*): the larger sample, but most of
 #           the control is not hypoxemic, so the difference contrasts ventilation and
 #           hypoxaemia together
-#        B  the no-support patients hypoxemic on the index day, SF <= 315
+#        B  the no-support patients hypoxemic on the index day, SF < 315
 #           (jm_hypoxemic_control_did_*): the arms differ in ventilation alone
 #      and beneath each, 60-day all-cause death against the same control: the hazard
 #      ratio per SD lower log PFVC in each cohort and their difference, read at the
-#      ventilated severity (pfvc_age_control_contrast_*, final/supplement/; its
-#      hypoxemic population is SF < 315). The oxygen saturation index has no control:
+#      ventilated severity (pfvc_age_control_contrast_*, final/supplement/). The
+#      oxygen saturation index has no control:
 #      it needs a mean airway pressure.
 # Drawn toward injury: above zero = a smaller predicted lung does worse.
 # A marker whose estimates are missing is left out of the panel, not drawn as zero.
@@ -362,7 +362,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
     hypoxemic = list(table = read_if(file.path(fig_dir, paste0("jm_hypoxemic_control_did_", did_stub))),
                      control = "no support,\nhypoxemic",
                      title = "Against no-support patients hypoxemic on the index day",
-                     subtitle = "SF <= 315, so the arms differ in ventilation, not hypoxaemia"))
+                     subtitle = "SF < 315, so the arms differ in ventilation, not hypoxaemia"))
   toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
   check_order <- intersect(c("platelets", "bilirubin", "creatinine", "pressor_dose"),
                            unique(unlist(map(did_tables, ~ .x$table$marker))))

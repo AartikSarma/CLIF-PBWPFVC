@@ -14,7 +14,7 @@
 #             no respiratory support             (panel B, the negative control): every
 #                                                patient, the divergence read at the
 #                                                ventilated cohort's mean severity
-#             no support, hypoxemic on the index day (index-day SF <= 315, the ventilated
+#             no support, hypoxemic on the index day (index-day SF < 315, the ventilated
 #                                                cohort's own gate), read at the ventilated severity:
 #                                                the arms then differ in ventilation, not
 #                                                hypoxemia (27 writes its DiD separately;
@@ -256,7 +256,7 @@ for (band in SF_BANDS)
   fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
   fit_arm("nosupport", "nosupport", CONTROL_MARKERS, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER))
-  # the hypoxemic control: the same control, index-day SF <= 315, with the same markers
+  # the hypoxemic control: the same control, index-day SF < 315, with the same markers
   if (nzchar(HYPOXEMIC_CONTROL_MARKERS))
     fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_CONTROL_MARKERS,
             c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"))

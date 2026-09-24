@@ -368,7 +368,7 @@ restricted_patients <- function(mk) {
   kept <- surv_all
   floor_value <- sev_floor_for(mk$name)
   if (!is.na(floor_value)) kept <- kept[which(anchor_of(kept, mk$name) >= floor_value), ]
-  if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_0), sf_0 > sf_band_limits[1], sf_0 <= sf_band_limits[2])
+  if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_0), sf_0 >= sf_band_limits[1], sf_0 < sf_band_limits[2])
   kept
 }
 
@@ -485,6 +485,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
     other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
                   if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
+                  if (nzchar(SF_BAND) && !identical(r$sf_band_rule, SF_BAND_RULE)) "its baseline SF band was lo < SF <= hi" else
                   if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
     if (nzchar(other_data)) {
       stamp("result on disk is on other data (", other_data, "); refitting")
@@ -500,7 +501,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
     stamp("restricted to ", nrow(surv_all), " of ", n_cohort, " patients",
           if (!is.na(sev_floor_for(mk$name))) paste0("; anchor (", anchor_label(mk$name), ") >= ", sev_floor_for(mk$name)) else "",
-          if (nzchar(SF_BAND)) paste0("; baseline SF in (", sf_band_limits[1], ", ", sf_band_limits[2], "]") else "")
+          if (nzchar(SF_BAND)) paste0("; baseline SF in [", sf_band_limits[1], ", ", sf_band_limits[2], ")") else "")
   }
   # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
   ld <- long_all %>%
@@ -826,7 +827,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
-                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC)
+                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, sf_band_rule = SF_BAND_RULE)
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
   saveRDS(result, result_file(mk$name, model, adj_lab))

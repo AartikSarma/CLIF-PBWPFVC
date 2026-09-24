@@ -175,9 +175,11 @@ sev_center_for <- function(marker) {
 sev_center_sfx_for <- function(marker) { v <- sev_center_for(marker); if (is.na(v)) "" else sprintf("_sevstd%.3f", v) }
 sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
 
-# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo < SF <= hi on
+# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi on
 # the index day. The strata in use are "235,315", "115,235" and "0,115" (user-specified,
 # 2026-09-18; 315 and 235 are the Rice 2007 SF equivalents of P/F 300 and 200).
+# The upper bound is strict so that "0,315" is the ventilated cohort's own gate, SF < 315.
+SF_BAND_RULE <- "lo <= SF < hi"   # stored with each fit: a fit made under another rule is refitted
 SF_BAND <- trimws(Sys.getenv("PBWPFVC_JM_SF_BAND", ""))
 sf_band_limits <- if (nzchar(SF_BAND)) suppressWarnings(as.numeric(strsplit(SF_BAND, ",")[[1]])) else c(NA_real_, NA_real_)
 if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) || sf_band_limits[1] >= sf_band_limits[2]))

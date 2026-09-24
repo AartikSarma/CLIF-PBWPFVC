@@ -37,7 +37,7 @@
 #                          discordance, dose x age) with posterior SD as SE
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
-#   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF <= 315)
+#   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF < 315)
 #   pfvc_age_control_channels_*, _channel_vcov_*, _contrast_*   the mortality control
 #                          contrast and its GLI channel breakdown (supplement/)
 #   crs_channels_estimates_*, crs_channels_tests_*   the compliance channels and the
@@ -279,7 +279,7 @@ if (nrow(did)) {
     mutate(scale = "ventilated minus no-support divergence, log marker per day")
 }
 
-# --- 7b. the same difference against the hypoxemic control (index-day SF <= 315,
+# --- 7b. the same difference against the hypoxemic control (index-day SF < 315,
 #         27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
 #         ventilation and not in hypoxemia. Its own file family, so it never mixes with
 #         figure 4's DiD; not drawn in the pooled figure 4.
