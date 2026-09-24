@@ -27,8 +27,8 @@
 # not measuring kidney injury, and the null divergence says nothing.
 #
 # Reads the 7-day panel (21_biotrauma_panel.R with PBWPFVC_JM_GRID=daily
-# PBWPFVC_JM_HORIZON=7) and two CLIF tables. Writes AGGREGATES ONLY, every cell of
-# fewer than 10 patients suppressed, to final/injury/:
+# PBWPFVC_JM_HORIZON=7) and two CLIF tables. Writes aggregates only, unmasked,
+# to final/injury/:
 #   creatinine_check_7d_{site}.csv          change from day 0 by stratum and day
 #   creatinine_check_counts_7d_{site}.csv   patients, CRRT starts and deaths by stratum
 #
@@ -43,7 +43,6 @@ if (h_suffix != "7d") stop("run with PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 
 output_dir <- config$output_dir
 final_dir  <- final_dir_for("injury")
 tables_path <- path.expand(config$tables_path)
-MIN_CELL <- 10L
 
 long <- read_parquet(file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
 surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
@@ -102,24 +101,16 @@ change <- strata %>% select(hospitalization_id, stratifier, stratum, creatinine_
   group_by(stratifier, stratum, day) %>%
   summarise(n_patients = n(), mean_log_change = mean(log_change), median_log_change = median(log_change),
             pct_1.5x_baseline = 100 * mean(kdigo_ratio), pct_rise_0.3 = 100 * mean(kdigo_rise), .groups = "drop") %>%
-  mutate(across(c(mean_log_change, median_log_change, pct_1.5x_baseline, pct_rise_0.3),
-                ~ if_else(n_patients < MIN_CELL, NA_real_, round(.x, 3))),
-         n_patients = if_else(n_patients < MIN_CELL, NA_integer_, n_patients)) %>%
-  # secondary suppression: a count hidden in one stratum could be recovered by subtracting
-  # the others from the total, so when any cell of a stratifier (on that day) is under
-  # the minimum, that count is hidden for the whole stratifier
-  group_by(stratifier, day) %>% mutate(n_patients = if (anyNA(n_patients)) NA_integer_ else n_patients) %>%
-  ungroup() %>% mutate(site = site_name)
+  mutate(across(c(mean_log_change, median_log_change, pct_1.5x_baseline, pct_rise_0.3), ~ round(.x, 3)),
+         site = site_name)
 counts <- strata %>% group_by(stratifier, stratum) %>%
   summarise(n_patients = n(), n_crrt_7d = sum(crrt_7d), n_death_7d = sum(death_7d), .groups = "drop") %>%
-  group_by(stratifier) %>%
-  mutate(across(c(n_patients, n_crrt_7d, n_death_7d), ~ if (any(.x < MIN_CELL)) NA_integer_ else .x)) %>%
-  ungroup() %>% mutate(site = site_name)
+  mutate(site = site_name)
 
 write_csv(change, file.path(final_dir, paste0("creatinine_check_", h_suffix, "_", site_name, ".csv")))
 write_csv(counts, file.path(final_dir, paste0("creatinine_check_counts_", h_suffix, "_", site_name, ".csv")))
 options(width = 200)
-message("--- patients, CRRT starts and deaths within 7 days, by stratum (cells under ", MIN_CELL, " suppressed)")
+message("--- patients, CRRT starts and deaths within 7 days, by stratum")
 print(as.data.frame(counts %>% select(-site)), row.names = FALSE)
 message("--- mean change in log creatinine from day 0, by day (0.1 is about a 10% rise)")
 print(as.data.frame(change %>% select(stratifier, stratum, day, mean_log_change) %>%

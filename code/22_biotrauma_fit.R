@@ -277,38 +277,24 @@ stopifnot(all(want_models %in% c("main", "hetero")))
 # (20_biotrauma_grid.R defines the anchors and the knobs.) The anchor distribution
 # of every marker in this run is written on every run, among patients with that
 # marker's baseline, so a floor can be chosen from the ventilated cohort's
-# aggregate. Adjacent values are MERGED until every band holds 10 or more patients:
-# masking a small cell would not protect it, because the cumulative column gives it
-# back. PBWPFVC_JM_ANCHOR_ONLY=1 writes the table and stops before any fit.
+# aggregate, one row per anchor value. PBWPFVC_JM_ANCHOR_ONLY=1 writes the table and stops before any fit.
 if (!all(ANCHOR_POOL %in% names(surv_all)))
   stop("jm_surv lacks the SOFA components (", paste(setdiff(ANCHOR_POOL, names(surv_all)), collapse = ", "),
        "): rebuild the panel (21_biotrauma_panel.R) with the current code")
 anchor_of <- function(patient_table, marker) rowSums(as.matrix(patient_table[, anchor_components(marker)]))
-merge_to_bands <- function(anchor_values) {
-  anchor_counts <- tibble(sev_anchor = anchor_values) %>% filter(!is.na(sev_anchor)) %>%
-    count(sev_anchor, name = "n_patients") %>% arrange(sev_anchor)
-  band_id <- integer(nrow(anchor_counts)); running_n <- 0L; current_band <- 1L
-  for (row_i in seq_len(nrow(anchor_counts))) {
-    band_id[row_i] <- current_band
-    running_n <- running_n + anchor_counts$n_patients[row_i]
-    if (running_n >= 10L) { current_band <- current_band + 1L; running_n <- 0L }
-  }
-  if (running_n > 0L && current_band > 1L) band_id[band_id == current_band] <- current_band - 1L   # short tail joins the band below
-  anchor_counts %>% mutate(band = band_id) %>% group_by(band) %>%
-    summarise(sev_anchor_from = min(sev_anchor), sev_anchor_to = max(sev_anchor),
-              n_patients = sum(n_patients), .groups = "drop") %>%
+anchor_distribution <- function(anchor_values) {
+  tibble(sev_anchor = anchor_values) %>% filter(!is.na(sev_anchor)) %>%
+    count(sev_anchor, name = "n_patients") %>% arrange(sev_anchor) %>%
     mutate(pct = round(100 * n_patients / sum(n_patients), 1),
-           pct_at_or_above_from = round(100 * rev(cumsum(rev(n_patients))) / sum(n_patients), 1)) %>%
-    select(-band)
+           pct_at_or_above = round(100 * rev(cumsum(rev(n_patients))) / sum(n_patients), 1))
 }
 severity_anchor <- map_dfr(markers, function(mk) {
   with_baseline <- surv_all %>% filter(!is.na(.data[[mk$y0]]))
   if (nrow(with_baseline) < 10L) return(NULL)
-  merge_to_bands(anchor_of(with_baseline, mk$name)) %>%
+  anchor_distribution(anchor_of(with_baseline, mk$name)) %>%
     mutate(marker = mk$name, anchor = anchor_label(mk$name), .before = 1)
 }) %>% mutate(cohort = config$cohort, site = site_name)
 if (nrow(severity_anchor)) {
-  stopifnot(all(severity_anchor$n_patients >= 10L | ave(severity_anchor$n_patients, severity_anchor$marker, FUN = length) == 1L))
   anchor_path <- file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv"))
   if (file.exists(anchor_path)) {   # merge on write: keep other markers' rows from earlier runs
     anchor_on_disk <- read_csv(anchor_path, show_col_types = FALSE)
@@ -349,7 +335,7 @@ scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = sd(surv_all$log_pfvc, 
                     mean_log_pfvc = mean(surv_all$log_pfvc, na.rm = TRUE),
                     n_patients = sum(!is.na(surv_all$log_pfvc)), horizon_days = JM_HORIZON, site = site_name)
 stopifnot(abs(sd(surv_all$log_pfvc_sd, na.rm = TRUE) - 1) < 1e-8)   # log_pfvc_sd is the standardised log_pfvc
-write_csv(mask_small_counts(scale_tbl), file.path(final_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
+write_csv(scale_tbl, file.path(final_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
 if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
   message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
   quit(save = "no", status = 0)
@@ -917,7 +903,7 @@ if (SHAPE_ONLY) {
     shape <- bind_rows(read_csv(shape_path, show_col_types = FALSE) %>%
                          anti_join(manifest %>% distinct(marker, adjustment), by = c("marker", "adjustment")),
                        shape)
-  write_csv(mask_small_counts(shape), shape_path)
+  write_csv(shape, shape_path)
   message("\nDivergence per day per SD of log PFVC (log-marker scale): the line against the spline;",
           " early = days ", min(shape$first_day), "-", SHAPE_SPLIT_DAY, ", late = ", SHAPE_SPLIT_DAY, "-", max(shape$last_day))
   print(as.data.frame(shape %>% filter(quantity == "rate") %>%
@@ -965,7 +951,7 @@ merge_write <- function(new, name) {
     new  <- bind_rows(as_text(old), as_text(new))
     message("  ", name, ": kept ", nrow(old), " rows from other markers")
   }
-  if (nrow(new)) write_csv(mask_small_counts(new), path)   # counts of 1-9 blanked (utils/config.R)
+  if (nrow(new)) write_csv(new, path)
   else if (file.exists(path)) unlink(path)                   # nothing left for this tag: no stale table
 }
 merge_write(manifest,   "manifest")

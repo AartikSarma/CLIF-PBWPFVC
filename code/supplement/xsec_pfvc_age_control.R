@@ -804,26 +804,26 @@ print(as.data.frame(channel_contrast %>%
                       select(exposure, quantity, piece, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, identifying_sd) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 print(as.data.frame(channel_tests %>% mutate(p = signif(p, 3))), row.names = FALSE)
-write_csv(mask_small_counts(channel_contrast), file.path(final_dir, paste0("pfvc_age_control_channels_", site_name, ".csv")))
+write_csv(channel_contrast, file.path(final_dir, paste0("pfvc_age_control_channels_", site_name, ".csv")))
 write_csv(channel_tests, file.path(final_dir, paste0("pfvc_age_control_channel_tests_", site_name, ".csv")))
 write_csv(channel_vcov, file.path(final_dir, paste0("pfvc_age_control_channel_vcov_", site_name, ".csv")))
 message("\nThe two exposure scales: how each piece rescales, from the formulas (R2 = 1: a constant factor exists)")
 print(as.data.frame(channel_conversion %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 write_csv(channel_conversion, file.path(final_dir, paste0("pfvc_age_control_channel_conversion_", site_name, ".csv")))
-write_csv(mask_small_counts(code_status_counts),
+write_csv(code_status_counts,
           file.path(final_dir, paste0("pfvc_age_control_code_status_", site_name, ".csv")))
 
-write_csv(mask_small_counts(estimates), file.path(final_dir, paste0("pfvc_age_control_estimates_", site_name, ".csv")))
+write_csv(estimates, file.path(final_dir, paste0("pfvc_age_control_estimates_", site_name, ".csv")))
 write_csv(curves, file.path(final_dir, paste0("pfvc_age_control_curves_", site_name, ".csv")))
-write_csv(mask_small_counts(contrast), file.path(final_dir, paste0("pfvc_age_control_contrast_", site_name, ".csv")))
-write_csv(mask_small_counts(anchor_overlap), file.path(final_dir, paste0("pfvc_age_control_anchor_", site_name, ".csv")))
+write_csv(contrast, file.path(final_dir, paste0("pfvc_age_control_contrast_", site_name, ".csv")))
+write_csv(anchor_overlap, file.path(final_dir, paste0("pfvc_age_control_anchor_", site_name, ".csv")))
 message("\nThe control's escalation hazard per SD of log PFVC (below 1: larger predicted lungs escalate less):")
 print(as.data.frame(escalation_hazard %>% filter(adjustment == "adjusted") %>%
                       select(population, escalation, severity, term, hr, hr_lo, hr_hi, p, n_patients_escalated, note) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-write_csv(mask_small_counts(escalation_paths),
+write_csv(escalation_paths,
           file.path(final_dir, paste0("pfvc_age_control_escalation_paths_", site_name, ".csv")))
-write_csv(mask_small_counts(escalation_hazard),
+write_csv(escalation_hazard,
           file.path(final_dir, paste0("pfvc_age_control_escalation_hazard_", site_name, ".csv")))
 if (!is.null(hypoxemia_pathway)) {
   message("\nThe hypoxemia pathway in the control (not hypoxemic on the index day), adjusted: ",
@@ -832,7 +832,7 @@ if (!is.null(hypoxemia_pathway)) {
                         select(population, analysis, horizon_days, term, hr, hr_lo, hr_hi, p,
                                n_patients, n_patients_hypoxemic, any_of(c("n_deaths", "n_deaths_after_hypoxemia")), note) %>%
                         mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-  write_csv(mask_small_counts(hypoxemia_pathway),
+  write_csv(hypoxemia_pathway,
             file.path(final_dir, paste0("pfvc_age_control_hypoxemia_", site_name, ".csv")))
 }
 

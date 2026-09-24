@@ -139,9 +139,8 @@ comparison <- size_terms %>%
   mutate(divergence_converged = divergence_rhat <= RHAT_GATE,
          arm = factor(arm, levels = arms$arm), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
-stopifnot(all(comparison$n_patients >= 10L, na.rm = TRUE))
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
-write_csv(mask_small_counts(comparison), file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
+write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
 
 # ---- the difference-in-differences: ventilated divergence minus control divergence
 # First difference: at a fixed VT/PBW the PBW formula, which omits age and race,
@@ -197,7 +196,7 @@ hypoxemic_did_path <- file.path(final_dir, paste0("jm_hypoxemic_control_did_", o
 if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
   hypoxemic_did <- did_against(HYPOXEMIC_CONTROL_ARM)
   if (nrow(hypoxemic_did)) {
-    write_csv(mask_small_counts(hypoxemic_did), hypoxemic_did_path)
+    write_csv(hypoxemic_did, hypoxemic_did_path)
     message("--- difference-in-differences against the hypoxemic control (index-day SF <= 315)")
     print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                                     control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
@@ -205,7 +204,7 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
   }
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
-  write_csv(mask_small_counts(did), did_path)
+  write_csv(did, did_path)
   message("--- difference-in-differences: ventilated minus no-support divergence (log marker per day per SD of log PFVC)")
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
@@ -250,7 +249,7 @@ if (nrow(movement)) {
     scale_colour_manual(values = arm_colours, name = NULL) +
     scale_x_continuous(breaks = seq(1, 28)) +
     labs(title = "Does the marker move in this arm?",
-         subtitle = "Observed mean change from baseline among patients still observed (log units; days with under 10 patients dropped)",
+         subtitle = "Observed mean change from baseline among patients still observed (log units)",
          x = "Day", y = "Mean change in log marker") +
     theme_minimal(base_size = 11) + theme(legend.position = "bottom")
   panels <- c(panels, list(movement_plot))

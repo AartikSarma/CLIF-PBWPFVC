@@ -335,7 +335,7 @@ if (!is.null(did)) {
   print(as.data.frame(did %>% select(shared_df, adjustment, did_estimate, did_lo, did_hi, did_p) %>%
                         mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 }
-out <- function(x, stem) write_csv(mask_small_counts(x), file.path(final_dir, paste0(stem, "_", MARKER, "_", site_name, ".csv")))
+out <- function(x, stem) write_csv(x, file.path(final_dir, paste0(stem, "_", MARKER, "_", site_name, ".csv")))
 out(res, "fingerprint"); out(ladder, "fingerprint_ladder"); out(curves, "fingerprint_curves")
 if (!is.null(did)) out(did, "fingerprint_did")
 

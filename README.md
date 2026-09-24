@@ -111,8 +111,10 @@ Each site has one output folder, `output/<site_name>_output/`:
   A script asks `utils/config.R` for its folder with `final_dir_for("<block>")`.
 
 Re-running a stage updates `final/` in place, so a site can return the folder again
-after any stage. All exports honor a minimum cell size of n >= 10. No patient-level
-data leaves the site.
+after any stage. No patient-level data is written to `final/`. Counts are not masked:
+small-cell masking (censoring small cells, or a deterministic scheme agreed with CLIF)
+will be a separate step applied to `final/` before a site shares it. Until then, do
+not share `final/` outside the study team.
 
 **Output file names are an interface between scripts.** Every pooling and figure
 script finds its inputs by file-name prefix (`regression_results_long_`, `norm_`,
@@ -191,8 +193,7 @@ iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
 caffeinate -i nohup bash code/29_run_figure4.sh > figure4.out 2>&1 &
 ```
 
-The figure is `final/injury/biotrauma_fig_main_pfvc_7d_<site>.pdf`. Every table it
-writes suppresses counts of 1 to 9.
+The figure is `final/injury/biotrauma_fig_main_pfvc_7d_<site>.pdf`.
 
 To run a single script while debugging, run it from the repository root, for
 example `Rscript code/04_analysis.R`. Scripts read the previous step's outputs, so
@@ -222,5 +223,5 @@ recoverable from the tag `pre-prune-2026-09-19`.
 ## Data safety
 
 - Never commit patient data — only aggregated results belong in `output/`.
-- Minimum cell size of n >= 10 for any reported group.
+- Counts in `final/` are unmasked until the masking step exists; see above.
 - `config/config.json` is site-specific and should not be committed with real paths.

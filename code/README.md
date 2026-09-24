@@ -25,11 +25,11 @@ to change; that stops once sites have returned `final/` folders.
 | `20_biotrauma_grid.R` | figure 4 | Time grid and the cohort-restriction knobs shared by 21–27. Sourced | |
 | `21_biotrauma_panel.R` | figure 4 | Longitudinal and survival tables for the joint models | `jm_panel_summary_` |
 | `22_biotrauma_fit.R` | figure 4 | One joint model per organ-injury marker | `jm_manifest_`, `jm_estimates_`, `jm_scale_`, `jm_severity_anchor_` |
-| `23_biotrauma_report.R` | figure 4 | Level contrasts by horizon, marker movement, hazard associations | `jm_level_contrast_`, `jm_movement_`, `jm_association_hr_` |
+| `23_biotrauma_report.R` | figure 4 | Level contrasts by horizon, marker movement, the size terms with and without the death correction, hazard associations | `jm_level_contrast_`, `jm_movement_`, `jm_lme_check_`, `jm_association_hr_` |
 | `24_biotrauma_figures.R` | figure 4 | Figure 4 and its DiD check, from the aggregate tables only | `biotrauma_fig_main_`, `biotrauma_fig_checks_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control, and minus the control hypoxemic on the index day) | `jm_control_comparison_`, `jm_control_did_`, `jm_hypoxemic_control_did_` |
 | `28_height_fingerprint.R` | Claim 5c.2 | The height fingerprint: at a fixed VT/PBW, does the marker follow the ratio's sex-reversed height curve beyond a height function the sexes share? Platelets by default, on the 7-day panel; run for the no-support control first to get the DiD | `fingerprint_`, `fingerprint_ladder_`, `fingerprint_curves_`, `fingerprint_did_` |
-| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control | |
+| `29_run_figure4.sh` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control, and the channel breakdown (supplement) | |
 
 ## Folders
 
@@ -38,7 +38,7 @@ to change; that stops once sites have returned `final/` folders.
   local and gitignored. `pooled_displays.R` draws figure 1C and the ratio's height
   channel from the GLI and Devine formulas alone, figure 2 from each site's `dose_`
   tables (the variance decomposition pooled exactly from site moments), and figure 3C's
-  worked example from each site's `crs_channels_estimates_`.
+  age-matched head-to-head from each site's `crs_channels_estimates_` and `_tests_`.
   Figure 4's estimates pool per 0.1 log units of PFVC, converted from each site's own
   SD with that site's `jm_scale_{h}_{site}.csv`, by common-effect inverse variance
   (two or three sites cannot support a random-effects variance), gated at rhat <= 1.1:
@@ -66,8 +66,7 @@ to change; that stops once sites have returned `final/` folders.
   `xsec_crs_channels.R` asks whether measured compliance scales like predicted FVC,
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
-  height elasticity of Crs by sex beside GLI's and Devine's, and figure 3C's worked
-  example (a Black woman of 160 cm against a white man of 180 cm, both 60).
+  height elasticity of Crs by sex beside GLI's and Devine's.
   `xsec_mortality_prediction.R` asks which dose or mechanics measure, alone and without
   covariates, predicts death best: VT/PBW, VT/PFVC, VT/PFVC at age 25, Ers scaled by
   each, mechanical power raw and scaled by Crs, PBW, PFVC and PFVC at age 25, and driving
@@ -76,7 +75,7 @@ to change; that stops once sites have returned `final/` folders.
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
   where kidney injury is expected (by ESRD, dialysis procedures and pressor dose; aggregates
-  only, cells under 10 suppressed), and the two `migrate_*.sh` helpers move outputs written
+  only), and the two `migrate_*.sh` helpers move outputs written
   under older folder layouts. Delete the helpers once every site folder is migrated.
 - `archive/` is gitignored local scratch.
 

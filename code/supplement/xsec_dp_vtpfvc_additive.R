@@ -105,6 +105,7 @@ suppressPackageStartupMessages({
 })
 
 source("utils/config.R")
+MIN_DEATHS_TO_DRAW <- 10L   # an age band is drawn in panels B and D only with this many deaths (patients in D): a stable estimate, not masking
 site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
 
@@ -429,16 +430,16 @@ espec_by_age <- bind_rows(
   mutate(site = site_name, unit = "cmH2O per percent of predicted FVC", .before = 1)
 
 # =============================================================================
-# Write the tables (counts under 10 are blanked)
+# Write the tables
 # =============================================================================
 
-write_csv(mask_small_counts(estimates),
+write_csv(estimates,
           file.path(final_dir, paste0("dp_vtpfvc_additive_estimates_", site_name, ".csv")))
-write_csv(mask_small_counts(lrt_table),
+write_csv(lrt_table,
           file.path(final_dir, paste0("dp_vtpfvc_additive_lrt_", site_name, ".csv")))
-write_csv(mask_small_counts(age_slopes),
+write_csv(age_slopes,
           file.path(final_dir, paste0("dp_vtpfvc_additive_age_slopes_", site_name, ".csv")))
-write_csv(mask_small_counts(espec_by_age),
+write_csv(espec_by_age,
           file.path(final_dir, paste0("dp_vtpfvc_additive_espec_age_", site_name, ".csv")))
 
 lrt_table %>% filter(outcome_model == "logistic") %>%
@@ -474,7 +475,7 @@ slopes_panel <- age_slopes %>%
 band_panel <- age_slopes %>%
   filter(outcome_model == "logistic", vtpbw_adjustment == "spline",
          age_form == "age band (cell means)",
-         n_deaths >= SMALL_CELL_MIN) %>%
+         n_deaths >= MIN_DEATHS_TO_DRAW) %>%
   mutate(age_band = factor(age_band, levels = AGE_BAND_LABELS),
          age_adjustment = age_adjustment_labels[age_adjustment]) %>%
   ggplot(aes(ratio_per_sd, age_band, colour = predictor)) +
@@ -529,7 +530,7 @@ espec_panel <- ggplot() +
               aes(age, ymin = espec_lo, ymax = espec_hi), fill = OKABE_ITO[["espec"]], alpha = 0.15) +
   geom_line(data = filter(espec_by_age, str_starts(summary, "adjusted")),
             aes(age, espec), colour = OKABE_ITO[["espec"]], linewidth = 0.9) +
-  geom_pointrange(data = filter(espec_by_age, str_starts(summary, "observed"), n_patients >= SMALL_CELL_MIN),
+  geom_pointrange(data = filter(espec_by_age, str_starts(summary, "observed"), n_patients >= MIN_DEATHS_TO_DRAW),
                   aes(age, espec, ymin = espec_lo, ymax = espec_hi), colour = "grey30") +
   labs(title = "D. Pressure per unit of strain, by age",
        x = "Age (years)", y = "DP / (VT/PFVC)\n(cmH2O per % predicted FVC)") +
