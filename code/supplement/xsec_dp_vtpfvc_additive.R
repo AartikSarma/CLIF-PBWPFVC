@@ -12,8 +12,8 @@
 #
 # The identity behind the test. With DP in cmH2O and VT/PFVC in percent of
 # predicted FVC, define the PFVC-normalised (specific) elastance
-#     Espec = DP / (VT/PFVC)            cmH2O per percent of predicted FVC,
-# the quantity in figure 5B of the LRM paper. Then log DP = log Espec + log VT/PFVC,
+#     Espec = DP / (VT/PFVC)            cmH2O per percent of predicted FVC.
+# Then log DP = log Espec + log VT/PFVC,
 # and a model with both logs,
 #     b_dp log DP + b_vt log VT/PFVC  =  b_dp log Espec + (b_dp + b_vt) log VT/PFVC,
 # weights recoil (Espec) and strain (VT/PFVC) separately. "DP is a sufficient
@@ -31,8 +31,10 @@
 # balance between the two is harder to manufacture that way, unless the plateau's
 # error itself changes with age.
 #
-# Every model adjusts for VT/PBW (the delivered dose; DP models must), BMI (DP
-# includes the chest wall), SOFA and SF ratio, the covariates of scripts 04-05.
+# Every mortality model adjusts for VT/PBW (the delivered dose; DP models must), BMI
+# (DP includes the chest wall), SOFA and SF ratio, the covariates of scripts 04-05.
+# The premise model (specific elastance across age, panel D) is not a mortality
+# model and holds no VT/PBW.
 # With VT/PBW held, the remaining variation in VT/PFVC is the PBW/PFVC discordance,
 # so the VT/PFVC terms here are the discordance at a fixed dose. Each model is fitted
 # demographic-adjusted (+ age, sex, race) and unadjusted (demographics dropped).
@@ -48,7 +50,7 @@
 # change in slope, not unmodelled age. Rungs without age are identical in the two
 # forms in the unadjusted arm.
 #
-# VT/PBW is held fixed in every model, because VT/PFVC only escapes confounding by
+# VT/PBW is held fixed in every mortality model, because VT/PFVC only escapes confounding by
 # indication at a given VT/PBW: clinicians set the dose from PBW (and lower it for
 # sicker patients), while the PBW/PFVC discordance left over is assigned by the
 # formulas. So that a straight line in VT/PBW cannot leave dose-severity confounding
@@ -74,10 +76,6 @@
 #   both_x_age  both modified by age
 #   full        both modified by age, plus DP x VT/PFVC
 #   age_band    cell means: DP and VT/PFVC slopes within each age band
-#
-# Companion: script 05's age-interaction ladder (cut 2026-09-24) fitted log DP * age + log PFVC
-# * age. This script replaces PFVC with the delivered strain (VT/PFVC), adds the
-# DP x VT/PFVC product, and reports the slopes by age.
 #
 # Restricted to patients with a measured plateau (dp > 0 at the index timepoint;
 # pressures are never forward-filled). A model that warns (non-convergence,
@@ -105,7 +103,11 @@ suppressPackageStartupMessages({
 })
 
 source("utils/config.R")
-MIN_DEATHS_TO_DRAW <- 10L   # an age band is drawn in panels B and D only with this many deaths (patients in D): a stable estimate, not masking
+# An age band is drawn only with enough data for a stable estimate (not masking):
+# panel B needs this many deaths, panel D this many patients. The CLIF minimum-count
+# standard.
+MIN_DEATHS_TO_DRAW <- 10L
+MIN_PATIENTS_TO_DRAW <- 10L
 site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
 
@@ -221,8 +223,8 @@ lrt_specs <- tribble(
 )
 
 # Age enters the unadjusted arm only where a rung needs it as the modifier. The
-# band rung's linear form keeps its bands alone (as first run); its spline form adds
-# the spline within them.
+# band rung's linear form holds age within bands only; its spline form adds the
+# spline within them.
 rung_formula <- function(outcome_lhs, rung, adjusted, age_adjustment, vtpbw_adjustment) {
   covariates <- if (adjusted) paste(base_covariates, "+", demographic_covariates) else base_covariates
   rhs <- rungs[[rung]]
@@ -405,6 +407,8 @@ age_slopes <- imap_dfr(fitted_rungs, function(models, key) {
 # =============================================================================
 # The premise: specific elastance (DP per percent of predicted FVC) across age
 # =============================================================================
+# Not a mortality model: log Espec on an age spline with sex, race, BMI, SOFA and
+# SF, with no VT/PBW term.
 
 espec_model <- fit_without_warnings(
   lm(log(espec) ~ ns(age_at_admission, 4) + sex_category + race_category + bmi + sofa_total + sf10,
@@ -530,7 +534,7 @@ espec_panel <- ggplot() +
               aes(age, ymin = espec_lo, ymax = espec_hi), fill = OKABE_ITO[["espec"]], alpha = 0.15) +
   geom_line(data = filter(espec_by_age, str_starts(summary, "adjusted")),
             aes(age, espec), colour = OKABE_ITO[["espec"]], linewidth = 0.9) +
-  geom_pointrange(data = filter(espec_by_age, str_starts(summary, "observed"), n_patients >= MIN_DEATHS_TO_DRAW),
+  geom_pointrange(data = filter(espec_by_age, str_starts(summary, "observed"), n_patients >= MIN_PATIENTS_TO_DRAW),
                   aes(age, espec, ymin = espec_lo, ymax = espec_hi), colour = "grey30") +
   labs(title = "D. Pressure per unit of strain, by age",
        x = "Age (years)", y = "DP / (VT/PFVC)\n(cmH2O per % predicted FVC)") +
@@ -541,7 +545,7 @@ figure <- slopes_panel / band_panel / risk_panel / espec_panel +
   plot_annotation(
     title = paste0("Driving pressure and VT/PFVC as additive predictors of mortality (", site_name, ")"),
     subtitle = paste("Logistic models; VT/PBW (3-df spline), BMI, SOFA and SF ratio held fixed. A-B: both adjustment sets, age linear and spline.",
-                     "C: demographic-adjusted, age spline."))
+                     "C: demographic-adjusted, age spline. D: no VT/PBW."))
 ggsave(file.path(final_dir, paste0("dp_vtpfvc_additive_", site_name, ".pdf")),
        figure, width = 12, height = 15)
 

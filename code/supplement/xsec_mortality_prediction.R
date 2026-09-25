@@ -1,8 +1,9 @@
 # =============================================================================
-# Supplement (cross-sectional): which dose or mechanics measure, alone, predicts
-# death best?
+# Supplement (cross-sectional): which dose or mechanics measure predicts death
+# best, alone and once the dose is known?
 # =============================================================================
-# Twelve measures at the index timepoint, each in its own model with no covariates:
+# Twelve measures at the index timepoint, each in its own model under three
+# adjustment sets (alone; given VT/PBW; given VT/PBW, sex and race; see Methods):
 #   dose        VT/PBW, VT/PFVC, VT/PFVC at age 25
 #   elastance   Ers x PBW, Ers x PFVC, Ers x PFVC at age 25 (specific elastance by
 #               each size scaling)
@@ -11,7 +12,7 @@
 # PFVC at age 25 is GLI's prediction at a common reference age (script 03's
 # pfvc_age25): the height, sex and race scaling without GLI's age decline.
 #
-# This is a question about prediction, not cause. With no covariates, each measure
+# This is a question about prediction, not cause. Fitted alone, each measure
 # carries its own demographic content: PFVC-normalised measures inherit GLI's age
 # term, which predicts death through everything age does. The PFVC-at-age-25
 # versions separate that age content from the structural scaling, so reading PFVC
@@ -46,8 +47,12 @@
 #                                     adjustment x sample
 #   mortality_prediction_pairwise_{site}.csv  the size scalings within each family
 #                                     against each other (common sample)
-#   mortality_prediction_{site}.pdf   cross-validated AUC with the difference from
-#                                     VT/PBW alone, alone and given VT/PBW
+#   mortality_prediction_{site}.pdf   cross-validated AUC and the difference from
+#                                     the base model, under each adjustment
+# In mortality_prediction_{site}.csv, delta_auc_vs_base_model and
+# delta_aic_vs_base_model (common sample only) are each measure's difference from
+# its adjustment's base model: VT/PBW alone under the first two adjustments, VT/PBW
+# with sex and race under the third.
 # Usage: uvr run code/supplement/xsec_mortality_prediction.R
 # =============================================================================
 
@@ -64,7 +69,7 @@ final_dir <- final_dir_for("supplement")
 
 N_FOLDS <- 10
 N_BOOT <- 1000
-MIN_DEATHS <- 10L
+MIN_DEATHS <- 10L   # deaths and survivors each, per model: the CLIF minimum-count standard
 set.seed(20260923)
 MEASURES <- tribble(
   ~column,          ~label,                     ~family,
@@ -153,7 +158,7 @@ cross_validated <- function(dat, folds, rhs) {
 # difference from it is the measure's gain over the dose. Given VT/PBW, log VT/PFVC =
 # log VT/PBW + log PBW/PFVC, so VT/PFVC carries the PBW/PFVC ratio and its age-25
 # version the ratio's structural part.
-# A third adjustment adds sex and race to the second (2026-09-23): given VT/PBW, the
+# A third adjustment adds sex and race to the second: given VT/PBW, the
 # structural ratio (VT/PFVC at age 25) is sex, race and height's small sex-specific
 # hump, and sex and race predict death through routes other than the ventilator. Its
 # base model is VT/PBW with sex and race, and every row's difference is from that base.
@@ -207,10 +212,10 @@ evaluate_sample <- function(sample_label, ids_for) {
           versus_vtpbw <- boot - rep(boot["vtpbw", ], each = nrow(boot))
           rows_here <- rows_here %>% mutate(
             auc_lo = apply(boot, 1, quantile, 0.025)[measure], auc_hi = apply(boot, 1, quantile, 0.975)[measure],
-            delta_auc_vs_vtpbw = auc - auc[measure == "vtpbw"],
+            delta_auc_vs_base_model = auc - auc[measure == "vtpbw"],
             delta_auc_lo = apply(versus_vtpbw, 1, quantile, 0.025)[measure],
             delta_auc_hi = apply(versus_vtpbw, 1, quantile, 0.975)[measure],
-            delta_aic_vs_vtpbw = aic - aic[measure == "vtpbw"])
+            delta_aic_vs_base_model = aic - aic[measure == "vtpbw"])
           # pairwise within each family: PFVC against PBW, PFVC at age 25 against PBW,
           # PFVC against PFVC at age 25 (the age term's share)
           pairwise[[length(pairwise) + 1]] <<- imap_dfr(FAMILY_TRIPLETS, function(triplet, family) {
@@ -248,8 +253,8 @@ for (adjustment_label in ADJUSTMENT_LABELS) {
           " (difference from the base model, with a paired bootstrap interval):")
   print(as.data.frame(results %>% filter(startsWith(sample, "common"), form == "spline", adjustment == adjustment_label) %>%
                         arrange(outcome, desc(auc)) %>%
-                        select(outcome, label, auc, auc_lo, auc_hi, delta_auc_vs_vtpbw, delta_auc_lo, delta_auc_hi,
-                               delta_aic_vs_vtpbw, brier, n_patients, n_deaths) %>%
+                        select(outcome, label, auc, auc_lo, auc_hi, delta_auc_vs_base_model, delta_auc_lo, delta_auc_hi,
+                               delta_aic_vs_base_model, brier, n_patients, n_deaths) %>%
                         mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 }
 message("\nWithin each family, the size scalings against each other (spline form, AUC difference, paired bootstrap):")
@@ -265,7 +270,7 @@ write_csv(results, file.path(final_dir, paste0("mortality_prediction_", site_nam
 write_csv(pairwise, file.path(final_dir, paste0("mortality_prediction_pairwise_", site_name, ".csv")))
 
 # =============================================================================
-# Figure: cross-validated AUC and its difference from VT/PBW, common sample
+# Figure: cross-validated AUC and its difference from the base model, common sample
 # =============================================================================
 figure_rows <- results %>% filter(startsWith(sample, "common"), form == "spline", outcome == OUTCOMES[["deceased"]]) %>%
   mutate(label = factor(label, levels = rev(MEASURES$label)), adjustment = factor(adjustment, levels = ADJUSTMENT_LABELS))
@@ -278,7 +283,7 @@ auc_panel <- ggplot(figure_rows, aes(auc, label, colour = family)) +
        subtitle = sprintf("3-df spline of the log measure (and of log VT/PBW); %d-fold cross-validation; the same patients for every measure", N_FOLDS),
        x = "AUC (95% bootstrap interval)", y = NULL) +
   theme_minimal(base_size = 10) + theme(legend.position = "bottom")
-delta_panel <- ggplot(figure_rows, aes(delta_auc_vs_vtpbw, label, colour = family)) +
+delta_panel <- ggplot(figure_rows, aes(delta_auc_vs_base_model, label, colour = family)) +
   geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
   geom_pointrange(aes(xmin = delta_auc_lo, xmax = delta_auc_hi)) +
   facet_wrap(~ adjustment) +

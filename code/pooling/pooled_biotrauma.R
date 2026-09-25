@@ -1,12 +1,12 @@
 # =============================================================================
-# Pooled biotrauma results across sites (run centrally, like pooled_estimates.R)
+# Pooled biotrauma results across sites (run centrally by the coordinator)
 # =============================================================================
 # Discovers each site's aggregate biotrauma outputs under a results root that
 # holds one subfolder per site (each site's final/ renamed to the site name,
 # PBWPFVC_RESULTS_ROOT, default results/). The pooled tables and forests go to
 # the All sites/ subfolder, which is excluded from discovery.
 #
-# How the pooling is done (2026-09-22):
+# How the pooling is done:
 #   units   log_pfvc_sd is standardised inside each site's own panel, so a per-SD
 #           estimate means a different lung-size difference at every site. Every
 #           per-SD estimate is converted to per 0.1 log units of PFVC using that
@@ -20,11 +20,13 @@
 #           pooled row, and a REML + Knapp-Hartung estimate is added as a
 #           sensitivity from k = 3. A failed random-effects fit is reported in
 #           re_status, never silently replaced.
-#   gate    a site enters a pool only if its own chain converged for that term
-#           (rhat <= 1.1); the difference-in-differences uses its both_converged
-#           flag. The hazard blocks of the 7-day fits do not converge, so the
-#           association hazard ratios are pooled without a gate and read as
-#           descriptive.
+#   gate    a site's longitudinal term enters a pool only if its own chain
+#           converged for that term (rhat <= 1.1, the standard convergence
+#           threshold); the difference-in-differences uses its both_converged flag.
+#           Two families are pooled without an rhat gate: the association hazard
+#           ratios, because the hazard blocks of the 7-day fits do not converge (read
+#           as descriptive), and the level contrasts (each site's table carries its
+#           rhat columns, which are not applied here).
 #
 # What is pooled (each row is estimate + standard error per site):
 #   jm_level_contrast_*    the joint model's marker difference per SD of log PFVC
@@ -49,7 +51,9 @@
 # Joint-model tables are keyed by the panel horizon in the file tag (24h/48h/72h)
 # as well as the contrast horizon, so one site's three panels are never pooled as
 # three sites. Every pooled row carries k, I2, tau2 and the per-site estimates it
-# was built from. Sites are anonymised with utils/site_anonymization.R when present.
+# was built from. Sites are anonymised with utils/site_anonymization.R as they are
+# read ("Site A" = the largest cohort, from each site's attrition log), and the
+# script stops if a real site name reaches any pooled table.
 #
 # Usage: PBWPFVC_RESULTS_ROOT=/path/to/results uvr run code/pooling/pooled_biotrauma.R
 # =============================================================================
@@ -62,20 +66,17 @@ out_dir <- file.path(root, "All sites"); dir.create(out_dir, showWarnings = FALS
 sites <- setdiff(list.dirs(root, recursive = FALSE, full.names = FALSE), "All sites")
 sites <- sites[!startsWith(sites, ".")]
 message("Sites: ", paste(sites, collapse = ", "))
-# site labels: the project's anonymization (built from each site's cohort size)
-# when it can be built, otherwise the folder names
-anon <- identity
-site_levels <- sort(sites)          # largest cohort first once the alias table is built
-if (file.exists(here("utils", "site_anonymization.R"))) {
-  source(here("utils", "site_anonymization.R"))
-  alias_tbl <- tryCatch(build_site_aliases(file.path(root, sites)), error = function(e) NULL)
-  if (!is.null(alias_tbl)) {
-    aliases <- alias_tbl$aliases
-    anon <- function(x) anonymize_site(x, aliases)
-    site_levels <- alias_tbl$table$site_label
-  } else message("site anonymization unavailable for this root (", "no cohort sizes); using folder names")
-}
-# the cross-sectional pooling's palette and ordering (pooled_estimates.R): Okabe-Ito
+# Site labels: "Site A", "Site B", ... by cohort size, largest first, from each site's
+# attrition log. Every table is aliased as it is read (read_family), so no real site
+# name enters a pool, a figure or a written table; a site without an attrition log
+# stops the script.
+source(here("utils", "site_anonymization.R"))
+alias_tbl <- build_site_aliases(file.path(root, sites))
+print_site_alias_key(alias_tbl)
+anon <- function(x) anonymize_site(x, alias_tbl$aliases)
+site_levels <- alias_tbl$table$site_label
+REAL_SITE_NAMES <- unique(c(alias_tbl$table$site, alias_tbl$table$folder))
+# the coordinator's cross-sectional pooling script uses the same palette and ordering: Okabe-Ito
 # by cohort, largest first, so a cohort keeps its colour across every pooled figure;
 # the pooled estimate is a black diamond on a row at the foot of each panel
 okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
@@ -138,7 +139,7 @@ read_family <- function(pattern, folders = c("", "injury")) {
     fs <- list.files(file.path(root, s, folders), pattern = pattern, full.names = TRUE)
     if (!length(fs)) return(NULL)
     map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5) %>%
-              mutate(site = s, file = basename(f), .before = 1))
+              mutate(site = anon(s), file = basename(f), .before = 1))
   })
 }
 
@@ -214,7 +215,8 @@ to_log_units <- function(d, per_sd, other_unit) {
 
 pooled <- list()
 
-# --- 1. joint-model level contrasts (the PFVC-level question)
+# --- 1. joint-model level contrasts (the PFVC-level question), pooled without an
+#        rhat gate (see the header)
 lc <- read_family("^jm_level_contrast_.*\\.csv$")
 if (nrow(lc)) {
   lc <- lc %>% mutate(se = (hi - lo) / 3.92,
@@ -226,7 +228,7 @@ if (nrow(lc)) {
     mutate(scale = "log marker; log-odds for any_pressor")
 }
 
-# --- 2. association hazard ratios (Q2)
+# --- 2. association hazard ratios (22_biotrauma_fit.R), pooled without an rhat gate
 ah <- read_family("^jm_association_hr_.*\\.csv$")
 if (nrow(ah)) {
   ah <- ah %>% mutate(estimate = log_hr, se = (log_hr_hi - log_hr_lo) / 3.92,
@@ -242,7 +244,7 @@ if (nrow(es)) {
   # written with the interaction components in either order; canonical_term sorts them
   key <- canonical_term(c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
            "log_pfvc_sd", "log_pfvc_sd:vent_day", "ldisc_sd", "ldisc_sd:vent_day",
-           "vtpfvc_c", "vtpfvc_c:vent_day",   # the VT/PFVC companion (figure 4, step 7)
+           "vtpfvc_c", "vtpfvc_c:vent_day",
            "ers_pfvc_0:l_vtpbw_within", "vtpbw_pt_mean",
            CHANNELS, paste0(CHANNELS, ":vent_day")))
   es <- es %>% mutate(term = canonical_term(term)) %>% filter(block == "longitudinal", term %in% key) %>%
@@ -261,7 +263,7 @@ if (nrow(es)) {
   pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, form)
 }
 
-# --- 7. the figure-4 causal support: the difference-in-differences against the
+# --- 4. the figure-4 causal support: the difference-in-differences against the
 #        no-support control, per SD of log PFVC per day in the ventilated cohort's
 #        units, converted by to_log_units.
 did <- read_family("^jm_control_did_.*\\.csv$")
@@ -279,10 +281,10 @@ if (nrow(did)) {
     mutate(scale = "ventilated minus no-support divergence, log marker per day")
 }
 
-# --- 7b. the same difference against the hypoxemic control (index-day SF < 315,
-#         27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
-#         ventilation and not in hypoxemia. Its own file family, so it never mixes with
-#         figure 4's DiD; not drawn in the pooled figure 4.
+# --- 5. the same difference against the hypoxemic control (index-day SF < 315,
+#        27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
+#        ventilation and not in hypoxemia. Its own file family, so it never mixes with
+#        figure 4's DiD; not drawn in the pooled figure 4.
 hdid <- read_family("^jm_hypoxemic_control_did_.*\\.csv$")
 if (nrow(hdid)) {
   hdid <- hdid %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_hypoxemic_control_did", "pfvc"),
@@ -297,12 +299,13 @@ if (nrow(hdid)) {
     mutate(scale = "ventilated minus hypoxemic no-support divergence, log marker per day")
 }
 
-# --- 8. the height fingerprint (28_height_fingerprint.R): the rate per log unit of
+# --- 6. the height fingerprint (28_height_fingerprint.R): the rate per log unit of
 #        PBW/PFVC moved by height within sex, beside the whole ratio's rate (the
 #        predicted value), and the difference in differences against the no-support
 #        control. Log units of the ratio are the same at every site, so nothing is
 #        converted. The pooled minimum detectable effect (80% power) says whether
 #        the pool can see the predicted value.
+MDE_Z <- 1.96 + 0.84   # two-sided 5% test with 80% power: the MDE is MDE_Z standard errors
 fp <- read_family("^fingerprint_.*\\.csv$")
 if (nrow(fp)) {
   fp_est <- fp %>% filter(grepl("^fingerprint_[a-z]+_", file), !grepl("^fingerprint_(ladder|curves|did)_", file))
@@ -312,7 +315,7 @@ if (nrow(fp)) {
     pooled$fingerprint <- pool_by(fp_est, marker, model, quantity, shared_df, adjustment) %>%
       left_join(predicted, by = c("marker", "adjustment")) %>%
       mutate(predicted_rate = if_else(model == "fingerprint" & quantity == "rate", predicted_rate, NA_real_),
-             mde_80 = 2.80 * se, detectable = abs(predicted_rate) >= mde_80,
+             mde_80 = MDE_Z * se, detectable = abs(predicted_rate) >= mde_80,
              scale = "log marker (per day for the rate) per log unit of PBW/PFVC")
   }
   fp_did <- fp %>% filter(grepl("^fingerprint_did_", file))
@@ -322,7 +325,7 @@ if (nrow(fp)) {
       mutate(scale = "ventilated minus no-support fingerprint rate, log marker per day per log unit of PBW/PFVC")
 }
 
-# --- 9. the supplement's contrasts (2026-09-24): the mortality control contrast and its
+# --- 7. the supplement's contrasts: the mortality control contrast and its
 #        channel breakdown (supplement/xsec_pfvc_age_control.R), and the compliance
 #        channels (supplement/xsec_crs_channels.R). Read from each site's supplement/.
 #   channels     each GLI piece per cohort and ventilated minus no support, per log
@@ -422,8 +425,8 @@ if (nrow(crs_tbl)) {
     mutate(note = "AIC differences summed across sites (additive over independent samples); below 0 favours the non-PBW exposure")
 }
 
-# --- 10. figures for the channel results (2026-09-24): one PDF, three pages.
-#   page 1  the candidate figure 5: for each GLI piece, the ventilated-minus-no-support
+# --- 8. figures for the channel results: one PDF, three pages.
+#   page 1  for each GLI piece, the ventilated-minus-no-support
 #           mortality difference by site and pooled, for the three outcomes, beside the
 #           Crs exponent through the same piece (the inputs that move measured compliance
 #           are the ones strain predicts will carry a ventilator-specific association)
@@ -443,7 +446,7 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
   channel_rows <- function(quantities, populations, outcomes) {
     sites_part <- channels_tbl %>%
       filter(exposure == FIGURE_EXPOSURE, quantity %in% quantities, population %in% populations, outcome %in% outcomes, !is.na(log_ratio)) %>%
-      per_0.1() %>% transmute(population, outcome, quantity, piece, site = anon(site), ratio, lo, hi, is_pooled = FALSE)
+      per_0.1() %>% transmute(population, outcome, quantity, piece, site, ratio, lo, hi, is_pooled = FALSE)
     pooled_part <- pooled$age_control_channels %>%
       filter(exposure == FIGURE_EXPOSURE, quantity %in% quantities, population %in% populations, outcome %in% outcomes) %>%
       transmute(population, outcome, quantity, piece, site = "Pooled", ratio = ratio_per_0.1, lo = lo_per_0.1,
@@ -473,7 +476,7 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
   if (exists("crs_tbl") && nrow(crs_tbl) && !is.null(pooled$crs_channels)) {
     crs_rows <- bind_rows(
       crs_tbl %>% filter(sample == "all plateau-measured", model == "channels") %>%
-        transmute(piece = term, site = anon(site), estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, is_pooled = FALSE),
+        transmute(piece = term, site, estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, is_pooled = FALSE),
       pooled$crs_channels %>% filter(sample == "all plateau-measured", model == "channels") %>%
         transmute(piece = term, site = "Pooled", estimate = pooled, lo, hi, is_pooled = TRUE)) %>%
       mutate(piece = factor(piece, levels = PIECE_ORDER),
@@ -516,16 +519,24 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
   message("channel figures -> ", file.path(out_dir, "pooled_biotrauma_channels.pdf"))
 }
 
-# --- write
+# --- write. Every table was aliased as it was read; stop if a real site name reached
+#     any pooled table all the same (a site column, or a ";"-joined sites list).
+leaked <- imap(pooled, function(tbl, nm) {
+  values <- tbl %>% select(where(is.character)) %>% unlist(use.names = FALSE) %>% str_split(";") %>% unlist()
+  intersect(values, REAL_SITE_NAMES)
+}) %>% compact()
+if (length(leaked))
+  stop("real site name(s) in pooled table(s): ",
+       paste(names(leaked), map_chr(leaked, paste, collapse = ", "), sep = ": ", collapse = "; "))
 for (nm in names(pooled)) {
   write_csv(pooled[[nm]], file.path(out_dir, paste0("pooled_biotrauma_", nm, ".csv")))
   message(nm, ": ", nrow(pooled[[nm]]), " pooled rows")
 }
 
 # --- figure 4 pooled: the divergence and the control contrast that tests it, site by
-#     site and pooled, one file per adjustment. Main model, the daily panel, PFVC
-#     units only: the VT/PFVC divergence is on its own scale and is not drawn here.
-DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day", vtpfvc = canonical_term("vtpfvc_c:vent_day"))
+#     site and pooled, one file per adjustment. Main model, the daily panel, per
+#     0.1 log units of PFVC only.
+DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day")
 FIG4_COLUMNS <- c(divergence = "Ventilated cohort:\ndivergence by predicted lung size",
                   did = "Ventilated minus no-support control\n(difference-in-differences)")
 # the column label is read from the calling environment (.env) so that no table column
@@ -533,7 +544,7 @@ FIG4_COLUMNS <- c(divergence = "Ventilated cohort:\ndivergence by predicted lung
 fig4_rows <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, grepl("d$", panel_h)) %>%
-    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = anon(site),
+    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site,
               estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se)
 }
 fig4_pooled <- function(d, column_key, keep = TRUE) {
@@ -569,7 +580,7 @@ if (!is.null(fd4) && nrow(fd4)) {
 if (nrow(lc) && any(lc$form == "pfvc" & lc$panel_h == paste0(lc$horizon_h, "h"))) {
   # the primary read: the pfvc form's contrast at each contrast horizon, from the panel of the same length
   fd <- lc %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
-    transmute(marker, adjustment, horizon_h, unit, site = anon(site), estimate, lo, hi) %>%
+    transmute(marker, adjustment, horizon_h, unit, site, estimate, lo, hi) %>%
     bind_rows(pooled$level_contrast %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
                 transmute(marker, adjustment, horizon_h, unit, site = POOLED_LABEL, estimate = pooled, lo, hi)) %>%
     filter(startsWith(unit, "per ")) %>%
