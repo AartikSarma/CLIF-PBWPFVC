@@ -240,7 +240,6 @@ first_support <- rs_dev %>% group_by(hospitalization_id) %>%
             .groups = "drop")
 niv_ids   <- first_support %>% filter(is.finite(first_niv), !is.finite(first_imv) | first_niv < first_imv) %>% pull(hospitalization_id)
 # no-support control: a room-air / nasal-cannula row before any advanced support
-# (the 24-hour landmark after the index is applied in script 03)
 nosup_ids <- first_support %>% filter(is.finite(first_nosup), !is.finite(first_adv) | first_nosup < first_adv) %>% pull(hospitalization_id)
 cohort_ids <- switch(config$cohort, imv = imv_ids, niv = niv_ids, nosupport = nosup_ids)
 cohort_rule <- switch(config$cohort,
@@ -301,17 +300,30 @@ resp_waterfall <- process_resp_support_waterfall(resp_support_cohort)
 # Extract height
 # =============================================================================
 
-#Impute heights for patients with missing height data
+# Height plausibility (outlier-thresholds/, 120-230 cm) is applied to each height
+# record before the per-hospitalization mean, so one mis-keyed record cannot pull a
+# patient's mean height into or out of the 150-210 cm eligibility window of script 03.
+height_limits <- read_csv(here("outlier-thresholds", "outlier_thresholds_adults_vitals.csv"),
+                          show_col_types = FALSE) %>%
+  filter(vital_category == "height_cm") %>%
+  mutate(across(c(lower_limit, upper_limit), as.numeric))
+if (nrow(height_limits) != 1) stop("outlier_thresholds_adults_vitals.csv needs one height_cm row")
+plausible_height_records <- clif_vitals %>%
+  filter(vital_category == "height_cm", !is.na(vital_value)) %>%
+  mutate(height_cm = as.numeric(vital_value)) %>%
+  filter(!is.na(height_cm), height_cm >= height_limits$lower_limit, height_cm <= height_limits$upper_limit)
+message("Height records: ", sum(clif_vitals$vital_category == "height_cm" & !is.na(clif_vitals$vital_value)),
+        ", ", nrow(plausible_height_records), " within ", height_limits$lower_limit, "-",
+        height_limits$upper_limit, " cm")
+
+# Missing heights: the patient's median height from their other hospitalizations
 all_hospitalizations_for_heights <- 
   clif_hospitalization %>%
   filter(patient_id %in% eligible_patients) %>%
   distinct(patient_id, hospitalization_id)
 
 
-cohort_heights <- clif_vitals %>%
-  filter(vital_category == "height_cm") %>%
-  filter(!is.na(vital_value)) %>%
-  mutate(height_cm = as.numeric(vital_value)) %>%
+cohort_heights <- plausible_height_records %>%
   dplyr::select(hospitalization_id, height_cm) %>%
   summarize(height_cm = mean(height_cm), .by = hospitalization_id) %>%
   right_join(all_hospitalizations_for_heights) %>%
@@ -477,25 +489,36 @@ message("Mortality rate: ", round(mean(cohort_demographics$deceased) * 100, 1), 
 # Script 03 derives PBW/PFVC for them, script 04 fits the models (section 4j).
 #
 # One row per patient (last adult ICU admission, as for the analytic cohort).
-# Hypoxemia is classified from every SpO2 in the hospitalization: each SpO2 is
-# joined to the most recent respiratory-support record within FIO2_LOOKBACK_H (4 h); FiO2 comes from
-# fio2_set (fractions), from room-air device category (0.21), or from nasal-cannula
-# flow (0.21 + 0.03 x L/min, capped at 0.60); a SpO2 with no support record within
-# that window is taken as room air. Hypoxemic = any SF < 315 among SpO2 80-97 with a known
-# FiO2, or any SpO2 < 80. Patients with no SpO2 at all cannot be classified and are
-# dropped. This is deliberately lighter than the analytic cohort's waterfall (no
-# hourly scaffold), because it runs on every adult ICU hospitalization.
+# Hypoxemia is classified from the SpO2 values of the first NC_HYPOXEMIA_WINDOW_H hours
+# after the hospitalization's first ICU admission: each SpO2 is joined to the most
+# recent respiratory-support record with a known FiO2 within FIO2_LOOKBACK_H (4 h);
+# FiO2 comes from fio2_set (fractions), from a documented room-air row (0.21), or from
+# nasal-cannula flow (0.21 + 0.03 x L/min, capped at 0.60). A SpO2 with no such record
+# is unclassifiable (room air must be documented), unless it is below 80, which is
+# hypoxemic on any FiO2. Hypoxemic = any SpO2 < 80, or any SF < 315 among SpO2 80-97.
+# Patients with no classifiable SpO2 in the window are dropped. This is deliberately
+# lighter than the analytic cohort's waterfall (no hourly scaffold), because it runs
+# on every adult ICU hospitalization.
+# Each cohort's survival origin is written here too: the first ICU admission for the
+# non-ventilated control, the first invasive-ventilation record for the ventilated one.
+NC_HYPOXEMIA_WINDOW_H <- 24
 
+resp_tz <- attr(clif_respiratory_support$recorded_dttm, "tzone")
 nc_hosp <- clif_hospitalization %>%
   filter(age_at_admission >= 18, hospitalization_id %in% icu_ids) %>%
   arrange(desc(admission_dttm)) %>%
   distinct(patient_id, .keep_all = TRUE) %>%
-  mutate(imv_set_vt = hospitalization_id %in% imv_ids)
+  mutate(imv_set_vt = hospitalization_id %in% imv_ids) %>%
+  left_join(clif_adt %>% filter(tolower(location_category) == "icu", !is.na(in_dttm)) %>%
+              summarize(icu_admission_dttm = min(in_dttm), .by = hospitalization_id),
+            by = "hospitalization_id") %>%
+  left_join(first_support %>% filter(is.finite(first_imv)) %>%
+              transmute(hospitalization_id,
+                        first_imv_dttm = as.POSIXct(first_imv, origin = "1970-01-01", tz = resp_tz)),
+            by = "hospitalization_id")
 
 # heights: mean in the index hospitalization, else the patient's median elsewhere
-nc_height_all <- clif_vitals %>%
-  filter(vital_category == "height_cm", !is.na(vital_value)) %>%
-  mutate(height_cm = as.numeric(vital_value)) %>%
+nc_height_all <- plausible_height_records %>%
   summarize(height_cm = mean(height_cm), .by = hospitalization_id) %>%
   inner_join(clif_hospitalization %>% distinct(hospitalization_id, patient_id), by = "hospitalization_id")
 nc_heights <- nc_hosp %>% select(patient_id, hospitalization_id) %>%
@@ -522,15 +545,20 @@ nc_spo2 <- clif_vitals %>%
   filter(hospitalization_id %in% nc_hosp$hospitalization_id, vital_category == "spo2") %>%
   mutate(spo2 = as.numeric(vital_value)) %>%
   filter(!is.na(spo2), spo2 >= 50, spo2 <= 100, !is.na(recorded_dttm)) %>%
+  inner_join(nc_hosp %>% select(hospitalization_id, icu_admission_dttm), by = "hospitalization_id") %>%
+  filter(recorded_dttm >= icu_admission_dttm,
+         recorded_dttm <= icu_admission_dttm + lubridate::hours(NC_HYPOXEMIA_WINDOW_H)) %>%
   transmute(hospitalization_id, spo2_dttm = as.numeric(recorded_dttm), spo2)
 nc_fio2_dt <- as.data.table(nc_fio2); setkey(nc_fio2_dt, hospitalization_id, fio2_dttm)
 nc_spo2_dt <- as.data.table(nc_spo2); setkey(nc_spo2_dt, hospitalization_id, spo2_dttm)
 nc_sf <- nc_fio2_dt[nc_spo2_dt, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, fio2_dttm = spo2_dttm)] %>%
   as_tibble() %>%
-  mutate(fio2_est = coalesce(fio2_est, 0.21),          # no support record in the look-back = room air
-         sf = spo2 / fio2_est,
-         hypox_obs = spo2 < 80 | (spo2 <= 97 & sf < 315)) %>%
-  summarize(n_spo2 = n(), hypoxemic = any(hypox_obs), min_sf = min(sf), .by = hospitalization_id)
+  mutate(sf = spo2 / fio2_est,
+         classifiable = spo2 < 80 | !is.na(fio2_est),
+         hypox_obs = spo2 < 80 | (!is.na(sf) & spo2 <= 97 & sf < 315)) %>%
+  filter(classifiable) %>%
+  summarize(n_spo2 = n(), hypoxemic = any(hypox_obs), min_sf = suppressWarnings(min(sf, na.rm = TRUE)),
+            .by = hospitalization_id)
 
 # The ventilated control is valid only if the patient stayed non-hypoxemic for the
 # WHOLE ventilated period, and the SpO2-based rule above cannot see hypoxemia masked
@@ -586,7 +614,7 @@ nc_cohort <- nc_hosp %>%
   left_join(nc_heights, by = "hospitalization_id") %>%
   left_join(vent_hypox, by = "hospitalization_id") %>%
   select(hospitalization_id, patient_id, age_at_admission, sex_category, race_category,
-         height_cm, admission_dttm, discharge_dttm, death_dttm, deceased,
+         height_cm, admission_dttm, icu_admission_dttm, first_imv_dttm, discharge_dttm, death_dttm, deceased,
          imv_set_vt, hypoxemic, hypoxemic_during_vent, vent_fio2_documented, n_spo2, min_sf)
 message("Negative-control frame: ", nrow(nc_cohort), " adult ICU patients with SpO2; ",
         sum(!nc_cohort$hypoxemic & !nc_cohort$imv_set_vt), " non-hypoxemic non-ventilated, ",

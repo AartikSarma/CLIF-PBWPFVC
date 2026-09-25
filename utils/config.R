@@ -33,10 +33,10 @@ load_config <- function() {
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
   # Cohort (PBWPFVC_COHORT; environment variable only):
   #   "imv"        default, the paper's cohort: invasive ventilation with a set tidal volume
-  #   "nosupport"  the negative control: room air or nasal cannula only, no
-  #                advanced support before the index nor in the 24 h after it, so
-  #                strain per lung size cannot act; escalation to any support
-  #                later is a competing event
+  #   "nosupport"  the negative control: room air or nasal cannula at ICU admission,
+  #                no advanced support before the index, so strain per lung size
+  #                cannot act; escalation to any advanced support later ends
+  #                follow-up as a competing event or a censoring point
   #   "niv"        built on request only, not part of the paper: first advanced
   #                support is high-flow nasal cannula or non-invasive ventilation,
   #                with no invasive ventilation before it; intubation later is a

@@ -11,8 +11,8 @@
 #
 # Rules, all from outlier-thresholds/:
 #   labs, SpO2 and MAP     outlier_thresholds_labs.csv, outlier_thresholds_adults_vitals.csv
-#   height                 120-230 cm, a plausibility screen only; the 150-210 cm
-#                          eligibility window is applied in script 03
+#   height                 120-230 cm, applied per record in script 01; repeated here
+#                          as a check. The 150-210 cm eligibility window is script 03's
 #   ventilator settings    outlier_thresholds_respiratory_support.csv, per column
 #   driving pressure and   derived per row; a value out of range removes that row's
 #   compliance             plateau pressure (see the end of the script)
@@ -114,7 +114,8 @@ print(vital_summary)
 # =============================================================================
 # Heights: plausibility screen (120-230 cm)
 # =============================================================================
-# Implausible heights are set to NA. This is not the eligibility window: the
+# Script 01 already drops each implausible height record before averaging, so this
+# screen is a check and should remove nothing. It is not the eligibility window: the
 # 150-210 cm range of the GLI-2012 equations is applied in script 03 (3a).
 
 cohort_heights_clean <- cohort_heights %>%
