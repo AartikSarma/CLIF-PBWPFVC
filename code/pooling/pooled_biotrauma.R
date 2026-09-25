@@ -104,7 +104,7 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#F
 # per 10% smaller predicted lung" for every marker, and the strip names the marker
 # in words rather than by its column name.
 MARKER_LABELS <- c(platelets = "Platelets", creatinine = "Creatinine", bilirubin = "Bilirubin",
-                   pressor_dose = "Vasopressor dose\n(NE-equivalents per kg)", any_pressor = "Any vasopressor\n(log-odds)",
+                   pressor_dose = "Vasopressor dose\n(days on a pressor; conditional)", any_pressor = "Any vasopressor\n(on/off; log-odds)",
                    ne_equiv_peak = "Peak vasopressor\n(NE-equivalents per kg)", osi = "Oxygen saturation index",
                    sf = "SpO2 / FiO2\n(positive control)", dp = "Driving pressure")
 MARKER_WORSE  <- c(platelets = "lower", creatinine = "higher", bilirubin = "higher", pressor_dose = "higher",
@@ -256,6 +256,11 @@ to_log_units <- function(d, per_sd, other_unit) {
     select(-.per_sd, -.other_unit)
 }
 
+# Vasopressors are a two-part outcome: any_pressor (on/off, log-odds) and pressor_dose
+# (log dose on pressor days, conditional on being on a pressor). marker is a key of
+# every pool, so the two never mix; each pooled row names its own scale. The SD
+# conversion above is the same for a log-odds rate as for a log-marker rate.
+marker_scale <- function(marker) if_else(marker == "any_pressor", "log-odds of any vasopressor", "log marker")
 pooled <- list()
 PFVC_UNIT <- paste0("per ", PER_LOG_PFVC, " log PFVC")   # the harmonised unit the figures draw
 
@@ -287,7 +292,7 @@ if (nrow(lc)) {
                                 paste(with(lc_dropped, sprintf("%s %s %s (%s%s %s, size R-hat %.2f)", site, marker, adjustment,
                                                                arm_tag, form, panel_h, size_terms_rhat)), collapse = "\n  "))
   pooled$level_contrast <- pool_by(lc %>% filter(converged), marker, model, adjustment, exposure, unit, panel_h, horizon_h, grid, arm_tag, form) %>%
-    mutate(scale = "log marker; log-odds for any_pressor")
+    mutate(scale = marker_scale(marker))
 }
 
 # --- 2. association hazard ratios (22_biotrauma_fit.R), pooled without an rhat gate
@@ -333,7 +338,8 @@ if (nrow(es)) {
   es <- es %>% filter(size_gate) %>%
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
-  pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, arm_tag, form)
+  pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, arm_tag, form) %>%
+    mutate(scale = marker_scale(marker))
 }
 
 # --- 4. the figure-4 causal support: the difference-in-differences against the
@@ -351,7 +357,7 @@ if (nrow(did)) {
   did <- did %>% filter(both_converged) %>%
     to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
-    mutate(scale = "ventilated minus no-support divergence, log marker per day")
+    mutate(scale = paste0("ventilated minus no-support divergence, ", marker_scale(marker), " per day"))
 }
 
 # --- 5. the same difference against the hypoxemic control (index-day SF < 315,
@@ -369,7 +375,7 @@ if (nrow(hdid)) {
               pull(what) %>% paste(collapse = "\n  "))
   hdid <- hdid %>% filter(both_converged) %>% to_log_units(per_sd = TRUE, other_unit = NA_character_)
   if (nrow(hdid)) pooled$hypoxemic_control_did <- pool_by(hdid, marker, adjustment, unit, panel_h, form) %>%
-    mutate(scale = "ventilated minus hypoxemic no-support divergence, log marker per day")
+    mutate(scale = paste0("ventilated minus hypoxemic no-support divergence, ", marker_scale(marker), " per day"))
 }
 
 # --- 6. the height fingerprint (28_height_fingerprint.R): the rate per log unit of
@@ -642,7 +648,7 @@ if (!is.null(fd4) && nrow(fd4)) {
     if (!nrow(d)) next
     p4 <- draw_forest(d,
       title = paste0("Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation (", adj, ")"),
-      subtitle = paste0("log marker per day per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI; ",
+      subtitle = paste0("log marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI; ",
                         "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0)"),
       x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
     ggsave(file.path(out_dir, paste0("pooled_biotrauma_figure4", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),

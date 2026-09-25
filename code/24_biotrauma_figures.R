@@ -56,14 +56,19 @@ tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") 
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))
 # every marker 22_biotrauma_fit.R can fit; figure 4's runner fits all but dp,
-# ne_equiv_peak, oi and any_pressor, which are drawn only if a run supplies them
+# ne_equiv_peak and oi, which are drawn only if a run supplies them.
+# Vasopressors are a two-part (hurdle) outcome drawn as a pair: on/off (any_pressor,
+# every patient-day, log-odds) and the dose on the days a pressor runs (pressor_dose,
+# conditional on being on a pressor that day). Being on a pressor is itself an
+# outcome, so the dose part is read only in the full ventilated cohort: its row has
+# no ICU-admission or control column, and the checks figure uses the on/off part.
 worse <-c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
            ne_equiv_peak = "higher", pressor_dose = "higher", any_pressor = "higher",
            osi = "higher", oi = "higher")
 lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio\n(positive control:\nrecruitment, not injury)",
          dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents per kg,\nzero days included)",
-         pressor_dose = "Vasopressor dose\n(NE-equivalents per kg,\ndays on a pressor)",
-         any_pressor = "Any vasopressor (log-odds)",
+         pressor_dose = "Vasopressor dose\n(days on a pressor; conditional)\n(NE-equivalents per kg)",
+         any_pressor = "Any vasopressor\n(on/off; log-odds)",
          osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
 # Vasopressor dose is per kg, the clinical dosing scale, and is read like VT/PBW
@@ -115,7 +120,7 @@ if (MOD_FORM == "channels") {
     labs(title = "The size effect identified through each input to PFVC, joint model (death before H modelled)",
          subtitle = paste0(site_name, ": difference toward injury per log unit LOWER of each GLI piece; ",
                            "equal pieces = lung size is the operative quantity; log-odds for any vasopressor"),
-         x = "difference in the log marker toward injury per log unit lower (95% interval)", y = NULL) +
+         x = "difference in the log marker (log-odds for any vasopressor) toward injury per log unit lower (95% interval)", y = NULL) +
     theme(strip.text.y = element_text(angle = 0))
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_channels_", tag, ".pdf")), p_ch,
          width = 10, height = 2 + 1.6 * n_distinct(chd$marker))
@@ -187,7 +192,7 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
            coalesce(rhat_notes$note[match(m, rhat_notes$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.
-  # "platelets,bilirubin,creatinine,pressor_dose". Without it, every marker in the tables:
+  # "platelets,bilirubin,creatinine,any_pressor,pressor_dose". Without it, every marker in the tables:
   # PBWPFVC_FIG_ORDER first (default: the markers where the rate carries the finding),
   # the rest in the order of `lab`. Unconverged markers go last either way.
   fig_markers <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_MARKERS", ""), ",")[[1]])
@@ -305,12 +310,17 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
     arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 4 + match(k, order(-sf_lo)) / 10,
                                 label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("< ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
   }
+  # The dose part (pressor_dose) is conditional on being on a pressor, an outcome, so it
+  # is never compared with a control: its row has no ICU-admission or control column,
+  # even where an older run left dose rows in those arms' tables.
+  CONDITIONAL_MARKERS <- "pressor_dose"
   arm_rate <- map_dfr(arms, function(a) {
     est <- read_arm(a$folder, a$restriction, a$site)
     if (is.null(est)) return(NULL)
     f <- if (is.null(a$unit_factor)) 1 else a$unit_factor   # the ventilated cohort's unit
     rate_rows(est %>% mutate(estimate = estimate * f, lo = lo * f, hi = hi * f)) %>%
-      filter(marker %in% present) %>%
+      filter(marker %in% present,
+             !(marker %in% CONDITIONAL_MARKERS & (a$restriction == "day0_" | grepl("^No support", a$label)))) %>%
       mutate(arm = a$label, strain_rank = a$rank)
   })
   all_label <- if (nrow(arm_rate)) "Ventilated,\nall" else "Ventilated"
@@ -331,7 +341,7 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
                             if ("day0" %in% names(arms)) "ventilated at ICU admission",
                             if (length(sf_found)) "ventilated by baseline SF",
                             if (!nrow(arm_rate)) "adjusted vs unadjusted"), collapse = "; "),
-         x = NULL, y = "change per day toward injury")
+         x = NULL, y = "change per day toward injury\n(log marker; log-odds for any vasopressor)")
   pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
     geom_hline(yintercept = 0.5, colour = "grey55") +
     geom_hline(yintercept = c(0.025, 0.975), linetype = 3, colour = "grey70") +
@@ -391,7 +401,9 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
                      title = "Against no-support patients hypoxemic at the index",
                      subtitle = "SF < 315, so the arms differ in ventilation, not hypoxaemia"))
   toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
-  check_order <- intersect(c("platelets", "bilirubin", "creatinine", "pressor_dose"),
+  # the vasopressor marker against the controls is the on/off part, never the
+  # conditional dose (27_control_comparison.R leaves the dose out of the DiD)
+  check_order <- intersect(c("platelets", "bilirubin", "creatinine", "any_pressor"),
                            unique(unlist(map(did_tables, ~ .x$table$marker))))
   check_label <- function(m) factor(lab[m], lab[check_order])
   VENTILATED_CHECK_LABEL <- "ventilated,\nat ICU admission"
@@ -415,7 +427,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
       facet_wrap(~ marker_lab, nrow = 1, scales = "free_y", drop = FALSE) +
       scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
       scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
-      labs(title = title, subtitle = subtitle, x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+      labs(title = title, subtitle = subtitle, x = NULL, y = "change per day toward injury\nper SD of log PFVC (log marker;\nlog-odds for any vasopressor)")
   }
   # 60-day death against each control, from the supplement's contrast table: log hazard
   # ratio per SD of log PFVC (the ventilated cohort's SD) in each cohort, and the
@@ -489,7 +501,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
       scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
       labs(title = "Sensitivity: the ventilated rate without the previous-day SF and pressor terms",
            subtitle = "every ventilated patient; rate per day toward injury per SD lower log PFVC",
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+           x = NULL, y = "change per day toward injury\nper SD of log PFVC (log marker;\nlog-odds for any vasopressor)")
   }
   # the divergence with and without the correction for patients leaving the panel: each
   # marker's ventilated divergence (the full cohort) from the joint model beside the
@@ -527,7 +539,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
       scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
       labs(title = "The divergence with and without the correction for patients leaving the panel",
            subtitle = "every ventilated patient; rate per day toward injury per SD lower log PFVC; hollow = the joint model's lung-size terms did not converge",
-           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+           x = NULL, y = "change per day toward injury\nper SD of log PFVC (log marker;\nlog-odds for any vasopressor)")
   }
   checks <- list()
   for (control_name in names(did_tables)) {
