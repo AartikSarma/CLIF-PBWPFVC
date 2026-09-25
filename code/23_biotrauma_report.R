@@ -22,7 +22,7 @@
 #
 # The fits read here share one clock: days from the index, every cause (death,
 # extubation or escalation, RRT) on it, each patient entering the survival submodel
-# at their first trajectory day; the baseline marker is the index-day (day 0) value.
+# at their first trajectory day; the baseline marker is its value in the first 24 h after the index (day 0).
 # The dose terms (VT/PBW at the index, and the previous day's VT/PBW minus the index)
 # are not reported: the manuscript does not read the dose inside the band, which is
 # confounded by indication.

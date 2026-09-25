@@ -41,7 +41,7 @@
 #   diverge faster.
 #   Every fit runs on one clock: days from the index (the first qualifying ventilator
 #   row; ICU admission in the control), each patient entering the survival submodel at
-#   their first trajectory day; the baseline marker is the index-day value; the dose is
+#   their first trajectory day; the baseline marker is its value in the first 24 h after the index; the dose is
 #   VT/PBW at the index and the previous day's VT/PBW minus the index (22_biotrauma_fit.R).
 #   each fit adjusted and unadjusted for age, sex and race
 #

@@ -45,7 +45,7 @@
 #     day gives a missing lag rather than a two-day-old one. VT/PFVC, its running
 #     mean and the count of days above STRAIN_CEILING are carried for the other
 #     model forms
-#   * each marker's baseline is its value on day 0 (the index day); a patient with
+#   * each marker's baseline is its value on day 0, the first 24 h after the index; a patient with
 #     no day-0 value has no baseline and leaves that marker's fit
 #   * markers on the day of observation: creatinine (daily max), platelets (daily
 #     min), bilirubin (daily max), SF ratio (daily worst), driving pressure (daily
@@ -90,7 +90,7 @@ source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP_H, STEP, JM_HORIZO
 # follow-up ending at the joint-model horizon
 HORIZON        <- 28L
 MAX_VENT_DAY   <- 27L
-FOLLOWUP_END_D <- JM_HORIZON
+FOLLOWUP_END_D <- JM_HORIZON   # 7 days = 168 h after the index: day-7 values fall outside
 is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synthetic_clif, synthetic_clif_b, ...)
 source(here("code", "10_panel_common.R"))
 # VT/PFVC (% of predicted FVC) above which a period counts toward the cumulative-strain
@@ -345,7 +345,7 @@ rrt <- rrt %>% select(-esrd)
 # control, escalation, and the horizon. event_time is the first of the three; a
 # death at the same instant as the competing event counts as death. It equals the
 # end of follow-up that 10 cut every measurement at.
-# Marker baselines are each marker's value on DAY 0, the index day (the same
+# Marker baselines are each marker's value on DAY 0, the first 24 h after the index (the same
 # reduction as the trajectory: creatinine and bilirubin max, platelets min, SF
 # worst, DP max, NE-equivalent peak); on the 6h grid, the first period of day 0
 # with a value. A later value would be a baseline measured after the exposure has
