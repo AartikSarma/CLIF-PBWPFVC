@@ -13,12 +13,17 @@
 #       day (descriptive), read by 27 before a control's divergence
 #   final/jm_lme_check_{tag}.csv        the level and divergence terms from the joint
 #       model beside the same terms from the longitudinal submodel fitted alone (no
-#       death or extubation correction): whether the unconverged hazard and
-#       association blocks move the answer
+#       death or extubation correction), each with its interval, and their difference:
+#       whether the hazard links move the answer
 #   final/jm_association_hr_{tag}.csv   hazard ratio for each cause (death;
 #       extubation, or escalation in the control; RRT in the rrtcause_ fits) per SD
 #       of the current log marker (value) and per unit slope; the cause is the
 #       survival stratum's own name
+#
+# Convergence: the figure's estimates are gated on the lung-size terms (rhat_gate, from
+# size_terms_rhat <= 1.1, 20_biotrauma_grid.R); the hazard-link convergence is reported
+# (hazard_rhat) and read with the longitudinal-only comparison (jm_lme_check_*). The
+# hazard-ratio table keeps its own gate on the association terms, which it reports.
 #
 # The fits read here share one clock: days from the index, every cause (death,
 # extubation or escalation, RRT) on it, each patient entering the survival submodel
@@ -76,10 +81,6 @@ N_DRAWS <- 1000L
 set.seed(20260913)
 
 manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv")), show_col_types = FALSE)
-# the gate by block, from the estimates table (so every fit is gated the same
-# way, whatever its manifest carries): longitudinal for the trajectory
-# contrasts and Q1, association for the death correction and Q2, hazard for Q3
-RHAT_GATE <- 1.1   # the standard convergence threshold
 # why each marker has no fit, from the manifest (skipped for too few patients or
 # deaths, or failed), for the messages below
 why_not <- function(m) {
@@ -93,24 +94,17 @@ if (!any(manifest$status %in% c("converged", "rhat_fail"))) {
   quit(save = "no", status = 0)
 }
 est_tbl <- read_csv(file.path(final_dir, paste0("jm_estimates_", out_tag, ".csv")), show_col_types = FALSE)
-# The exposure gate: the longitudinal block also carries nuisance terms (the
-# baseline marker, the age spline) whose chains mix worse than the exposure
-# terms; the trajectory contrasts need only the exposure terms and their
-# time interactions, so those are gated separately (`exposure_rhat`).
-SIZE_EXPOS <- c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS)
-DOSE_MOD   <- c("log_pfvc_sd:vtpbw_c", "vtpbw_c:log_pfvc_sd",
-                "log_pfvc_sd:vtpbw_c:vent_day", "vent_day:log_pfvc_sd:vtpbw_c",
-                "log_pfvc_sd:vent_day:vtpbw_c", "vtpbw_c:vent_day")
-EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_idx", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"),
-                paste0("vent_day:", SIZE_EXPOS), DOSE_MOD)
-block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
-  summarise(longitudinal_rhat = suppressWarnings(max(rhat[block == "longitudinal"], na.rm = TRUE)),
-            exposure_rhat     = suppressWarnings(max(rhat[block == "longitudinal" & term %in% EXPO_TERMS], na.rm = TRUE)),
-            association_rhat  = suppressWarnings(max(rhat[block == "association"],  na.rm = TRUE)),
-            hazard_rhat       = suppressWarnings(max(rhat[block == "survival"],     na.rm = TRUE)), .groups = "drop") %>%
-  mutate(across(ends_with("_rhat"), ~ if_else(is.finite(.), ., NA_real_)))
-manifest <- manifest %>% select(-any_of(c("longitudinal_rhat", "exposure_rhat", "association_rhat", "hazard_rhat"))) %>%
-  left_join(block_gates, by = c("marker", "model", "adjustment"))
+# The gate, from the estimates table (so every fit is gated the same way, whatever its
+# manifest carries): the lung-size terms for everything the figure reads
+# (fit_convergence(), 20_biotrauma_grid.R); the association block for the hazard
+# ratios, which ARE the association terms; the hazard links reported beside them.
+size_gates <- fit_convergence(est_tbl, MOD_FORM) %>%
+  left_join(est_tbl %>% group_by(marker, model, adjustment) %>%
+              summarise(association_rhat = suppressWarnings(max(rhat[block == "association"], na.rm = TRUE)), .groups = "drop") %>%
+              mutate(association_rhat = if_else(is.finite(association_rhat), association_rhat, NA_real_)),
+            by = c("marker", "model", "adjustment"))
+manifest <- manifest %>% select(-any_of(c("size_terms_rhat", "size_gate", "hazard_rhat", "hazard_gate", "association_rhat"))) %>%
+  left_join(size_gates, by = c("marker", "model", "adjustment"))
 usable <- manifest %>% filter(status %in% c("converged", "rhat_fail"))
 # PBWPFVC_JM_MARKERS restricts the report to those markers, as it does the fit:
 # re-reading every bundle costs minutes per marker, and a run that added one
@@ -147,7 +141,7 @@ report_write <- function(new, name) {
 }
 if (nrow(usable) == 0L) stop("No fitted joint models in the manifest for ", out_tag)
 message("=== 23_biotrauma_report (", out_tag, "): ", nrow(usable), " fits, of which ",
-        sum(usable$status == "converged"), " pass the R-hat gate ===")
+        sum(usable$size_gate, na.rm = TRUE), " pass the lung-size R-hat gate ===")
 
 # --- posterior draws of the longitudinal fixed effects, stacked across chains
 beta_draws <- function(jm, lme_fit) {
@@ -199,15 +193,14 @@ for (i in seq_len(nrow(usable))) {
               mean_abs_change = mean(abs(change)), mean_level = mean(level), .groups = "drop") %>%
     mutate(marker = u$marker, model = u$model, adjustment = u$adjustment, binary = binary, .before = 1)
   sd_log_y <- if (binary) 1 else sd(ld$log_y)   # binary outcome: report on the log-odds scale
-  gate <- u$status == "converged"
-  gate_long  <- isTRUE(is.finite(u$longitudinal_rhat) && u$longitudinal_rhat <= RHAT_GATE)
-  gate_assoc <- isTRUE(is.finite(u$association_rhat)  && u$association_rhat  <= RHAT_GATE)
-  gate_expo  <- isTRUE(is.finite(u$exposure_rhat)     && u$exposure_rhat     <= RHAT_GATE)
-  message(sprintf("  %-40s longitudinal %s (exposure terms %s), association %s, hazard %s", tag,
-                  if (gate_long) "pass" else sprintf("FAIL (%.2f)", u$longitudinal_rhat),
-                  if (gate_expo) "pass" else sprintf("FAIL (%.2f)", u$exposure_rhat),
-                  if (gate_assoc) "pass" else sprintf("FAIL (%.2f)", u$association_rhat),
-                  if (isTRUE(is.finite(u$hazard_rhat) && u$hazard_rhat <= RHAT_GATE)) "pass" else sprintf("FAIL (%.2f)", u$hazard_rhat)))
+  gate_size  <- isTRUE(u$size_gate)
+  gate_assoc <- isTRUE(passes_rhat_gate(u$association_rhat))
+  message(sprintf("  %-40s size terms %s, hazard links %s (association %s)", tag,
+                  if (gate_size) sprintf("pass (%.2f)", u$size_terms_rhat) else sprintf("FAIL (%.2f)", u$size_terms_rhat),
+                  if (isTRUE(u$hazard_gate)) sprintf("pass (%.2f)", u$hazard_rhat) else sprintf("FAIL (%.2f)", u$hazard_rhat),
+                  if (gate_assoc) "pass" else sprintf("FAIL (%.2f)", u$association_rhat)))
+  movement_rows[[length(movement_rows)]] <- movement_rows[[length(movement_rows)]] %>%
+    mutate(size_gate = gate_size, size_terms_rhat = u$size_terms_rhat)
 
   # ---- PFVC-level question: marker difference per SD of log PFVC (or of log
   #      PBW/PFVC) at each horizon hour within the grid, level + divergence x time,
@@ -234,8 +227,8 @@ for (i in seq_len(nrow(usable))) {
         p_equal = if (ex %in% CHANNELS) p_equal else NA_real_,
         scale = if (binary) "log-odds of any pressor" else "log marker",
         n_patients = u$n_patients, n_deaths = u$n_deaths,
-        rhat_gate = gate_long, rhat_gate_exposure = gate_expo, longitudinal_rhat = u$longitudinal_rhat,
-        exposure_rhat = u$exposure_rhat, association_rhat = u$association_rhat)
+        rhat_gate = gate_size, size_terms_rhat = u$size_terms_rhat,
+        hazard_rhat = u$hazard_rhat, association_rhat = u$association_rhat)
     }
   }
 
@@ -259,8 +252,10 @@ for (i in seq_len(nrow(usable))) {
           jm_estimate = mean(v), jm_lo = quantile(v, 0.025), jm_hi = quantile(v, 0.975),
           lme_estimate = unname(fe[[tm]]), lme_se = sqrt(fe_v[tm, tm]),
           lme_lo = lme_estimate - 1.96 * lme_se, lme_hi = lme_estimate + 1.96 * lme_se,
-          jm_minus_lme_in_lme_se = (jm_estimate - lme_estimate) / lme_se,
-          exposure_rhat = u$exposure_rhat, association_rhat = u$association_rhat, hazard_rhat = u$hazard_rhat,
+          jm_minus_lme = jm_estimate - lme_estimate,
+          jm_minus_lme_in_lme_se = jm_minus_lme / lme_se,
+          size_gate = gate_size, size_terms_rhat = u$size_terms_rhat,
+          hazard_rhat = u$hazard_rhat, association_rhat = u$association_rhat,
           n_patients = u$n_patients, n_deaths = u$n_deaths)
       }
     }
@@ -281,7 +276,8 @@ for (i in seq_len(nrow(usable))) {
       log_hr = mean(v), log_hr_lo = quantile(v, 0.025), log_hr_hi = quantile(v, 0.975),
       hr = exp(mean(v)), hr_lo = exp(quantile(v, 0.025)), hr_hi = exp(quantile(v, 0.975)),
       per = if (binary) "1 logit unit of P(any pressor)" else if (kind == "value") "1 SD of log marker" else "1 log-unit per day",
-      n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate_assoc, association_rhat = u$association_rhat)
+      n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate_assoc, association_rhat = u$association_rhat,
+      hazard_rhat = u$hazard_rhat, size_terms_rhat = u$size_terms_rhat)
   }
 }
 
@@ -300,8 +296,9 @@ lme_check <- bind_rows(lme_check_rows) %>% mutate(grid = JM_GRID, horizon_days =
 if (nrow(lme_check)) {
   report_write(lme_check, "lme_check")
   message("--- the size terms with and without the death correction (joint model against the LME alone)")
-  print(as.data.frame(lme_check %>% select(marker, adjustment, exposure, term, jm_estimate, lme_estimate, jm_minus_lme_in_lme_se,
-                                           association_rhat, hazard_rhat) %>% mutate(across(where(is.numeric), ~ signif(., 3)))),
+  print(as.data.frame(lme_check %>% select(marker, adjustment, exposure, term, jm_estimate, lme_estimate, jm_minus_lme,
+                                           jm_minus_lme_in_lme_se, size_terms_rhat, hazard_rhat) %>%
+                        mutate(across(where(is.numeric), ~ signif(., 3)))),
         row.names = FALSE)
 }
 report_write(association_hr,  "association_hr")

@@ -6,6 +6,8 @@ Scripts are numbered by the block they serve and run in number order.
 how to run it. Everything reads `config/config.json` through `utils/config.R`,
 which also decides where files are written.
 
+**Convergence.** Figure 4's estimates are gated on the lung-size terms the figure reads (for the pfvc form, `log_pfvc_sd` and `log_pfvc_sd:vent_day`): a fit counts as converged when their R-hat is at most 1.1 (`RHAT_GATE`, `20_biotrauma_grid.R`). The R-hat of the hazard links is reported beside it (`hazard_rhat`), and `jm_lme_check_` gives each estimate from the longitudinal model fitted alone, so a reader can see whether the joint model's correction for patients leaving the panel moves the answer.
+
 **Output file names are an interface between scripts.** The pooling and figure
 scripts find their inputs by file-name prefix, so a prefix changes together with
 its readers, in one commit. No other site has the code yet, so names are still free
@@ -22,7 +24,7 @@ to change; that stops once sites have returned `final/` folders.
 | `04_analysis.R` | figures 1–3, tables 1–2 | Demographic bias of PBW, mechanics, mortality regressions and survival (log PFVC the primary size term), negative controls, E-values, and figure 2's delivered-strain distribution and variance decomposition | `table1_`, `regression_results_long_`, `aic_comparison_all_`, `evalues_`, `consort_diagram_`, `negative_control_`, `size_`, `dose_` (figure 2) |
 | `05_normalization_analysis.R` | figure 3, supplement | PBW versus PFVC normalization of elastance and mechanical power: discordance, tertile reclassification, prognostic fit | `norm_discordance_`, `norm_prognostic_` |
 | `10_panel_common.R` | figure 4 | The daily patient-day panel. Sourced by 21, never run; writes nothing | |
-| `20_biotrauma_grid.R` | figure 4 | Time grid and the cohort-restriction knobs shared by 21–27. Sourced | |
+| `20_biotrauma_grid.R` | figure 4 | Time grid, the cohort-restriction knobs and the convergence gate shared by 21–28 and the pooling. Sourced | |
 | `21_biotrauma_panel.R` | figure 4 | Longitudinal and survival tables for the joint models | `jm_panel_summary_` |
 | `22_biotrauma_fit.R` | figure 4 | One joint model per organ-injury marker | `jm_manifest_`, `jm_estimates_`, `jm_scale_`, `jm_severity_anchor_` |
 | `23_biotrauma_report.R` | figure 4 | Level contrasts by horizon, marker movement, the size terms with and without the death correction, hazard associations | `jm_level_contrast_`, `jm_movement_`, `jm_lme_check_`, `jm_association_hr_` |

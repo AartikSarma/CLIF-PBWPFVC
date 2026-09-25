@@ -81,10 +81,14 @@
 # Site default: 44 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
 # and creatinine in the ventilated arm at ICU admission and in each control, the whole one
 # and the hypoxemic one; 3 markers and creatinine without the lags; each adjusted and
-# unadjusted) plus 1 channel fit, at 2000 / 500 iterations, four at a time. The survival
-# submodel is deliberately small (22_biotrauma_fit.R, HAZARD_SPEC) so that its hazard
-# blocks converge alongside the divergence terms the figure rests on.
-# Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
+# unadjusted) plus 1 channel fit, at 5000 / 1000 iterations, four at a time; a run takes
+# about 2.5 times as long as one at 2,000 iterations. The survival submodel is deliberately
+# small (22_biotrauma_fit.R, HAZARD_SPEC).
+# Convergence: the figure's estimates are gated on the lung-size terms (the size level and
+# divergence, R-hat <= 1.1, 20_biotrauma_grid.R); the hazard-link convergence is reported
+# (hazard_rhat in each manifest) and read with the longitudinal-only comparison
+# (jm_lme_check_*, and the checks figure's last panel).
+# Knobs (environment): ITER BURNIN CHAINS THIN (5000 / 1000 / 3 / 5), PAR (fits at a
 #   time, 4; a 7-day fit at a 7,000-patient site needs about 15-25 GB, so four at once
 #   can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
@@ -121,7 +125,7 @@ NOLAG_MARKERS             <- knob_or_skip("NOLAG_MARKERS", "platelets,bilirubin,
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
 CREATININE  <- knob("CREATININE", "1") == "1"
 SF_BANDS    <- strsplit(trimws(knob("SF_BANDS", "")), "[[:space:]]+")[[1]]   # e.g. "235,315 115,235 0,115"; off by default
-ITER   <- knob("ITER", "2000"); BURNIN <- knob("BURNIN", "500"); CHAINS <- knob("CHAINS", "3")
+ITER   <- knob("ITER", "5000"); BURNIN <- knob("BURNIN", "1000"); CHAINS <- knob("CHAINS", "3")
 THIN   <- knob("THIN", "5");    PAR    <- knob("PAR", "4")
 FORCE_BUILD <- knob("FORCE_BUILD", "0") == "1"
 FORCE_PANEL <- knob("FORCE_PANEL", "0") == "1"

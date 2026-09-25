@@ -20,14 +20,17 @@
 #           pooled row, and a REML + Knapp-Hartung estimate is added as a
 #           sensitivity from k = 3. A failed random-effects fit is reported in
 #           re_status, never silently replaced.
-#   gate    a site's longitudinal term enters a pool only if its own chain
-#           converged for that term (rhat <= 1.1, the standard convergence
-#           threshold); the difference-in-differences uses its both_converged flag.
-#           Two families are pooled without an rhat gate: the association hazard
-#           ratios, because the hazard blocks of the 7-day fits do not converge (read
-#           as descriptive), and the level contrasts (each site's table carries its
-#           rhat columns, which are not applied to the pool; a site whose exposure
-#           terms did not converge is drawn as a hollow point in the forest).
+#   gate    one gate, on the lung-size terms (20_biotrauma_grid.R): a site's fit enters
+#           a pool only if the R-hat of its size level and divergence is at or below
+#           1.1. The level contrasts use the rhat_gate column of the site's own table
+#           (the size gate, 23_biotrauma_report.R); the longitudinal terms use the
+#           fit's size gate computed from its estimates; the difference-in-differences
+#           uses both_converged, the size gate in both arms (27_control_comparison.R).
+#           A site left out is named, and drawn hollow in the level-contrast forest.
+#           The hazard-link convergence is reported by each site (hazard_rhat) and read
+#           with the longitudinal-only comparison. The association hazard ratios are
+#           pooled without a gate, because the hazard links of the 7-day fits do not
+#           converge (read as descriptive).
 #   arms    each joint-model table's arm tag (day0_, sevstd_, sf<lo>to<hi>_, nolag_,
 #           rrtcause_, offset_; parse_jm_name) is a grouping key, so a restricted or
 #           sensitivity fit pools only with the same arm at other sites; the figures
@@ -78,6 +81,7 @@ message("Sites: ", paste(sites, collapse = ", "))
 # name enters a pool, a figure or a written table; a site without an attrition log
 # stops the script.
 source(here("utils", "site_anonymization.R"))
+source(here("code", "20_biotrauma_grid.R"))   # RHAT_GATE, CHANNELS, fit_convergence()
 alias_tbl <- build_site_aliases(file.path(root, sites))
 print_site_alias_key(alias_tbl)
 anon <- function(x) anonymize_site(x, alias_tbl$aliases)
@@ -116,8 +120,8 @@ toward_injury <- function(d) {
 # One forest in the cross-sectional style: sites as coloured points with capped
 # intervals, the pooled estimate as a black diamond at the foot, one row per marker
 # and one column per `column`, each column on its own x scale. A site row whose
-# `converged` column is FALSE (its chain did not converge for the exposure terms; the
-# pool does not gate on it) is drawn as a hollow point.
+# `converged` column is FALSE (its lung-size terms did not converge, so it is not in
+# the pool) is drawn as a hollow point.
 draw_forest <- function(d, title, subtitle, x_label) {
   if (!"converged" %in% names(d)) d$converged <- NA
   d <- d %>% mutate(site = factor(site, levels = c(POOLED_LABEL, rev(site_levels))),
@@ -218,12 +222,10 @@ parse_jm_name <- function(file, family) {
 jm_form  <- function(file, family, default) parse_jm_name(file, family)$form %>% replace_na(default)
 jm_panel <- function(file, family) parse_jm_name(file, family)$panel_h
 jm_arm   <- function(file, family) parse_jm_name(file, family)$arm_tag
-CHANNELS <- c("ch_height", "ch_age", "ch_sex", "ch_race")
 # an interaction is written in whichever order the model formula produced it
 # (log_pfvc_sd:vent_day at one site, vent_day:log_pfvc_sd at another): sort the
 # components so the same term from two sites lands in one pool
 canonical_term <- function(term) map_chr(str_split(term, ":"), ~ paste(sort(.x), collapse = ":"))
-RHAT_MAX <- 1.1   # a site's estimate enters a pool only if its own chain converged
 
 # --- units. log_pfvc_sd is standardised inside each site's own panel, so a
 # per-SD estimate means a different lung-size difference at every site and the
@@ -267,20 +269,24 @@ drop_ldisc_sd <- function(d, column, family_label) {
   d[!is_ldisc, ]
 }
 
-# --- 1. joint-model level contrasts (the PFVC-level question), pooled without an
-#        rhat gate (see the header). A site whose exposure terms did not converge
-#        (rhat_gate_exposure FALSE in its own table) is drawn hollow in the forest.
+# --- 1. joint-model level contrasts (the PFVC-level question). A site enters only if
+#        its lung-size terms converged (rhat_gate, the size gate, in its own table); a
+#        site left out is named here and drawn hollow in the forest.
 lc <- read_family("^jm_level_contrast_.*\\.csv$")
 if (nrow(lc)) {
   lc <- lc %>% mutate(se = (hi - lo) / 3.92,
                       grid = if ("grid" %in% names(lc)) grid else NA_character_,
-                      converged = if ("rhat_gate_exposure" %in% names(lc)) as.logical(rhat_gate_exposure) else NA,
+                      converged = as.logical(rhat_gate),
                       arm_tag = jm_arm(file, "jm_level_contrast"),
                       form = jm_form(file, "jm_level_contrast", "pfvc"), panel_h = jm_panel(file, "jm_level_contrast")) %>%
     drop_ldisc_sd("exposure", "level contrasts") %>%
     to_log_units(per_sd = .$exposure == "log_pfvc_sd",
                  other_unit = if_else(.$exposure == "vtpfvc_c", "per point of VT/PFVC", "per site unit of the exposure"))
-  pooled$level_contrast <- pool_by(lc, marker, model, adjustment, exposure, unit, panel_h, horizon_h, grid, arm_tag, form) %>%
+  lc_dropped <- lc %>% filter(!converged) %>% distinct(site, marker, adjustment, arm_tag, form, panel_h, size_terms_rhat)
+  if (nrow(lc_dropped)) message("level contrasts left out of the pool, lung-size terms not converged:\n  ",
+                                paste(with(lc_dropped, sprintf("%s %s %s (%s%s %s, size R-hat %.2f)", site, marker, adjustment,
+                                                               arm_tag, form, panel_h, size_terms_rhat)), collapse = "\n  "))
+  pooled$level_contrast <- pool_by(lc %>% filter(converged), marker, model, adjustment, exposure, unit, panel_h, horizon_h, grid, arm_tag, form) %>%
     mutate(scale = "log marker; log-odds for any_pressor")
 }
 
@@ -305,20 +311,26 @@ if (nrow(es)) {
            "vtpfvc_c", "vtpfvc_c:vent_day",
            "ers_pfvc_0:l_vtpbw_within", "vtpbw_idx",
            CHANNELS, paste0(CHANNELS, ":vent_day")))
-  es <- es %>% mutate(term = canonical_term(term)) %>% filter(block == "longitudinal") %>%
+  es <- es %>% mutate(arm_tag = jm_arm(file, "jm_estimates"),
+                      form = jm_form(file, "jm_estimates", "disc"), panel_h = jm_panel(file, "jm_estimates"))
+  # the fit's lung-size gate (20_biotrauma_grid.R), one per site, arm and fit, from its
+  # full estimates table before the key terms are picked out
+  es_gate <- es %>% group_by(form) %>%
+    group_modify(~ fit_convergence(.x, .y$form, by = c("site", "file", "marker", "model", "adjustment"))) %>% ungroup()
+  es <- es %>% left_join(es_gate %>% select(form, site, file, marker, model, adjustment, size_terms_rhat, size_gate),
+                         by = c("form", "site", "file", "marker", "model", "adjustment")) %>%
+    mutate(term = canonical_term(term)) %>% filter(block == "longitudinal") %>%
     drop_ldisc_sd("term", "longitudinal terms") %>%
     filter(term %in% key) %>%
-    mutate(se = sd, grid = if ("grid" %in% names(es)) grid else NA_character_,
-           arm_tag = jm_arm(file, "jm_estimates"),
-           form = jm_form(file, "jm_estimates", "disc"), panel_h = jm_panel(file, "jm_estimates"))
-  # a site enters only if its own chain converged for that term; the dropped rows
-  # are named, not counted, so a reader can see which marker lost which site
-  dropped <- es %>% filter(!is.na(rhat), rhat > RHAT_MAX) %>%
-    transmute(what = paste0(site, " ", marker, " ", adjustment, " ", term, " (", arm_tag, form, " ", panel_h,
-                            ", rhat ", round(rhat, 2), ")"))
-  if (nrow(dropped)) message("longitudinal terms dropped for rhat > ", RHAT_MAX, ":\n  ",
+    mutate(se = sd, grid = if ("grid" %in% names(es)) grid else NA_character_)
+  # a site enters only if its fit's lung-size terms converged; the dropped fits are
+  # named, not counted, so a reader can see which marker lost which site
+  dropped <- es %>% filter(!size_gate) %>% distinct(site, marker, adjustment, arm_tag, form, panel_h, size_terms_rhat) %>%
+    transmute(what = paste0(site, " ", marker, " ", adjustment, " (", arm_tag, form, " ", panel_h,
+                            ", size R-hat ", round(size_terms_rhat, 2), ")"))
+  if (nrow(dropped)) message("longitudinal terms dropped, lung-size R-hat > ", RHAT_GATE, ":\n  ",
                              paste(dropped$what, collapse = "\n  "))
-  es <- es %>% filter(is.na(rhat) | rhat <= RHAT_MAX) %>%
+  es <- es %>% filter(size_gate) %>%
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
   pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, arm_tag, form)
@@ -333,7 +345,7 @@ if (nrow(did)) {
                            panel_h = jm_panel(file, "jm_control_did"),
                            estimate = did_estimate, se = did_sd, both_converged)
   if (any(!did$both_converged))
-    message("difference in differences dropped, an arm did not converge:\n  ",
+    message("difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
             did %>% filter(!both_converged) %>%
               transmute(what = paste(site, marker, adjustment)) %>% pull(what) %>% paste(collapse = "\n  "))
   did <- did %>% filter(both_converged) %>%
@@ -352,7 +364,7 @@ if (nrow(hdid)) {
                              panel_h = jm_panel(file, "jm_hypoxemic_control_did"),
                              estimate = did_estimate, se = did_sd, both_converged)
   if (any(!hdid$both_converged))
-    message("hypoxemic-control difference in differences dropped, an arm did not converge:\n  ",
+    message("hypoxemic-control difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
             hdid %>% filter(!both_converged) %>% transmute(what = paste(site, marker, adjustment)) %>%
               pull(what) %>% paste(collapse = "\n  "))
   hdid <- hdid %>% filter(both_converged) %>% to_log_units(per_sd = TRUE, other_unit = NA_character_)
@@ -660,7 +672,7 @@ if (nrow(lc) && any(lc$form == "pfvc" & lc$arm_tag == "" & lc$panel_h == paste0(
       title = paste0("Marker difference by predicted lung size at the horizon, joint model (", adj, ")"),
       subtitle = paste0("log marker per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI, death before the horizon modelled; ",
                         "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0); ",
-                        "any-vasopressor rows are log-odds; hollow point = the site's exposure terms did not converge (pooled regardless)"),
+                        "any-vasopressor rows are log-odds; hollow point = the site's lung-size terms did not converge (R-hat > 1.1; not pooled)"),
       x_label = "difference toward injury per 10% smaller predicted lung (95% CI)")
     ggsave(file.path(out_dir, paste0("pooled_biotrauma_level_contrast", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
            p, width = 4 + 3.5 * n_distinct(d$horizon_h), height = forest_height(d), limitsize = FALSE)

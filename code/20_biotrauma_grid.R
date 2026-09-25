@@ -2,7 +2,8 @@
 # Script 20 (grid): the time grid shared by the biotrauma panel, fit and report
 # =============================================================================
 # Sourced by 21_biotrauma_panel.R, 22_biotrauma_fit.R, 23_biotrauma_report.R,
-# 24_biotrauma_figures.R, 27_control_comparison.R and 28_height_fingerprint.R (and
+# 24_biotrauma_figures.R, 27_control_comparison.R, 28_height_fingerprint.R and
+# pooling/pooled_biotrauma.R (and
 # by supplement/xsec_crs_channels.R, supplement/xsec_pfvc_age_control.R and
 # tools/creatinine_positive_control.R for pfvc_channels() or h_suffix), so they
 # agree on the grid, the horizon, the output suffix and the cohort restrictions.
@@ -18,7 +19,8 @@
 #                         longitudinal submodel (sensitivity); file tag "nolag_"
 #
 # Defines: JM_GRID, STEP_H (hours per period), STEP (days per period),
-# JM_HORIZON (days), N_PERIODS (last period index), h_suffix ("48h" / "7d").
+# JM_HORIZON (days), N_PERIODS (last period index), h_suffix ("48h" / "7d"), and the
+# convergence gate every script applies (RHAT_GATE, size_terms_for(), fit_convergence()).
 # Time in every model is `vent_day` in days (period x STEP), so coefficients on
 # time and the random slope have the same units on both grids.
 # =============================================================================
@@ -105,6 +107,68 @@ height_fingerprint <- function(height_cm, sex_category) {
       log(rspiro::pred_GLI(age = rep(60, n), height = h / 100, gender = sex, ethnicity = rep(1L, n), param = "FVC"))
   }
   log_ratio(height_cm, sex) - log_ratio(170, 1L)
+}
+
+# ---- The convergence gate ------------------------------------------------------
+# One gate for every script that reads a joint model (22, 23, 24, 27 and the
+# pooling): a fit counts as converged when the R-hat of its LUNG-SIZE terms, the level
+# and the divergence the figure reads, is at or below RHAT_GATE. The hazard links (the
+# survival submodel and the association of the marker with each cause) are reported
+# beside it as hazard_rhat and read with the longitudinal-only comparison
+# (jm_lme_check_*, 23_biotrauma_report.R), which shows whether they move the estimate.
+RHAT_GATE <- 1.1   # the standard convergence threshold
+# the size terms per modifier form (22_biotrauma_fit.R, mod_terms): each form's size
+# level and its divergence (the level x vent_day interaction); an interaction is
+# matched in either order, as R writes the pair by appearance.
+#   pfvc, pfvc_dose  log_pfvc_sd, log_pfvc_sd:vent_day (pfvc_dose's dose-modified
+#                    terms are not size terms)
+#   disc_level       ldisc_sd, ldisc_sd:vent_day
+#   vtpfvc           vtpfvc_c, vtpfvc_c:vent_day
+#   channels         ch_height, ch_age, ch_sex, ch_race and each x vent_day
+# The dose-modification forms (not in the paper) have no divergence; their size terms are the
+# ones they read:
+#   disc             ldisc_c, l_vtpbw_within:ldisc_c
+#   saturated        log_pbw, log_pfvc, l_vtpbw_within:log_pbw, l_vtpbw_within:log_pfvc
+#   none             no size term; the dose slope l_vtpbw_within is what it reads
+SIZE_TERMS <- list(
+  pfvc       = c("log_pfvc_sd", "log_pfvc_sd:vent_day"),
+  pfvc_dose  = c("log_pfvc_sd", "log_pfvc_sd:vent_day"),
+  disc_level = c("ldisc_sd", "ldisc_sd:vent_day"),
+  vtpfvc     = c("vtpfvc_c", "vtpfvc_c:vent_day"),
+  channels   = c(CHANNELS, paste0(CHANNELS, ":vent_day")),
+  disc       = c("ldisc_c", "l_vtpbw_within:ldisc_c"),
+  saturated  = c("log_pbw", "log_pfvc", "l_vtpbw_within:log_pbw", "l_vtpbw_within:log_pfvc"),
+  none       = "l_vtpbw_within")
+# a term with its components sorted, so vent_day:log_pfvc_sd matches log_pfvc_sd:vent_day
+sorted_term <- function(term) vapply(strsplit(term, ":"), function(p) paste(sort(p), collapse = ":"), character(1))
+size_terms_for <- function(form) {
+  if (!form %in% names(SIZE_TERMS)) stop("unknown modifier form '", form, "': no size terms")
+  SIZE_TERMS[[form]]
+}
+# One fit's size-term R-hat: the maximum over the size terms of the longitudinal block.
+# `term`, `rhat` and `block` are the columns of one fit's rows of jm_estimates_*
+# (use inside summarise() grouped by fit). A fit whose table has none of the form's
+# size terms is an error, not a pass.
+size_rhat_of <- function(term, rhat, block, form) {
+  keep <- block == "longitudinal" & sorted_term(term) %in% sorted_term(size_terms_for(form))
+  if (!any(keep)) stop("no ", form, "-form size term among the fit's estimates (",
+                       paste(head(unique(term), 8), collapse = ", "), ", ...)")
+  max(rhat[keep])
+}
+# One fit's hazard R-hat: the maximum over the survival submodel and the association
+# parameters (value(log_y):strata...)
+hazard_rhat_of <- function(rhat, block) {
+  keep <- block %in% c("survival", "association")
+  if (any(keep)) max(rhat[keep]) else NA_real_
+}
+passes_rhat_gate <- function(rhat) !is.na(rhat) & is.finite(rhat) & rhat <= RHAT_GATE
+# The gate for every fit in an estimates table: one row per fit (the `by` columns) with
+# size_terms_rhat, size_gate, hazard_rhat and hazard_gate
+fit_convergence <- function(est, form, by = c("marker", "model", "adjustment")) {
+  est %>% group_by(across(all_of(by))) %>%
+    summarise(size_terms_rhat = size_rhat_of(term, rhat, block, form),
+              hazard_rhat     = hazard_rhat_of(rhat, block), .groups = "drop") %>%
+    mutate(size_gate = passes_rhat_gate(size_terms_rhat), hazard_gate = passes_rhat_gate(hazard_rhat))
 }
 
 # Wald test that the four channel coefficients (or contrasts) are equal:
