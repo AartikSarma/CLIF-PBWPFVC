@@ -48,7 +48,12 @@
 # Outputs: final/jm_estimates_{tag}.csv   every coefficient of every fit (poolable)
 #          final/jm_manifest_{tag}.csv    per fit: status, counts at each entry step
 #                                         (n_rows_after_*, n_patients_after_*), the
-#                                         fitted formulas, R-hat by block
+#                                         fitted formulas, the size-term and hazard R-hat
+#
+# Convergence: the figure's estimates are gated on the lung-size terms (the size
+# level and divergence, size_terms_rhat <= 1.1, 20_biotrauma_grid.R); the hazard-link
+# convergence is reported (hazard_rhat) and read with the longitudinal-only
+# comparison (jm_lme_check_*, 23_biotrauma_report.R).
 #          final/jm_severity_anchor_*, jm_severity_anchor_mean_*, jm_scale_*
 #          jm_fit_*.rds and jm_result_*.rds beside the inputs: fit bundles with
 #          patient-level rows inside, so never in final/
@@ -74,7 +79,8 @@
 #   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
 #   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
 #                           (pfvc form, daily grid; section 22f0) -> final/jm_shape_{tag}
-#   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs)
+#   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs;
+#                           29_run_figure4.R passes 5000 / 1000 / 3)
 #   PBWPFVC_JM_THIN         5   thinning of the stored draws
 #   PBWPFVC_JM_PAR          1   joint-model fits run at once
 #   PBWPFVC_CORES           detected cores - 2
@@ -216,12 +222,6 @@ USE_FRESH  <- identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")
 # below the core budget, and the stored draws are thinned (PBWPFVC_JM_THIN).
 N_FITS_MAX <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_PAR", "1")))
 N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
-# Terms whose convergence the paper depends on; the manifest reports their R-hat
-# beside the all-parameter maximum so a nuisance term cannot hide a converged read.
-KEY_TERMS <- c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
-               "^log_pfvc_sd", "^ldisc_sd", "vent_day:log_pfvc_sd", "vent_day:ldisc_sd", "^ch_", "vent_day:ch_",
-               "^vtpfvc_c", "vent_day:vtpfvc_c", "sev_anchor_c",
-               "value\\(log_y\\):stratadeath")
 # Progress reporting (see the MCMC block in fit_one). The pilot costs about
 # PILOT_ITER / N_ITER of one chain's time.
 USE_PILOT     <- !identical(Sys.getenv("PBWPFVC_JM_PILOT", "1"), "0")
@@ -248,7 +248,6 @@ stop_heartbeat <- function(hb) {
   unlink(hb$pidfile)
   invisible(NULL)
 }
-RHAT_GATE  <- 1.1   # the standard convergence threshold: every term's R-hat at or below it
 # Minimum counts for a fit, and for a marker's severity-anchor tables: the CLIF
 # minimum-count standard
 MIN_PATIENTS        <- 20L
@@ -872,22 +871,20 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     mutate(block = if_else(block == "survival" & grepl("value\\(|slope\\(", term), "association", block)) %>%
     bind_cols(counts[rep(1L, nrow(.)), ]) %>%
     mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON, site = site_name)
+  # The gate is on the lung-size terms (20_biotrauma_grid.R): the fit is "converged"
+  # when their R-hat is at or below RHAT_GATE. The hazard links (survival submodel and
+  # association) are reported beside it; the longitudinal-only comparison of 23 shows
+  # whether they move the size terms. The overall maximum is kept for information.
   max_rhat <- max(est$rhat, na.rm = TRUE)
-  gate <- is.finite(max_rhat) && max_rhat <= RHAT_GATE
   worst <- est %>% slice_max(rhat, n = 3, with_ties = FALSE)
-  key <- est %>% filter(grepl(paste(KEY_TERMS, collapse = "|"), term))
-  key_rhat <- if (nrow(key)) max(key$rhat, na.rm = TRUE) else NA_real_
-  key_gate <- is.finite(key_rhat) && key_rhat <= RHAT_GATE
-  # the gate by block: the trajectory contrasts come from the longitudinal block,
-  # the death correction from the association block, the hazard ratios from the
-  # hazard block; a ridge in the hazard block does not move the trajectory
+  conv <- fit_convergence(est, MOD_FORM, by = character())
+  gate <- conv$size_gate
   block_rhat <- function(bl) { v <- est$rhat[est$block == bl]; if (length(v) && any(is.finite(v))) max(v, na.rm = TRUE) else NA_real_ }
-  longitudinal_rhat <- block_rhat("longitudinal"); association_rhat <- block_rhat("association"); hazard_rhat <- block_rhat("survival")
-  gate_of <- function(r) is.finite(r) && r <= RHAT_GATE
-  stamp(sprintf("R-hat: longitudinal %.3f (%s), association %.3f (%s), hazard %.3f (%s); overall %.3f; worst: %s",
-                longitudinal_rhat, if (gate_of(longitudinal_rhat)) "pass" else "FAIL",
-                association_rhat, if (gate_of(association_rhat)) "pass" else "FAIL",
-                hazard_rhat, if (gate_of(hazard_rhat)) "pass" else "FAIL", max_rhat,
+  longitudinal_rhat <- block_rhat("longitudinal"); association_rhat <- block_rhat("association")
+  stamp(sprintf("R-hat: size terms %.3f (%s), hazard links %.3f (%s); longitudinal block %.3f, association %.3f; overall %.3f; worst: %s",
+                conv$size_terms_rhat, if (conv$size_gate) "pass" else "FAIL",
+                conv$hazard_rhat, if (conv$hazard_gate) "pass" else "FAIL",
+                longitudinal_rhat, association_rhat, max_rhat,
                 paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = ", ")))
 
   # terms with predvars: carries the ns() knots so the report can rebuild the
@@ -908,8 +905,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
                  counts = counts, entry_steps = entry_steps, estimates = est,
                  lme_formula = deparse1(lme_formula), cox_formula = deparse1(cox_formula),
-                 max_rhat = max_rhat, key_rhat = key_rhat,
-                 longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
+                 max_rhat = max_rhat, size_terms_rhat = conv$size_terms_rhat, hazard_rhat = conv$hazard_rhat,
+                 longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
                  entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, model_spec = MODEL_SPEC,
@@ -964,18 +961,26 @@ if (N_FITS_PAR > 1L) {
   results <- pmap(jobs, run_job)
 }
 
-manifest <- map_dfr(results, function(r)
+# The gate is computed here, from each fit's estimates, rather than taken from the
+# result file, so a cached fit is gated the same way as a new one: status "converged"
+# when the lung-size terms pass, "rhat_fail" when they do not ("skipped" and "failed"
+# as the fit left them).
+manifest <- map_dfr(results, function(r) {
+  conv <- if (is.null(r$estimates)) tibble(size_terms_rhat = NA_real_, size_gate = NA, hazard_rhat = NA_real_, hazard_gate = NA) else
+    fit_convergence(r$estimates, MOD_FORM, by = character())
+  status <- if (r$status %in% c("converged", "rhat_fail")) (if (conv$size_gate) "converged" else "rhat_fail") else r$status
   (if (is.null(r$entry_steps)) r$counts else bind_cols(r$counts, r$entry_steps)) %>%
-    mutate(status = r$status, reason = r$reason,
+    mutate(status = status, reason = r$reason,
            lme_formula = if (is.null(r$lme_formula)) NA_character_ else r$lme_formula,
            cox_formula = if (is.null(r$cox_formula)) NA_character_ else r$cox_formula,
+           size_terms_rhat = conv$size_terms_rhat, size_gate = conv$size_gate,
+           hazard_rhat = conv$hazard_rhat, hazard_gate = conv$hazard_gate,
            max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
-           key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
            longitudinal_rhat = if (is.null(r$longitudinal_rhat)) NA_real_ else r$longitudinal_rhat,
            association_rhat  = if (is.null(r$association_rhat))  NA_real_ else r$association_rhat,
-           hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
            worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
-           acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
+           acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)
+}) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC,
          model_spec = MODEL_SPEC, icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
@@ -1061,8 +1066,9 @@ merge_write(manifest,   "manifest")
 merge_write(estimates,  "estimates")
 
 message("\n========== 22_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
+message("status is the lung-size gate (size_terms_rhat <= ", RHAT_GATE, "); hazard_rhat is the survival submodel and association")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",
-                                                 "n_patients", "n_deaths", "max_rhat", "key_terms_rhat",
-                                                 "worst_terms")))),
+                                                 "n_patients", "n_deaths", "size_terms_rhat", "hazard_rhat",
+                                                 "max_rhat", "worst_terms")))),
       row.names = FALSE)
 message("Estimates: ", nrow(estimates), " rows -> ", final_dir)

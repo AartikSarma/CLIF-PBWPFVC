@@ -38,6 +38,12 @@
 #
 # Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
 #
+# Convergence: the figure's estimates are gated on the lung-size terms (size_gate, the
+# level and divergence with R-hat <= 1.1, 20_biotrauma_grid.R); both_converged is that
+# gate in both arms. The hazard-link convergence is reported (hazard_rhat) and read with
+# the longitudinal-only comparison: the same difference-in-differences from each arm's
+# longitudinal submodel fitted alone (did_lme_*, from jm_lme_check_*).
+#
 # A control arm is informative only if its marker MOVES. The movement panel (mean
 # change from baseline by day, from jm_movement_*) is therefore read before the
 # divergence: no movement, no possible divergence, and the arm cannot adjudicate.
@@ -51,9 +57,10 @@
 #   jm_control_comparison_{form}_{h}_{site}.csv    each arm's divergence, per SD of log
 #                                                  PFVC in that arm's own cohort
 #   jm_control_comparison_{form}_{h}_{site}.pdf
-#   jm_control_did_{form}_{h}_{site}.csv            ventilated at ICU admission minus the control
-#   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated at ICU admission minus the
-#                                                  hypoxemic control
+#   jm_control_did_{form}_{h}_{site}.csv            ventilated at ICU admission minus the control,
+#                                                  from the joint models (did_*) and from the
+#                                                  longitudinal submodels alone (did_lme_*)
+#   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  the same against the hypoxemic control
 #
 # Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/27_control_comparison.R
 # =============================================================================
@@ -71,7 +78,6 @@ base_site <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 stopifnot(MOD_FORM %in% c("pfvc", "channels"))
-RHAT_GATE <- 1.1   # the standard convergence threshold
 final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
@@ -122,6 +128,9 @@ each_arm <- function(table_name) map_dfr(seq_len(nrow(arms)), function(arm_i) re
 estimates <- each_arm("estimates")
 manifest  <- each_arm("manifest")
 movement  <- each_arm("movement")
+lme_check <- each_arm("lme_check")
+# the gate of every fit in every arm, from its own estimates (20_biotrauma_grid.R)
+convergence <- fit_convergence(estimates, MOD_FORM, by = c("arm", "marker", "model", "adjustment"))
 
 # ---- the comparison table: divergence and level per SD of log PFVC, with what qualifies them
 # sev_modification = the control's log_pfvc_sd:vent_day:sev_anchor_c: the change in the
@@ -151,11 +160,12 @@ movement_summary <- if (nrow(movement)) movement %>%
 comparison <- size_terms %>%
   left_join(manifest %>% filter(model == "main") %>%
               select(arm, marker, adjustment, n_patients, n_deaths, n_competing = n_extubations, status,
-                     hazard_rhat, any_of(c("sev_center", "sev_anchor", "sf_band", "n_iter"))),
+                     any_of(c("sev_center", "sev_anchor", "sf_band", "n_iter"))),
             by = c("arm", "marker", "adjustment")) %>%
   left_join(movement_summary, by = c("arm", "marker", "adjustment")) %>%
-  mutate(divergence_converged = divergence_rhat <= RHAT_GATE,
-         arm = factor(arm, levels = arms$arm),
+  left_join(convergence %>% filter(model == "main") %>% select(arm, marker, adjustment, size_terms_rhat, size_gate, hazard_rhat),
+            by = c("arm", "marker", "adjustment")) %>%
+  mutate(arm = factor(arm, levels = arms$arm),
          unit = "log marker per day per SD of log PFVC in this arm's cohort",
          form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
@@ -201,6 +211,35 @@ if (is.na(to_vent_sd)) {
 # No difference exists without both sides (the SD rescaling missing, or no fit on
 # one side): that is an empty table, which the callers report, not an error.
 VENTILATED_DID_ARM <- "Ventilated, at ICU admission"
+# The same difference from the longitudinal submodels fitted alone (each arm's
+# jm_lme_check_*: maximum likelihood, no correction for patients leaving the panel), so
+# the difference-in-differences can be read without the hazard links. The LME's
+# standard errors take the place of the posterior SDs; the control is put on the
+# ventilated unit in the same way.
+lme_did_against <- function(control_arm) {
+  none <- tibble(marker = character(), adjustment = character())
+  sides <- if (is.null(lme_check) || !nrow(lme_check)) tibble() else lme_check %>%
+    filter(model == "main", exposure == "log_pfvc_sd", term == "divergence per day",
+           arm %in% c(VENTILATED_DID_ARM, control_arm))
+  missing <- setdiff(c(VENTILATED_DID_ARM, control_arm), unique(sides$arm))
+  if (length(missing)) {
+    message("--- no longitudinal-only difference-in-differences against ", control_arm, ": no jm_lme_check_* divergence for ",
+            paste(missing, collapse = " and "))
+    return(none)
+  }
+  sides %>%
+    mutate(side = if_else(arm == VENTILATED_DID_ARM, "ventilated", "control"),
+           unit_factor = if_else(side == "control", to_vent_sd, 1),
+           lme_estimate = lme_estimate * unit_factor, lme_se = lme_se * unit_factor) %>%
+    select(marker, adjustment, side, lme_estimate, lme_se) %>%
+    pivot_wider(names_from = side, values_from = c(lme_estimate, lme_se)) %>%
+    filter(!is.na(lme_estimate_ventilated), !is.na(lme_estimate_control)) %>%
+    transmute(marker, adjustment,
+              divergence_lme_ventilated = lme_estimate_ventilated, divergence_lme_control = lme_estimate_control,
+              did_lme_estimate = lme_estimate_ventilated - lme_estimate_control,
+              did_lme_sd = sqrt(lme_se_ventilated^2 + lme_se_control^2),
+              did_lme_lo = did_lme_estimate - 1.96 * did_lme_sd, did_lme_hi = did_lme_estimate + 1.96 * did_lme_sd)
+}
 did_against <- function(control_arm) {
   both_arms <- comparison %>%
     filter(!is.na(to_vent_sd), arm %in% c(VENTILATED_DID_ARM, control_arm)) %>%
@@ -210,16 +249,21 @@ did_against <- function(control_arm) {
   # the control on the ventilated cohort's unit (the ventilated rows are multiplied by 1)
   mutate(unit_factor = if_else(side == "control", to_vent_sd, 1),
          divergence_estimate = divergence_estimate * unit_factor, divergence_sd = divergence_sd * unit_factor) %>%
-  select(marker, adjustment, side, divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model")) %>%
-  pivot_wider(names_from = side, values_from = c(divergence_estimate, divergence_sd, divergence_rhat, n_patients, any_of("creatinine_model"))) %>%
+  select(marker, adjustment, side, divergence_estimate, divergence_sd, divergence_rhat, size_terms_rhat, size_gate,
+         n_patients, any_of("creatinine_model")) %>%
+  pivot_wider(names_from = side, values_from = c(divergence_estimate, divergence_sd, divergence_rhat, size_terms_rhat, size_gate,
+                                                 n_patients, any_of("creatinine_model"))) %>%
   filter(!is.na(divergence_estimate_ventilated), !is.na(divergence_estimate_control)) %>%
+  rename(ventilated_size_rhat = size_terms_rhat_ventilated, control_size_rhat = size_terms_rhat_control) %>%
   mutate(did_estimate = divergence_estimate_ventilated - divergence_estimate_control,
          did_sd = sqrt(divergence_sd_ventilated^2 + divergence_sd_control^2),
          did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
          p_did_gt0 = pnorm(did_estimate / did_sd),
-         both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
+         both_converged = size_gate_ventilated & size_gate_control,
          control_to_ventilated_sd = to_vent_sd, ventilated_arm = VENTILATED_DID_ARM, control_arm = control_arm,
-         unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
+         unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site) %>%
+  select(-size_gate_ventilated, -size_gate_control) %>%
+  left_join(lme_did_against(control_arm), by = c("marker", "adjustment"))
 }
 did <- did_against("No support, at ventilated severity")
 HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF < 315"
@@ -231,7 +275,8 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
     message("--- difference-in-differences, ventilated at ICU admission against the hypoxemic control (index SF < 315)")
     print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                                     control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
-                                                    lo = signif(did_lo, 3), hi = signif(did_hi, 3), both_converged)), row.names = FALSE)
+                                                    lo = signif(did_lo, 3), hi = signif(did_hi, 3),
+                                                    did_lme = signif(did_lme_estimate, 3), both_converged)), row.names = FALSE)
   } else unlink(hypoxemic_did_path)
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
@@ -240,7 +285,8 @@ if (nrow(did)) {
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                         lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
-                                        both_converged)), row.names = FALSE)
+                                        did_lme = signif(did_lme_estimate, 3), did_lme_lo = signif(did_lme_lo, 3),
+                                        did_lme_hi = signif(did_lme_hi, 3), both_converged)), row.names = FALSE)
 } else {
   message("--- no marker has both a ventilated ICU-admission fit (day0_) and a severity-standardised control fit: no difference-in-differences")
   unlink(did_path)
@@ -250,7 +296,7 @@ message("--- divergence per day per SD of log PFVC (log marker units), adjusted"
 print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
                       transmute(marker, arm, n_patients, n_deaths, divergence = signif(divergence_estimate, 3),
                                 lo = signif(divergence_lo, 3), hi = signif(divergence_hi, 3),
-                                rhat = round(divergence_rhat, 2), hazard_rhat = round(hazard_rhat, 2),
+                                size_rhat = round(size_terms_rhat, 2), hazard_rhat = round(hazard_rhat, 2),
                                 sev_mod = if ("sev_modification_estimate" %in% names(comparison)) signif(sev_modification_estimate, 3) else NA_real_,
                                 sev_mod_lo = if ("sev_modification_lo" %in% names(comparison)) signif(sev_modification_lo, 3) else NA_real_,
                                 sev_mod_hi = if ("sev_modification_hi" %in% names(comparison)) signif(sev_modification_hi, 3) else NA_real_,
@@ -260,13 +306,13 @@ print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
 # ---- figure: the divergence by arm, above how much the marker moves in each arm
 arm_colours <- setNames(okabe[seq_len(nrow(arms))], arms$arm)
 if (nrow(arms) > length(okabe)) stop("more arms than Okabe-Ito colours; restrict the arms before plotting")
-forest <- ggplot(comparison, aes(divergence_estimate, fct_rev(arm), colour = arm, shape = adjustment, linetype = divergence_converged)) +
+forest <- ggplot(comparison, aes(divergence_estimate, fct_rev(arm), colour = arm, shape = adjustment, linetype = size_gate)) +
   geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
   geom_pointrange(aes(xmin = divergence_lo, xmax = divergence_hi), position = position_dodge(width = 0.6)) +
   facet_wrap(~ marker, scales = "free_x", nrow = 1) +
   scale_colour_manual(values = arm_colours, guide = "none") +
   scale_shape_manual(values = c(adjusted = 16, unadjusted = 1), name = NULL) +
-  scale_linetype_manual(values = c(`TRUE` = 1, `FALSE` = 3), labels = c(`TRUE` = "R-hat <= 1.1", `FALSE` = "R-hat > 1.1"), name = NULL) +
+  scale_linetype_manual(values = c(`TRUE` = 1, `FALSE` = 3), labels = c(`TRUE` = "size terms R-hat <= 1.1", `FALSE` = "size terms R-hat > 1.1"), name = NULL) +
   labs(title = "Divergence by lung size, arm by arm",
        subtitle = paste("Change in the log marker per day, per SD of log predicted FVC (95% credible interval);",
                         "each arm on its own cohort's SD; the difference-in-differences table rescales the control"),

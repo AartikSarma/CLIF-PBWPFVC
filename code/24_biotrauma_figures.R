@@ -15,11 +15,18 @@
 #       patients hypoxemic at the index), the ventilated side being the patients on
 #       IMV at ICU admission: the markers' difference-in-differences, and 60-day death
 #       before escalation (supplement/xsec_pfvc_age_control.R); then the ventilated
-#       rate with and without the previous-day SF and pressor terms (nolag_ tables)
+#       rate with and without the previous-day SF and pressor terms (nolag_ tables);
+#       and each marker's ventilated divergence from the joint model beside the
+#       longitudinal model alone (jm_lme_check_ tables)
 #   biotrauma_fig_channels_{tag}.pdf   the channels form only: the contrast per
 #       GLI piece
 #
 # Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
+#
+# Convergence: the figure's estimates are gated on the lung-size terms (hollow = the
+# level and divergence did not reach R-hat <= 1.1; fit_convergence(), 20_biotrauma_grid.R);
+# the hazard-link convergence is reported (hazard_rhat, printed in the row labels) and
+# read with the longitudinal-only comparison, the checks figure's last panel.
 #
 # Both differences-in-differences are drawn in the checks figure and pooled: the
 # hypoxemic one (SF < 315) isolates ventilation, the all-patients one is the larger sample.
@@ -149,21 +156,27 @@ if (!nrow(level_contrast_ventilated)) stop("no level contrasts for exposure ", s
 #         move when age, sex and race enter the model is not the age channel.
 #      C  the posterior probability that the contrast lies in the injury direction,
 #         by horizon: where the evidence starts and where it ends up.
-#      Rows carry the patient and death counts. A marker whose exposure terms did not
-#      converge is drawn hollow and dashed, placed last, and says so in its label, so an
-#      unconverged fit is never read as a result.
+#      Rows carry the patient and death counts and, per adjustment, the R-hat of the
+#      lung-size terms and, separately, of the hazard links. A marker whose lung-size
+#      terms did not converge is drawn hollow and dashed, placed last, and says so in
+#      its label, so an unconverged fit is never read as a result.
 if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
-  RHAT_GATE <- 1.1   # the standard convergence threshold
   inj_sign <- function(m) if_else(worse[m] == "higher", -1, 1) * if_else(FLIP_INJ, -1, 1)
-  rate <- joint_estimates %>%
+  # the rate rows of one arm's estimates, each with its fit's lung-size gate
+  rate_rows <- function(est) est %>%
     filter(block == "longitudinal", model == "main", marker %in% names(lab),
            term %in% c(paste0(size_exposure_term, ":vent_day"), paste0("vent_day:", size_exposure_term))) %>%
+    left_join(fit_convergence(est, MOD_FORM), by = c("marker", "model", "adjustment")) %>%
     transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
               s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-              rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
-  failed <- rate %>% filter(!ok) %>% group_by(marker) %>%
-    summarise(note = paste0("\n", paste(sprintf("%s R-hat %.2f", adjustment, rhat), collapse = "; "), ": not converged"),
+              size_terms_rhat, hazard_rhat, ok = size_gate)
+  rate <- rate_rows(joint_estimates)
+  rhat_notes <- rate %>% arrange(marker, adjustment) %>% group_by(marker) %>%
+    summarise(note = paste0("\nsize-term R-hat ", paste(sprintf("%s %.2f", adjustment, size_terms_rhat), collapse = ", "),
+                            "\nhazard R-hat ", paste(sprintf("%s %.2f", adjustment, hazard_rhat), collapse = ", "),
+                            if_else(all(ok), "", "\nlung-size terms not converged")),
               .groups = "drop")
+  failed <- rate %>% filter(!ok) %>% distinct(marker)
   counts <- joint_estimates %>% filter(model == "main") %>% distinct(marker, n_patients, n_deaths) %>%
     group_by(marker) %>% slice(1) %>% ungroup()
   show_count <- function(x) formatC(x, big.mark = ",", format = "d")
@@ -171,7 +184,7 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
     paste0(marker_label(m),
            sprintf("\nn = %s, deaths = %s", show_count(counts$n_patients[match(m, counts$marker)]),
                    show_count(counts$n_deaths[match(m, counts$marker)])),
-           coalesce(failed$note[match(m, failed$marker)], ""))
+           coalesce(rhat_notes$note[match(m, rhat_notes$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.
   # "platelets,bilirubin,creatinine,pressor_dose". Without it, every marker in the tables:
@@ -232,12 +245,6 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
   #      PBWPFVC_FIG_CONTROLS_DIR; with another PBWPFVC_FIG_DIR and none named, no controls.
   ctrl_dir <- Sys.getenv("PBWPFVC_FIG_CONTROLS_DIR",
                          if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) "" else file.path(config$final_root, "controls"))
-  rate_rows <- function(est) est %>%
-    filter(block == "longitudinal", model == "main", marker %in% present,
-           term %in% c(paste0(size_exposure_term, ":vent_day"), paste0("vent_day:", size_exposure_term))) %>%
-    transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
-              s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-              rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
   # one arm's estimates; its dialysis-as-third-cause twin replaces the RRT markers' rows
   read_arm <- function(folder, restriction, site_tag) {
     stub <- paste0(MOD_FORM, "_", h_suffix, "_", site_tag, ".csv")
@@ -303,6 +310,7 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
     if (is.null(est)) return(NULL)
     f <- if (is.null(a$unit_factor)) 1 else a$unit_factor   # the ventilated cohort's unit
     rate_rows(est %>% mutate(estimate = estimate * f, lo = lo * f, hi = hi * f)) %>%
+      filter(marker %in% present) %>%
       mutate(arm = a$label, strain_rank = a$rank)
   })
   all_label <- if (nrow(arm_rate)) "Ventilated,\nall" else "Ventilated"
@@ -342,7 +350,8 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
                      " days of ventilation"),
       subtitle = paste0(site_name, ": joint model, death and extubation (in the controls, escalation of support) modelled; ", unit_lower,
                         ".\nA rate unmoved by adjustment for age, sex and race is not the age channel. ",
-                        "Row counts are the ventilated cohort's. Hollow points and dashed lines did not converge.")) &
+                        "Row counts are the ventilated cohort's.\nHollow = the lung-size terms did not converge (R-hat > 1.1); ",
+                        "the hazard links are reported in the manifest and in each row's label.")) &
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_main_", tag, ".pdf")), pm,
          width = 12 + 0.8 * n_distinct(rate_arms$arm), height = 2 + 2.2 * length(present))
@@ -389,8 +398,8 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
   did_panel <- function(did_tbl, control_label, title, subtitle) {
     did_rows <- did_tbl %>%
       transmute(marker, adjustment, s = toward_injury(marker),
-                v_e = divergence_estimate_ventilated, v_sd = divergence_sd_ventilated, v_ok = divergence_rhat_ventilated <= 1.1,
-                c_e = divergence_estimate_control, c_sd = divergence_sd_control, c_ok = divergence_rhat_control <= 1.1,
+                v_e = divergence_estimate_ventilated, v_sd = divergence_sd_ventilated, v_ok = passes_rhat_gate(ventilated_size_rhat),
+                c_e = divergence_estimate_control, c_sd = divergence_sd_control, c_ok = passes_rhat_gate(control_size_rhat),
                 d_e = did_estimate, d_lo = did_lo, d_hi = did_hi, d_ok = both_converged) %>%
       { bind_rows(
           transmute(., marker, adjustment, s, arm = VENTILATED_CHECK_LABEL, e = v_e, l = v_e - 1.96 * v_sd, h = v_e + 1.96 * v_sd, ok = v_ok),
@@ -460,11 +469,14 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
     rate_terms <- c("log_pfvc_sd:vent_day", "vent_day:log_pfvc_sd")
     with_lags <- read_estimates("")
     lag_rows <- bind_rows(if (!is.null(with_lags)) with_lags %>% mutate(lags = "with the lags"),
-                          nolag_estimates %>% mutate(lags = "without the lags")) %>%
+                          nolag_estimates %>% mutate(lags = "without the lags"))
+    lag_rows <- lag_rows %>%
+      left_join(fit_convergence(lag_rows, MOD_FORM, by = c("lags", "marker", "model", "adjustment")),
+                by = c("lags", "marker", "model", "adjustment")) %>%
       filter(block == "longitudinal", model == "main", term %in% rate_terms,
              marker %in% intersect(names(lab), unique(nolag_estimates$marker))) %>%
       mutate(s = toward_injury(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
-             ok = is.finite(rhat) & rhat <= 1.1,
+             ok = size_gate,
              lags = factor(lags, c("with the lags", "without the lags")),
              marker_lab = factor(lab[marker], unique(lab[marker])))
     if (!nrow(lag_rows)) return(NULL)
@@ -479,6 +491,44 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
            subtitle = "every ventilated patient; rate per day toward injury per SD lower log PFVC",
            x = NULL, y = "change per day toward injury\nper SD of log PFVC")
   }
+  # the divergence with and without the correction for patients leaving the panel: each
+  # marker's ventilated divergence (the full cohort) from the joint model beside the
+  # longitudinal submodel fitted alone (jm_lme_check_*, 23_biotrauma_report.R), toward
+  # injury per SD lower log PFVC, adjusted and unadjusted; creatinine from its
+  # dialysis-as-third-cause twin, as in figure 4. The joint-model point is hollow when
+  # its lung-size terms did not converge; the longitudinal model is fitted by maximum
+  # likelihood and has no R-hat.
+  lme_panel <- function() {
+    stub <- paste0("pfvc_", h_suffix, "_", site_name, ".csv")
+    main <- read_if(file.path(fig_dir, paste0("jm_lme_check_", stub)))
+    twin <- read_if(file.path(fig_dir, paste0("jm_lme_check_rrtcause_", stub)))
+    if (is.null(main) && is.null(twin)) return(NULL)
+    as_text <- function(d) d %>% mutate(across(everything(), as.character))
+    lme_rows <- bind_rows(if (!is.null(main)) as_text(if (is.null(twin)) main else main %>% filter(marker != "creatinine")),
+                          if (!is.null(twin)) as_text(twin %>% filter(marker == "creatinine"))) %>%
+      type_convert(guess_integer = TRUE, na = c("", "NA")) %>%
+      filter(model == "main", exposure == "log_pfvc_sd", term == "divergence per day", marker %in% names(lab))
+    if (!nrow(lme_rows)) return(NULL)
+    JM_LABEL <- "joint model\n(leaving corrected)"; LME_LABEL <- "longitudinal\nmodel alone"
+    lme_rows <- lme_rows %>%
+      mutate(s = toward_injury(marker)) %>%
+      { bind_rows(
+          transmute(., marker, adjustment, s, model_kind = JM_LABEL, e = jm_estimate, l = jm_lo, h = jm_hi, ok = as.logical(size_gate)),
+          transmute(., marker, adjustment, s, model_kind = LME_LABEL, e = lme_estimate, l = lme_lo, h = lme_hi, ok = TRUE)) } %>%
+      mutate(e = s * e, lo = pmin(s * l, s * h), hi = pmax(s * l, s * h), ok = coalesce(ok, FALSE),
+             model_kind = factor(model_kind, c(JM_LABEL, LME_LABEL)),
+             marker_lab = factor(lab[marker], unique(lab[intersect(c(check_order, names(lab)), marker)])))
+    ggplot(lme_rows, aes(model_kind, e, colour = adjustment)) +
+      geom_hline(yintercept = 0, linetype = 2, colour = "grey55") +
+      geom_linerange(aes(ymin = lo, ymax = hi), linewidth = 0.8, position = position_dodge(width = 0.5)) +
+      geom_point(aes(shape = ok), size = 2.2, fill = "white", position = position_dodge(width = 0.5)) +
+      facet_wrap(~ marker_lab, nrow = 1, scales = "free_y") +
+      scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
+      scale_shape_manual(values = c(`TRUE` = 16, `FALSE` = 21), guide = "none") +
+      labs(title = "The divergence with and without the correction for patients leaving the panel",
+           subtitle = "every ventilated patient; rate per day toward injury per SD lower log PFVC; hollow = the joint model's lung-size terms did not converge",
+           x = NULL, y = "change per day toward injury\nper SD of log PFVC")
+  }
   checks <- list()
   for (control_name in names(did_tables)) {
     did_entry <- did_tables[[control_name]]
@@ -489,12 +539,15 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
   }
   lags <- lag_panel()
   if (!is.null(lags)) checks[["lags"]] <- lags
+  lme_divergence <- lme_panel()
+  if (!is.null(lme_divergence)) checks[["lme_check"]] <- lme_divergence
   if (length(checks)) {
     ggsave(file.path(fig_dir, paste0("biotrauma_fig_checks_", tag, ".pdf")),
            wrap_plots(checks, ncol = 1) +
              plot_annotation(tag_levels = "A",
                              title = paste0(site_name, ": is the lung-size divergence the ventilator's?"),
-                             subtitle = "95% intervals; hollow points did not converge (R-hat > 1.1)") &
+                             subtitle = paste0("95% intervals; hollow = the lung-size terms did not converge (R-hat > 1.1); ",
+                                               "the hazard links are reported in the manifest")) &
              theme(legend.position = "top", axis.text.x = element_text(size = 8)),
            width = max(8, 3 + 2.6 * length(check_order)), height = 1.5 + 3.6 * length(checks))
     message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
