@@ -15,11 +15,17 @@
 #       model beside the same terms from the longitudinal submodel fitted alone (no
 #       death or extubation correction): whether the unconverged hazard and
 #       association blocks move the answer
-#   final/jm_association_hr_{tag}.csv   hazard ratio for death, extubation (and RRT)
-#       per SD of the current log marker (value) and per unit slope
+#   final/jm_association_hr_{tag}.csv   hazard ratio for each cause (death;
+#       extubation, or escalation in the control; RRT in the rrtcause_ fits) per SD
+#       of the current log marker (value) and per unit slope; the cause is the
+#       survival stratum's own name
 #
-# The within-patient dose terms are not reported: the manuscript does not read the
-# dose inside the band, which is confounded by indication.
+# The fits read here share one clock: days from the index, every cause (death,
+# extubation or escalation, RRT) on it, each patient entering the survival submodel
+# at their first trajectory day; the baseline marker is its value in the first 24 h after the index (day 0).
+# The dose terms (VT/PBW at the index, and the previous day's VT/PBW minus the index)
+# are not reported: the manuscript does not read the dose inside the band, which is
+# confounded by indication.
 #
 # Switches (environment), each as set for the fit being reported:
 #   PBWPFVC_JM_MODIFIER    size form (default pfvc)
@@ -27,11 +33,14 @@
 #                          cause, written as rrtcause_ tables (default 0)
 #   PBWPFVC_JM_MARKERS     comma list; report only these markers and merge their rows
 #                          into the existing tables (default: every marker fitted)
-#   PBWPFVC_JM_SF_BAND     "lo,hi": the baseline SF class (default none)
+#   PBWPFVC_JM_ICU_DAY0    1 = the ventilated patients on IMV at ICU admission (default 0)
 #   PBWPFVC_JM_SEV_CENTER  a control read at the ventilated severity (default none)
+#   PBWPFVC_JM_SF_BAND     "lo,hi": the index SF class (default none)
+#   PBWPFVC_JM_NO_LAGS     1 = the fit without the previous-day SF and pressor terms (default 0)
 #   PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON   grid and window (default daily, 7 days)
 #   PBWPFVC_JM_BASELINE    baseline form (default free)
-# The last five are read through 20_biotrauma_grid.R, which builds the tag from them.
+# The restrictions, grid and window are read through 20_biotrauma_grid.R, which builds
+# the tag from them (day0_, sevstd_, sf<lo>to<hi>_, nolag_, in that order).
 # Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
 #
 # Usage: uvr run code/23_biotrauma_report.R
@@ -92,7 +101,7 @@ SIZE_EXPOS <- c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS)
 DOSE_MOD   <- c("log_pfvc_sd:vtpbw_c", "vtpbw_c:log_pfvc_sd",
                 "log_pfvc_sd:vtpbw_c:vent_day", "vent_day:log_pfvc_sd:vtpbw_c",
                 "log_pfvc_sd:vent_day:vtpbw_c", "vtpbw_c:vent_day")
-EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_pt_mean", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"),
+EXPO_TERMS <- c("l_vtpbw_within", "vtpbw_idx", SIZE_EXPOS, paste0(SIZE_EXPOS, ":vent_day"),
                 paste0("vent_day:", SIZE_EXPOS), DOSE_MOD)
 block_gates <- est_tbl %>% group_by(marker, model, adjustment) %>%
   summarise(longitudinal_rhat = suppressWarnings(max(rhat[block == "longitudinal"], na.rm = TRUE)),
@@ -156,8 +165,8 @@ level_rows <- list(); movement_rows <- list(); lme_check_rows <- list()
 # comparing rows is reading a slope off the page.
 # t = 0 is included so the trend panel starts at the index rather than at day 1.
 # The contrast there is the level term alone, which is an extrapolation: no
-# marker row exists at day 0 (each trajectory starts the period after that
-# patient's baseline draw), so read it as the model's anchor, not as data.
+# marker row exists at day 0 (the day-0 value is the baseline, and each trajectory
+# starts on day 1), so read it as the model's anchor, not as data.
 LEVEL_HOURS <- sort(unique(c(0, seq(24, floor(JM_HORIZON) * 24, by = 24), JM_HORIZON * 24)))
 
 for (i in seq_len(nrow(usable))) {
@@ -261,8 +270,10 @@ for (i in seq_len(nrow(usable))) {
   al <- do.call(rbind, jm$mcmc$alphas)[keep, , drop = FALSE]
   for (cn in colnames(al)) {
     kind  <- if (grepl("value", cn)) "value" else "slope"
-    # a third cause (RRT, creatinine only) must not be silently labelled extubation
-    cause <- if (grepl("death", cn)) "death" else if (grepl("rrt", cn)) "rrt" else "extubation"
+    # the cause is the stratum's level name, e.g. value(log_y):strataescalation
+    cause <- sub("^.*:strata", "", cn)
+    if (!cause %in% c("death", "extubation", "escalation", "rrt"))
+      stop("association parameter ", cn, " does not name a known cause")
     scale <- if (kind == "value") sd_log_y else 1
     v <- al[, cn] * scale
     assoc_rows[[length(assoc_rows) + 1L]] <- tibble(

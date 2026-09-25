@@ -33,10 +33,10 @@ load_config <- function() {
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
   # Cohort (PBWPFVC_COHORT; environment variable only):
   #   "imv"        default, the paper's cohort: invasive ventilation with a set tidal volume
-  #   "nosupport"  the negative control: room air or nasal cannula only, no
-  #                advanced support before the index nor in the 24 h after it, so
-  #                strain per lung size cannot act; escalation to any support
-  #                later is a competing event
+  #   "nosupport"  the negative control: room air or nasal cannula at ICU admission,
+  #                no advanced support before the index, so strain per lung size
+  #                cannot act; escalation to any advanced support later ends
+  #                follow-up as a competing event or a censoring point
   #   "niv"        built on request only, not part of the paper: first advanced
   #                support is high-flow nasal cannula or non-invasive ventilation,
   #                with no invasive ventilation before it; intubation later is a
@@ -90,6 +90,9 @@ SUPPORT_DEVICES   <- c("imv", NIV_DEVICES)
 # before it (scripts 01 and 03). The window is short so that the ratio reflects the
 # support in force early in ventilation, not a setting charted hours earlier.
 FIO2_LOOKBACK_H <- 4
+# A death within this many hours of the last IMV record is a death on the ventilator,
+# not a death after liberation (03's ventilator-free days, 10's event clock).
+DEATH_ON_VENT_TOL_H <- 1
 # FiO2 on room air and nasal cannula, for the no-support control only (the
 # analytic cohort's SF uses documented FiO2): 0.21 on room air, 0.21 + 0.03 per
 # L/min on a cannula capped at 0.60, the rule script 01 uses for its negative-control

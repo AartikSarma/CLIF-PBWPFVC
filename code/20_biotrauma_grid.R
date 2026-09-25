@@ -11,6 +11,11 @@
 #                         not in the paper)
 #   PBWPFVC_JM_HORIZON_H  horizon in hours for the 6h grid (48)
 #   PBWPFVC_JM_HORIZON    horizon in days for the daily grid (7)
+#   PBWPFVC_JM_ICU_DAY0   0 | 1   keep patients on the cohort's support at ICU admission
+#                         (icu_day0, script 03): the ventilated arm of every
+#                         ventilated-vs-control comparison; file tag "day0_"
+#   PBWPFVC_JM_NO_LAGS    0 | 1   drop the previous-day SF and pressor terms from the
+#                         longitudinal submodel (sensitivity); file tag "nolag_"
 #
 # Defines: JM_GRID, STEP_H (hours per period), STEP (days per period),
 # JM_HORIZON (days), N_PERIODS (last period index), h_suffix ("48h" / "7d").
@@ -152,8 +157,17 @@ sev_center_for <- function(marker) {
 sev_center_sfx_for <- function(marker) { v <- sev_center_for(marker); if (is.na(v)) "" else sprintf("_sevstd%.3f", v) }
 sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
 
-# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi on
-# the index day. The strata in use are "235,315", "115,235" and "0,115" (315 and 235
+# Status at ICU admission (PBWPFVC_JM_ICU_DAY0 = 1): keep icu_day0 patients. In the
+# ventilated cohort these are the patients on invasive ventilation at ICU admission,
+# the ventilated arm of every comparison with the no-support control (whose patients
+# are all indexed at ICU admission, so the filter keeps all of them).
+ICU_DAY0 <- identical(Sys.getenv("PBWPFVC_JM_ICU_DAY0", "0"), "1")
+icu_day0_tag <- if (ICU_DAY0) "day0_" else ""
+icu_day0_sfx <- if (ICU_DAY0) "_day0" else ""
+
+# Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi at
+# the index timepoint (sf_index, the SF ratio of script 03's index row), the same gate
+# in every cohort. The strata in use are "235,315", "115,235" and "0,115" (315 and 235
 # are the Rice 2007 SF equivalents of P/F 300 and 200).
 # The upper bound is strict so that "0,315" is the ventilated cohort's own gate, SF < 315.
 SF_BAND_RULE <- "lo <= SF < hi"   # stored with each fit: a fit made under another rule is refitted
@@ -163,6 +177,15 @@ if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) ||
   stop("PBWPFVC_JM_SF_BAND must be 'lo,hi' with lo < hi; got '", SF_BAND, "'")
 sf_sfx <- if (nzchar(SF_BAND)) paste0("_sf", sf_band_limits[1], "to", sf_band_limits[2]) else ""
 sf_tag <- if (nzchar(SF_BAND)) paste0("sf", sf_band_limits[1], "to", sf_band_limits[2], "_") else ""
-# both restrictions, in the order every script uses
-restrict_tag <- paste0(sev_center_tag, sf_tag)
-restrict_sfx_for <- function(marker) paste0(sev_center_sfx_for(marker), sf_sfx)
+
+# Sensitivity without the previous-day SF and pressor terms (PBWPFVC_JM_NO_LAGS = 1):
+# both are measured after the previous day's dose, so they may carry part of its
+# effect. The rows are those of the main fit; only the model changes.
+NO_LAGS <- identical(Sys.getenv("PBWPFVC_JM_NO_LAGS", "0"), "1")
+no_lags_tag <- if (NO_LAGS) "nolag_" else ""
+no_lags_sfx <- if (NO_LAGS) "_nolag" else ""
+
+# every restriction and variant, in the order every script uses: ICU day 0, severity
+# standardisation, SF band, no lags
+restrict_tag <- paste0(icu_day0_tag, sev_center_tag, sf_tag, no_lags_tag)
+restrict_sfx_for <- function(marker) paste0(icu_day0_sfx, sev_center_sfx_for(marker), sf_sfx, no_lags_sfx)

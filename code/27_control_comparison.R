@@ -9,17 +9,27 @@
 # of the "pfvc" joint model). This script lines that term up across the arms that
 # test it, reading only the aggregate tables 23_biotrauma_report.R wrote:
 #
-#   ventilated                 the analytic cohort
-#   ventilated, SF band        the same, within a baseline SF class (PBWPFVC_JM_SF_BAND)
+#   ventilated                 the analytic cohort (figure 4)
+#   ventilated, at ICU admission  the ventilated patients on IMV at ICU admission
+#                              ("day0_" tables): the ventilated side of every
+#                              difference-in-differences, so that both arms are
+#                              assigned their status at the same moment, ICU admission
+#   ventilated, SF band        the same, within an index SF class (PBWPFVC_JM_SF_BAND)
 #   no support                 the negative control: no positive pressure, no strain.
 #                              Every patient is kept, and the divergence is read at
 #                              the ventilated cohort's severity (PBWPFVC_JM_SEV_CENTER,
 #                              the "sevstd_" tables); the severity x divergence term
-#                              says whether sicker controls diverge faster.
-#   no support, SF < 315       the same control restricted to patients hypoxemic on
-#                              the index day ("sevstd_sf0to315_" tables), so that it
+#                              says whether sicker controls diverge faster. Follow-up
+#                              ends at escalation to invasive ventilation, NIPPV or
+#                              another advanced support (the competing event), and no
+#                              patient is in both arms: 03 removes from the control
+#                              every patient of the ventilated ICU-admission arm.
+#   no support, SF < 315       the same control restricted to patients hypoxemic at
+#                              the index ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
+# Every arm runs on one clock, days from its index (the first qualifying ventilator
+# row; ICU admission in the control), with delayed entry at the first trajectory day.
 # These are the arms 29_run_figure4.R fits. Only these arm tags are read (arm_pattern
 # below); any other tables in the folders are ignored.
 #
@@ -41,8 +51,9 @@
 #   jm_control_comparison_{form}_{h}_{site}.csv    each arm's divergence, per SD of log
 #                                                  PFVC in that arm's own cohort
 #   jm_control_comparison_{form}_{h}_{site}.pdf
-#   jm_control_did_{form}_{h}_{site}.csv            ventilated minus the control
-#   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated minus the hypoxemic control
+#   jm_control_did_{form}_{h}_{site}.csv            ventilated at ICU admission minus the control
+#   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated at ICU admission minus the
+#                                                  hypoxemic control
 #
 # Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/27_control_comparison.R
 # =============================================================================
@@ -68,7 +79,7 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#0
 cohort_folders <- tibble(cohort = c("imv", "nosupport"),
                          cohort_label = c("Ventilated", "No support, at ventilated severity"),
                          site = c(base_site, paste0(base_site, "_nosupport")),
-                         arm_pattern = c("^(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_(sf0to315_)?$"))
+                         arm_pattern = c("^(day0_)?(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_(sf0to315_)?$"))
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")
@@ -76,7 +87,7 @@ arms <- pmap_dfr(cohort_folders, function(cohort, cohort_label, site, arm_patter
   folder <- if (cohort == "imv") final_dir else file.path(config$final_root, "controls")
   found <- list.files(folder, pattern = paste0("^jm_estimates_.*", file_stub(site), "$"))
   restriction <- sub(paste0(file_stub(site), "$"), "", sub("^jm_estimates_", "", found))
-  # the rrtcause_ and offset_ variants are other analyses, not arms
+  # the rrtcause_, offset_ and nolag_ variants are other analyses, not arms
   tibble(cohort, cohort_label, site, folder, restriction = restriction[grepl(arm_pattern, restriction)])
 })
 if (!nrow(arms)) stop("no jm_estimates_*", MOD_FORM, "_", h_suffix, "_* tables found for ", base_site)
@@ -84,7 +95,9 @@ arms <- arms %>%
   mutate(sf_part  = str_match(restriction, "sf([0-9.]+)to([0-9.]+)_")[, 2:3, drop = FALSE] %>%
            apply(1, function(limits) if (anyNA(limits)) NA_character_ else
              if (as.numeric(limits[1]) == 0) paste0("SF < ", limits[2]) else paste0("SF ", limits[1], "-", limits[2])),
-         arm = paste0(cohort_label, if_else(is.na(sf_part), "", paste0(", ", sf_part))))
+         at_icu_admission = grepl("^day0_", restriction),
+         arm = paste0(cohort_label, if_else(at_icu_admission, ", at ICU admission", ""),
+                      if_else(is.na(sf_part), "", paste0(", ", sf_part))))
 message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site, "): ", nrow(arms), " arms ===")
 message(paste0("  ", arms$arm, collapse = "\n"))
 
@@ -149,7 +162,8 @@ comparison <- size_terms %>%
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
 write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
 
-# ---- the difference-in-differences: ventilated divergence minus control divergence
+# ---- the difference-in-differences: ventilated divergence (patients on IMV at ICU
+#      admission) minus control divergence
 # First difference: at a fixed VT/PBW the PBW formula, which omits age and race,
 # assigns the strain, so the divergence by predicted lung size is not chosen by
 # indication. Second difference: that lung-size variation also exists without a
@@ -160,9 +174,12 @@ write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_
 # would shape the marker's trajectory equally in both cohorts at equal severity.
 # The cohorts are different patients, so their posteriors are independent and the
 # difference's SD is the root sum of squares (normal approximation to the posterior).
+# The ventilated side is the ICU-admission arm, not the whole ventilated cohort: both
+# arms are then defined by their support at ICU admission, and no patient is in both.
 # Units: each cohort's rate is per SD of log PFVC in ITS OWN panel (22 writes the SDs
 # to jm_scale_*), so the control's rate is put on the ventilated cohort's unit before
 # the subtraction: per ventilated SD = per control SD x (SD ventilated / SD control).
+# The ICU-admission arm's rate is already per SD of the whole ventilated panel.
 # Without both SDs there is no difference-in-differences, never one that assumes them equal.
 did_path <- file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv"))
 scale_vent <- file.path(final_dir, paste0("jm_scale_", h_suffix, "_", base_site, ".csv"))
@@ -176,16 +193,17 @@ if (is.na(to_vent_sd)) {
   unlink(did_path)
 }
 # The same difference against any control arm: the primary one, and the hypoxemic
-# control (index-day SF < 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
+# control (index SF < 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
 # on the control fit). The ventilated cohort is hypoxemic by construction and
 # the whole control mostly is not, so the primary difference also contrasts hypoxemia;
 # against the hypoxemic control the arms differ in ventilation alone. Both use the
 # control's whole-panel SD of log PFVC (a restricted fit keeps it, 22_biotrauma_fit.R).
 # No difference exists without both sides (the SD rescaling missing, or no fit on
 # one side): that is an empty table, which the callers report, not an error.
+VENTILATED_DID_ARM <- "Ventilated, at ICU admission"
 did_against <- function(control_arm) {
   both_arms <- comparison %>%
-    filter(!is.na(to_vent_sd), arm %in% c("Ventilated", control_arm)) %>%
+    filter(!is.na(to_vent_sd), arm %in% c(VENTILATED_DID_ARM, control_arm)) %>%
     mutate(side = if_else(cohort == "imv", "ventilated", "control"))
   if (!all(c("ventilated", "control") %in% both_arms$side)) return(tibble())
   both_arms %>%
@@ -200,7 +218,7 @@ did_against <- function(control_arm) {
          did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
          p_did_gt0 = pnorm(did_estimate / did_sd),
          both_converged = divergence_rhat_ventilated <= RHAT_GATE & divergence_rhat_control <= RHAT_GATE,
-         control_to_ventilated_sd = to_vent_sd, control_arm = control_arm,
+         control_to_ventilated_sd = to_vent_sd, ventilated_arm = VENTILATED_DID_ARM, control_arm = control_arm,
          unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site)
 }
 did <- did_against("No support, at ventilated severity")
@@ -210,7 +228,7 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
   hypoxemic_did <- did_against(HYPOXEMIC_CONTROL_ARM)
   if (nrow(hypoxemic_did)) {
     write_csv(hypoxemic_did, hypoxemic_did_path)
-    message("--- difference-in-differences against the hypoxemic control (index-day SF < 315)")
+    message("--- difference-in-differences, ventilated at ICU admission against the hypoxemic control (index SF < 315)")
     print(as.data.frame(hypoxemic_did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                                     control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                                     lo = signif(did_lo, 3), hi = signif(did_hi, 3), both_converged)), row.names = FALSE)
@@ -218,13 +236,13 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
   write_csv(did, did_path)
-  message("--- difference-in-differences: ventilated minus no-support divergence (log marker per day per SD of log PFVC)")
+  message("--- difference-in-differences: ventilated at ICU admission minus no-support divergence (log marker per day per SD of log PFVC)")
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                         lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
                                         both_converged)), row.names = FALSE)
 } else {
-  message("--- no marker has both a ventilated and a severity-standardised control fit: no difference-in-differences")
+  message("--- no marker has both a ventilated ICU-admission fit (day0_) and a severity-standardised control fit: no difference-in-differences")
   unlink(did_path)
 }
 

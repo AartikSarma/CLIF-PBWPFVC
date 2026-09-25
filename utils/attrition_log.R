@@ -27,17 +27,18 @@ ATTRITION_STEPS <- c(
 )
 
 # The nosupport and niv cohorts follow the same seven steps, but steps 3, 5, 6 and 7 mean
-# something else there: entry is by first respiratory support, the index needs only an
-# SF ratio, no tidal-volume band applies (step 6 excludes no one), and the no-support
-# control's last step is its ICU-admission index and 24-hour escalation landmark.
+# something else there: entry is by first respiratory support and the index needs only
+# an SF ratio. For the niv cohort no tidal-volume band applies (step 6 excludes no one).
+# For the no-support control, step 6 is its ICU-admission index and step 7 removes
+# patients in the ventilated cohort's ICU-day-0 arm, so no patient is in both arms.
 ATTRITION_STEPS_CONTROL <- list(
   nosupport = c(
     ATTRITION_STEPS[1:2],
     "Room air or nasal cannula before any advanced support",
     ATTRITION_STEPS[4],
     "Complete index data (SF ratio)",
-    "No tidal-volume band (no set tidal volume)",
-    "Indexed at ICU admission, not escalated within 24 h"
+    "Indexed at ICU admission, before any advanced support",
+    "Not in the ventilated ICU-day-0 arm"
   ),
   niv = c(
     ATTRITION_STEPS[1:2],

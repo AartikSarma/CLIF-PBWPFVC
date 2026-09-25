@@ -62,7 +62,8 @@
 # effect at the mean DP, the mean VT/PFVC and age 60. Ratios are reported per SD
 # of the log predictor, interactions with age per SD per decade.
 #
-# Rungs (in-hospital death, logistic; 60-day death, Cox, as the companion):
+# Rungs (in-hospital death, logistic; 60-day death, Cox, as the companion, on
+# script 03's surv_time and mortality_event_60: days from the index):
 #   dp          log DP
 #   vt          log VT/PFVC
 #   additive    log DP + log VT/PFVC
@@ -125,7 +126,7 @@ cross_sectional <- read_parquet(file.path(config$output_dir, "analysis_cross_sec
 
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable (a handful of deaths),
 # so death is simulated independently of every exposure (35% by day 60, time to
-# death log-normal with median 9 days), as 10_panel_common.R does. The run then
+# death from the index log-normal with median 9 days), as 10_panel_common.R does. The run then
 # exercises the machinery and can show no real effect. Never runs at a real site.
 if (grepl("^synthetic_clif", site_name)) {
   message("*** SYNTHETIC SITE: simulated mortality (plumbing only; synthetic CLIF mortality is unreliable). ***")

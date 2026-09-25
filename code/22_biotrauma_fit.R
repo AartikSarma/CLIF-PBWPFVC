@@ -8,10 +8,11 @@
 # which 29_run_figure4.R also sets:
 #   longitudinal submodel   log marker on day t ~ ns(day, 3)
 #                           + log PFVC (per SD of this cohort) + log PFVC x day
-#                           + previous-day VT/PBW minus the patient's mean VT/PBW
-#                           + that mean + log baseline marker (its first value in
-#                           the window) + previous-day log SF and pressor flag
-#                           (not the marker's own) + non-respiratory SOFA
+#                           + (previous-day VT/PBW minus the index VT/PBW)
+#                           + the index VT/PBW + log baseline marker (its day-0
+#                           value) + previous-day log SF and pressor flag (not the
+#                           marker's own; none with PBWPFVC_JM_NO_LAGS=1)
+#                           + non-respiratory SOFA
 #                           [+ BMI, driving pressure only]
 #                           [+ ns(age, 4) + sex + race, the adjusted fit]
 #                           random intercept per patient, and a random slope in
@@ -23,7 +24,11 @@
 #                           extubation, or escalation in the control), on
 #                           standardised non-respiratory SOFA, baseline log SF,
 #                           BMI, age, sex and race. No size or dose term: this
-#                           submodel corrects for who leaves the panel.
+#                           submodel corrects for who leaves the panel. Time is
+#                           continuous days from the index, and each patient
+#                           enters at their first trajectory day (delayed entry,
+#                           Surv(entry_day, event_time, status)): nobody is at
+#                           risk in the model before their first modelled value.
 #   association             the current value of the log marker on each
 #                           cause-specific hazard (PBWPFVC_JM_ASSOC=value_slope
 #                           adds the current slope)
@@ -63,7 +68,9 @@
 #   PBWPFVC_JM_HAZARD_AGE   linear | spline   age in the survival submodel
 #   PBWPFVC_JM_RRT_EVENT    0 | 1   renal replacement as a third cause (creatinine only)
 #   PBWPFVC_JM_SEV_CENTER   unset | "marker=value,..."   severity-standardised control
-#   PBWPFVC_JM_SF_BAND      unset | "lo,hi"   baseline SF band, lo <= SF < hi
+#   PBWPFVC_JM_SF_BAND      unset | "lo,hi"   index SF band, lo <= SF < hi
+#   PBWPFVC_JM_ICU_DAY0     0 | 1   icu_day0 patients only (the comparison arm)
+#   PBWPFVC_JM_NO_LAGS      0 | 1   no previous-day SF and pressor terms (sensitivity)
 #   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
 #   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
 #                           (pfvc form, daily grid; section 22f0) -> final/jm_shape_{tag}
@@ -176,10 +183,16 @@ adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (
 # model is the same nuisance model throughout. Log PFVC and VT/PBW are left out. Log
 # PFVC is a fixed function of height, age, sex and race, so beside the demographics
 # it is identified only by height and the curvature of GLI's age term, and its
-# hazard coefficients do not converge at any practical chain length. HAZARD_SPEC is
-# stored with each fit, so a fit made under another hazard is refitted rather than
-# reused.
-HAZARD_SPEC <- paste0("severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
+# hazard coefficients do not converge at any practical chain length. HAZARD_SPEC and
+# MODEL_SPEC are stored with each fit, so a fit made under another hazard or model
+# specification is refitted rather than reused.
+HAZARD_SPEC <- paste0("Surv(entry_day, event_time): delayed entry at the first trajectory day, continuous days from the index; ",
+                      "severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
+MODEL_SPEC <- paste0("dose: between = index VT/PBW (vtpbw_idx), within = previous-day VT/PBW minus vtpbw_idx; ",
+                     "baseline: the marker's day-0 value only; ",
+                     "entry: first trajectory day, event_time > entry_day; ",
+                     "clock: continuous days from the index, no measurement after the event time; ",
+                     "lags: ", if (NO_LAGS) "none (previous-day SF and pressor dropped)" else "previous-day log SF and pressor flag")
 # Renal replacement as a third competing cause, for creatinine only. Off by
 # default because it redefines the other two: with RRT in, the death hazard is
 # the hazard of death BEFORE dialysis, on a risk set that empties faster.
@@ -267,8 +280,8 @@ message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients
 # =============================================================================
 # 22e. Marker specification
 # =============================================================================
-# y      : the daily column;  y0 : its baseline in the surv table, the marker's first
-#          observed value within the window (21_biotrauma_panel.R)
+# y      : the daily column;  y0 : its baseline in the surv table, the marker's day-0
+#          value (21_biotrauma_panel.R); a patient without one leaves the fit
 # own_lag: the lagged confounder that IS this marker's own lag, dropped from its model
 # random : pdDiag for the sparse plateau-measured mechanics marker, unstructured otherwise.
 #          On the 6h grid the labs (creatinine, platelets, bilirubin) carry one or
@@ -357,25 +370,6 @@ if (nrow(severity_anchor)) {
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
                         select(marker, anchor, sev_anchor, n_patients, pct, pct_at_or_above)), row.names = FALSE)
 }
-# The ventilated cohort's mean anchor per marker, among patients with that marker's
-# baseline: the centre the control's severity-modified divergence is read at
-# (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R). 29_run_figure4.R passes it on.
-if (config$cohort == "imv") {
-  anchor_mean <- map_dfr(markers, function(mk) {
-    anchor_values <- anchor_of(surv_all %>% filter(!is.na(.data[[mk$y0]])), mk$name)
-    anchor_values <- anchor_values[!is.na(anchor_values)]
-    if (length(anchor_values) < MIN_ANCHOR_PATIENTS) return(NULL)
-    tibble(marker = mk$name, anchor_mean = mean(anchor_values), anchor_sd = sd(anchor_values),
-           n_patients = length(anchor_values), anchor = anchor_label(mk$name))
-  }) %>% mutate(cohort = config$cohort, site = site_name)
-  mean_path <- file.path(final_dir, paste0("jm_severity_anchor_mean_", h_suffix, "_", site_name, ".csv"))
-  if (nrow(anchor_mean)) {
-    written_now <- anchor_mean$marker   # outside filter(): the file has an anchor_mean column
-    if (file.exists(mean_path))
-      anchor_mean <- bind_rows(read_csv(mean_path, show_col_types = FALSE) %>% filter(!marker %in% written_now), anchor_mean)
-    write_csv(anchor_mean, mean_path)
-  }
-}
 # The unit of every PFVC estimate: log_pfvc_sd is log PFVC standardised within THIS
 # cohort's panel (21_biotrauma_panel.R), so a rate "per SD" is in this cohort's own
 # unit. The SD goes to an aggregate table so the control can be put on the ventilated
@@ -386,15 +380,13 @@ scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = sd(surv_all$log_pfvc, 
                     n_patients = sum(!is.na(surv_all$log_pfvc)), horizon_days = JM_HORIZON, site = site_name)
 stopifnot(abs(sd(surv_all$log_pfvc_sd, na.rm = TRUE) - 1) < 1e-8)   # log_pfvc_sd is the standardised log_pfvc
 write_csv(scale_tbl, file.path(final_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
-if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
-  message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
-  quit(save = "no", status = 0)
-}
-# The patients a marker's fit may use, after the baseline SF band.
-# log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the unrestricted fit.
+# The patients a marker's fit may use, after the ICU-day-0 restriction and the index
+# SF band. log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the
+# unrestricted fit.
 restricted_patients <- function(mk) {
   kept <- surv_all
-  if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_0), sf_0 >= sf_band_limits[1], sf_0 < sf_band_limits[2])
+  if (ICU_DAY0) kept <- kept %>% filter(icu_day0)
+  if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_index), sf_index >= sf_band_limits[1], sf_index < sf_band_limits[2])
   kept
 }
 
@@ -486,50 +478,24 @@ shape_check <- function(ld, rhs, random_spec, mk, adj_lab, counts, stamp) {
 }
 
 # =============================================================================
-# 22f. One fit
+# 22f1. The rows of one fit
 # =============================================================================
-fit_one <- function(mk, model = "main", adjusted = TRUE) {
-  model <- match.arg(model)
-  adj_lab <- adj_label(adjusted)
-  tag <- paste(mk$name, model, adj_lab, sep = "_")
-  stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
-  stamp("start")
-  # the RRT variant is a different survival model, so it must not share a cache
-  # entry (or a bundle) with the two-cause fit of the same marker
-  rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
-  bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
-                                              if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
-                                              rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
-  rf <- result_file(mk$name, model, adj_lab)
-  if (!USE_FRESH && !SHAPE_ONLY && file.exists(rf) && file.exists(bundle_file)) {
-    r <- readRDS(rf)
-    same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
-    # a fit made under another entry rule, or before the panel was last rebuilt (e.g.
-    # before ESRD and dialysis entered the RRT definition), is on different data:
-    # refit, whatever the chain settings, and PBWPFVC_JM_RESUME does not override that
-    rule_on_disk <- if (is.null(r$entry_rule)) "two_values" else r$entry_rule
-    panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
-    other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
-                  if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
-                  if (nzchar(SF_BAND) && !identical(r$sf_band_rule, SF_BAND_RULE)) "its baseline SF band was lo < SF <= hi" else
-                  if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
-    if (nzchar(other_data)) {
-      stamp("result on disk is on other data (", other_data, "); refitting")
-    } else if (same || USE_RESUME) {
-      stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
-      return(r)
-    } else stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
-  }
-  # --- cohort restriction (baseline SF band)
-  if (nzchar(restrict_tag)) {
+# The longitudinal rows (ld) and survival rows (sd_) a marker's fit uses, after every
+# entry step. It does not depend on the adjustment arm (age, sex and race are
+# complete for every patient in the panel), so the severity-anchor centre below is
+# read from the same patients the fits use. Each entry step is stamped (rows,
+# patients) and goes to the manifest as n_rows_after_<step> and
+# n_patients_after_<step>.
+prepare_fit_data <- function(mk, stamp) {
+  # --- cohort restriction (ICU day 0, index SF band)
+  if (ICU_DAY0 || nzchar(SF_BAND)) {
     n_cohort <- nrow(surv_all)
     surv_all <- restricted_patients(mk)
     long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
     stamp("restricted to ", nrow(surv_all), " of ", n_cohort, " patients",
-          if (nzchar(SF_BAND)) paste0("; baseline SF in [", sf_band_limits[1], ", ", sf_band_limits[2], ")") else "")
+          if (ICU_DAY0) "; on the cohort's support at ICU admission (icu_day0)" else "",
+          if (nzchar(SF_BAND)) paste0("; index SF in [", sf_band_limits[1], ", ", sf_band_limits[2], ")") else "")
   }
-  # --- longitudinal rows. Each entry step is stamped (rows, patients) and goes to
-  #     the manifest as n_rows_after_<step> and n_patients_after_<step>.
   entry_steps <- tibble(.rows = 1L)
   note_step <- function(d, step, what) {
     entry_steps[[paste0("n_rows_after_", step)]]     <<- nrow(d)
@@ -544,6 +510,9 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     filter(!is.na(.data[[mk$y]]),
            if (isTRUE(mk$positive)) .data[[mk$y]] > 0 else TRUE) %>%   # the dose part: pressor days only
     note_step("marker", "marker observed")
+  # The previous-day covariates are required even when PBWPFVC_JM_NO_LAGS=1 drops
+  # them from the model, so the sensitivity fit has the main fit's rows and differs
+  # only in its terms.
   ld <- ld %>%
     filter(if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
     note_step("lags", "previous-day covariates observed")
@@ -551,12 +520,12 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
-                                   race_category, vtpfvc_pt_mean, vtpbw_pt_mean,
+                                   race_category, vtpfvc_pt_mean, vtpbw_idx,
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
                                    all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa),
-           if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE,
+           if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE,
            if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE,
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE) %>%
     note_step("covariates", "SOFA, dose terms and (pressure markers) BMI observed")
@@ -576,11 +545,12 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # dose main effect are collinear (age10 has a large mean relative to its spread)
   age_med <- median(ld %>% distinct(hospitalization_id, age10) %>% pull(age10))
   ld <- ld %>% mutate(age10_c = age10 - age_med)
+  # the baseline is the day-0 value (21_biotrauma_panel.R); without one the patient leaves
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else
                     if (isTRUE(mk$positive)) if_else(.data[[mk$y0]] > 0, log(pmax(.data[[mk$y0]], 1e-12)), 0) else
                     log(.data[[mk$y0]] + mk$offset)) %>%
-    note_step("baseline", "baseline value observed")
+    note_step("baseline", "day-0 baseline value observed")
   if (isTRUE(mk$positive)) {
     if (BASELINE_FORM == "offset") stop("marker ", mk$name, ": the offset baseline form needs a positive day-0 value, ",
                                         "and the dose part's baseline is zero for patients who start later; use PBWPFVC_JM_BASELINE=free")
@@ -609,13 +579,9 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     filter(if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE, !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
            if (MOD_FORM == "vtpfvc") is.finite(vtpfvc_idx) else TRUE) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
-  if (HAS_DOSE) ld <- ld %>% mutate(vtpbw_c = vtpbw_pt_mean - median(vtpbw_pt_mean, na.rm = TRUE))
+  if (HAS_DOSE) ld <- ld %>% mutate(vtpbw_c = vtpbw_idx - median(vtpbw_idx, na.rm = TRUE))
   ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id) %>%
     note_step("hazard", "complete hazard covariates")
-  lv <- sort(unique(ld$hospitalization_id))
-  ld$id  <- factor(ld$hospitalization_id,  levels = lv)
-  sd_$id <- factor(sd_$hospitalization_id, levels = lv)
-  sd_ <- sd_ %>% arrange(id)
   # RRT as a third cause (creatinine only; see 21_biotrauma_panel.R). Swapping the
   # event columns is the whole change: crisk_setup builds a stratum per level and
   # the Cox formula already interacts every covariate with strata, so the third
@@ -626,8 +592,99 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
           " (RRT ends the creatinine trajectory, not this one)")
   if (RRT_EVENT && mk$name == "creatinine" && !"event_factor_rrt" %in% names(sd_))
     stop("this panel predates the RRT competing event: rebuild it with the current 21_biotrauma_panel.R")
-  if (use_rrt) sd_ <- sd_ %>% mutate(event = event_rrt, event_day = event_day_rrt,
-                                     event_time = event_time_rrt, event_factor = event_factor_rrt)
+  if (use_rrt) sd_ <- sd_ %>% mutate(event = event_rrt, event_time = event_time_rrt, event_factor = event_factor_rrt)
+  # Delayed entry: a patient is at risk in the survival submodel from their first
+  # trajectory day in THIS fit (the first row kept above), not from the index, so
+  # the hazard is never fitted over days on which the model holds no value of the
+  # marker for them. A patient whose event comes at or before that day has no
+  # time at risk and leaves the fit.
+  entry <- ld %>% group_by(hospitalization_id) %>% summarise(entry_day = min(vent_day), .groups = "drop")
+  sd_ <- sd_ %>% select(-any_of("entry_day")) %>% inner_join(entry, by = "hospitalization_id")
+  n_no_time_at_risk <- sum(sd_$event_time <= sd_$entry_day)
+  sd_ <- sd_ %>% filter(event_time > entry_day)
+  ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id) %>%
+    note_step("entry_time", "event after the first trajectory day")
+  stamp(n_no_time_at_risk, " patients left out: event at or before their first trajectory day")
+  lv <- sort(unique(ld$hospitalization_id))
+  ld$id  <- factor(ld$hospitalization_id,  levels = lv)
+  sd_$id <- factor(sd_$hospitalization_id, levels = lv)
+  sd_ <- sd_ %>% arrange(id)
+  list(ld = ld, sd_ = sd_, entry_steps = entry_steps, sev_center = sev_center, use_rrt = use_rrt)
+}
+
+# The ventilated cohort's mean anchor per marker, among the patients that marker's
+# fit uses (the distinct patients of its rows after every entry step, under this
+# run's restrictions): the centre the control's severity-modified divergence is read
+# at (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R). 29_run_figure4.R passes it on. A
+# restricted run (for example PBWPFVC_JM_ICU_DAY0=1) writes its own file, tagged
+# like its fit tables.
+if (config$cohort == "imv" && !SHAPE_ONLY) {
+  anchor_mean <- map_dfr(markers, function(mk) {
+    fit_data <- prepare_fit_data(mk, function(...) message("  [anchor] ", mk$name, ": ", paste0(...)))
+    fitted_patients <- surv_all %>% filter(hospitalization_id %in% fit_data$sd_$hospitalization_id)
+    anchor_values <- anchor_of(fitted_patients, mk$name)
+    anchor_values <- anchor_values[!is.na(anchor_values)]
+    if (length(anchor_values) < MIN_ANCHOR_PATIENTS) return(NULL)
+    tibble(marker = mk$name, anchor_mean = mean(anchor_values), anchor_sd = sd(anchor_values),
+           n_patients = length(anchor_values), anchor = anchor_label(mk$name))
+  }) %>% mutate(restriction = if (nzchar(restrict_tag)) sub("_$", "", restrict_tag) else "none",
+                cohort = config$cohort, site = site_name)
+  mean_path <- file.path(final_dir, paste0("jm_severity_anchor_mean_", restrict_tag, h_suffix, "_", site_name, ".csv"))
+  if (nrow(anchor_mean)) {
+    written_now <- anchor_mean$marker   # outside filter(): the file has an anchor_mean column
+    if (file.exists(mean_path))
+      anchor_mean <- bind_rows(read_csv(mean_path, show_col_types = FALSE) %>% filter(!marker %in% written_now), anchor_mean)
+    write_csv(anchor_mean, mean_path)
+    message("Ventilated mean anchor among each marker's fitted patients -> ", basename(mean_path))
+    print(as.data.frame(anchor_mean %>% filter(marker %in% written_now) %>% select(marker, anchor, anchor_mean, n_patients)),
+          row.names = FALSE)
+  }
+}
+if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
+  message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor tables written, no fits run")
+  quit(save = "no", status = 0)
+}
+
+# =============================================================================
+# 22f. One fit
+# =============================================================================
+fit_one <- function(mk, model = "main", adjusted = TRUE) {
+  model <- match.arg(model)
+  adj_lab <- adj_label(adjusted)
+  tag <- paste(mk$name, model, adj_lab, sep = "_")
+  stamp <- function(...) message(sprintf("  [%s] %s: %s", format(Sys.time(), "%H:%M:%S"), tag, paste0(...)))
+  stamp("start")
+  # the RRT variant is a different survival model, so it must not share a cache
+  # entry (or a bundle) with the two-cause fit of the same marker
+  rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
+  bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
+                                              if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                                              rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
+  rf <- result_file(mk$name, model, adj_lab)
+  if (!USE_FRESH && !SHAPE_ONLY && file.exists(rf) && file.exists(bundle_file)) {
+    r <- readRDS(rf)
+    same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
+    # a fit made under another entry rule, or before the panel was last rebuilt (e.g.
+    # before ESRD and dialysis entered the RRT definition), is on different data:
+    # refit, whatever the chain settings, and PBWPFVC_JM_RESUME does not override that
+    rule_on_disk <- if (is.null(r$entry_rule)) "two_values" else r$entry_rule
+    panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
+    other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
+                  if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
+                  if (!identical(r$model_spec, MODEL_SPEC)) "it was fitted under another model specification" else
+                  if (nzchar(SF_BAND) && !identical(r$sf_band_rule, SF_BAND_RULE)) "its baseline SF band was lo < SF <= hi" else
+                  if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
+    if (nzchar(other_data)) {
+      stamp("result on disk is on other data (", other_data, "); refitting")
+    } else if (same || USE_RESUME) {
+      stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
+      return(r)
+    } else stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
+  }
+  fit_data <- prepare_fit_data(mk, stamp)
+  ld <- fit_data$ld; sd_ <- fit_data$sd_; entry_steps <- fit_data$entry_steps
+  sev_center <- fit_data$sev_center; use_rrt <- fit_data$use_rrt
+  lv <- levels(ld$id)
   if (isTRUE(mk$positive)) {
     on0 <- ld %>% distinct(hospitalization_id, on_y0)
     stamp(sum(on0$on_y0 == 1), " of ", nrow(on0), " dose-part patients on a pressor at day 0",
@@ -648,7 +705,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
 
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
-  num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"), "ldisc_c",
+  num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_idx"), "ldisc_c",
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", "sev_anchor_c", if (mk$y %in% PRESSURE_MARKERS) "bmi",
@@ -658,7 +715,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     stop("non-finite values in the longitudinal design: ",
          paste(sprintf("%s (%d rows)", names(n_bad)[n_bad > 0], n_bad[n_bad > 0]), collapse = ", "),
          ". Check the marker's non-positive values and the baseline covariates in 21_biotrauma_panel.R.")
-  s_bad <- vapply(c(if (HAS_DOSE) "vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "event_time", CHANNELS,
+  s_bad <- vapply(c(if (HAS_DOSE) "vtpbw_idx", "log_pfvc", "np_sofa", "log_sf_0", "bmi", "age10", "entry_day", "event_time", CHANNELS,
                     if (MOD_FORM == "vtpfvc") "vtpfvc_idx"),
                   function(v) sum(!is.finite(sd_[[v]])), integer(1))
   if (any(s_bad > 0))
@@ -666,12 +723,16 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
          paste(sprintf("%s (%d rows)", names(s_bad)[s_bad > 0], s_bad[s_bad > 0]), collapse = ", "))
 
   # --- longitudinal submodel
-  lag_terms <- setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
-  # disc form: PFVC as an effect modifier of the clinician's dose. l_vtpbw_within =
-  # yesterday's VT/PBW minus the patient's mean over the course (the dose change,
-  # identified within patient); its slope is modified by centred log PBW/PFVC
-  # discordance (and, adjusted, by linear age). vtpbw_pt_mean = the between-patient
-  # dose level.
+  # previous-day log SF and pressor flag, less the marker's own lag; none in the
+  # PBWPFVC_JM_NO_LAGS sensitivity
+  lag_terms <- if (NO_LAGS) character(0) else setdiff(c("l_log_sf", "l_pressor"), mk$own_lag)
+  # The clinician's dose in every form: l_vtpbw_within = yesterday's VT/PBW minus the
+  # index VT/PBW (the dose change, identified within patient) and vtpbw_idx = the
+  # index VT/PBW (the between-patient dose level). Both are fixed by the index and
+  # the days before the row, never by later days.
+  # disc form: PFVC as an effect modifier of the clinician's dose; the slope of
+  # l_vtpbw_within is modified by centred log PBW/PFVC discordance (and, adjusted,
+  # by linear age).
   mod_terms <- switch(MOD_FORM,
     # the age modification of the dose slope is LINEAR in age: a 4-df spline
     # interaction is four weakly identified parameters that fail the R-hat gate
@@ -683,7 +744,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     # The vulnerability form. The pfvc rate asks whether smaller lungs deteriorate
     # faster during ventilation; it does not ask whether they are harmed more BY
     # the volume delivered, which is what "more vulnerable to injury" claims. That
-    # is an effect modification, so the dose (the patient's mean VT/PBW, centred)
+    # is an effect modification, so the dose (the index VT/PBW, centred)
     # multiplies both the size term and its divergence. The three-way term
     # log_pfvc_sd:vtpbw_c:vent_day IS the vulnerability parameter: divergence per
     # day per SD of lung size, per extra mL/kg delivered.
@@ -702,7 +763,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   if (!is.na(sev_center))
     stamp(sprintf("severity-standardised: anchor (%s) centred at the ventilated mean %.2f; this cohort's mean %.2f",
                   anchor_label(mk$name), sev_center, mean(distinct(ld, hospitalization_id, sev_anchor_c)$sev_anchor_c) + sev_center))
-  rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
+  rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_idx", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
            lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
@@ -756,7 +817,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # marker's own baseline, collinear with value(log_y) on day 1 (the same
   # own-lag rule as the longitudinal submodel).
   cox_rhs <- paste(c("np_sofa_z", if (mk$y != "sf") "log_sf_0_z", "bmi_z", DEMO_RHS_HAZARD()), collapse = " + ")
-  cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
+  # counting-process form: at risk from the patient's first trajectory day (delayed entry)
+  cox_formula <- as.formula(paste0("Surv(entry_day, event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
   stamp("hazard: ", deparse1(cox_formula))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
@@ -850,7 +912,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
-                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, sf_band_rule = SF_BAND_RULE)
+                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, model_spec = MODEL_SPEC,
+                 sf_band_rule = SF_BAND_RULE)
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
   saveRDS(result, result_file(mk$name, model, adj_lab))
@@ -913,7 +976,8 @@ manifest <- map_dfr(results, function(r)
            hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
            worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
            acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
-  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC, modifier_form = MOD_FORM,
+  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC,
+         model_spec = MODEL_SPEC, icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,

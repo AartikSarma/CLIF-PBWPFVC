@@ -19,17 +19,20 @@
 # against PFVC at age 25 shows how much of a normalisation's predictive edge is age.
 #
 # Methods
-#   outcomes   in-hospital death, and death by day 60 (binary), logistic
+#   outcomes   in-hospital death, and death by day 60 after the index (script 03's
+#              mortality_event_60, binary), logistic
 #   form       each measure as a 3-df natural spline of its log (no measure is
 #              penalised for a shape the others do not have); a linear-in-log form
-#              is reported beside it
+#              is reported beside it, in which the VT/PBW adjustment is linear in
+#              log VT/PBW too, as in its base model
 #   sample     the patients with every measure (plateau-measured, mechanical power
 #              defined), so all twelve are compared on the same people; each
 #              measure is also fitted on every patient who has it, as a secondary
 #              read (not comparable across measures)
-#   adjustment each measure alone, and given VT/PBW (beside a 3-df spline of log
-#              VT/PBW, the dose the clinician set: does the measure add anything once
-#              the dose is known?). Given VT/PBW, VT/PFVC carries the PBW/PFVC ratio.
+#   adjustment each measure alone, and given VT/PBW, the dose the clinician set
+#              (beside a 3-df spline of log VT/PBW in the spline form, log VT/PBW in
+#              the linear form): does the measure add anything once the dose is
+#              known? Given VT/PBW, VT/PFVC carries the PBW/PFVC ratio.
 #              Third, given VT/PBW, sex and race: the structural ratio (VT/PFVC at
 #              age 25) is then mostly height's sex-specific hump.
 #   sign       the linear-in-log form reports each measure's log-odds per log unit
@@ -162,8 +165,16 @@ cross_validated <- function(dat, folds, rhs) {
 # structural ratio (VT/PFVC at age 25) is sex, race and height's small sex-specific
 # hump, and sex and race predict death through routes other than the ventilator. Its
 # base model is VT/PBW with sex and race, and every row's difference is from that base.
-ADJUSTMENTS <- c(alone = "", given_vtpbw = " + ns(log_vtpbw, 3)",
-                 given_vtpbw_sex_race = " + ns(log_vtpbw, 3) + sex_category + race_category")
+# The dose term takes the measure's form: a 3-df spline of log VT/PBW in the spline
+# form, log VT/PBW itself in the linear form, so that each measure is set beside the
+# same dose term as the base model it is compared with (the VT/PBW row is that form
+# of log VT/PBW).
+DOSE_TERM <- c(spline = "ns(log_vtpbw, 3)", linear = "log_vtpbw")
+adjustment_rhs <- function(adjustment, form) switch(adjustment,
+  alone = "",
+  given_vtpbw = paste0(" + ", DOSE_TERM[[form]]),
+  given_vtpbw_sex_race = paste0(" + ", DOSE_TERM[[form]], " + sex_category + race_category"))
+ADJUSTMENTS <- c(alone = "alone", given_vtpbw = "given_vtpbw", given_vtpbw_sex_race = "given_vtpbw_sex_race")
 # what the VT/PBW row carries in each adjustment: it is the base model
 BASE_EXTRA <- c(alone = "", given_vtpbw = "", given_vtpbw_sex_race = " + sex_category + race_category")
 ADJUSTMENT_LABELS <- c(alone = "alone", given_vtpbw = "given VT/PBW", given_vtpbw_sex_race = "given VT/PBW, sex and race")
@@ -184,7 +195,7 @@ evaluate_sample <- function(sample_label, ids_for) {
             filter(!is.na(sex_category), !is.na(race_category))
           if (sum(dat$y == 1) < MIN_DEATHS || sum(dat$y == 0) < MIN_DEATHS) return(NULL)
           # VT/PBW in each adjustment is that adjustment's base model
-          rhs <- paste0(FORMS[[form]], if (measure != "vtpbw") ADJUSTMENTS[[adjustment]] else BASE_EXTRA[[adjustment]])
+          rhs <- paste0(FORMS[[form]], if (measure != "vtpbw") adjustment_rhs(adjustment, form) else BASE_EXTRA[[adjustment]])
           folds <- unname(patient_fold[as.character(dat$hospitalization_id)])
           predicted <- cross_validated(dat, folds, rhs)
           full_fit <- fit_strict(glm(as.formula(paste("y ~", rhs)), family = binomial, data = dat))

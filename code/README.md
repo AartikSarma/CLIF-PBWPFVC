@@ -41,7 +41,10 @@ to change; that stops once sites have returned `final/` folders.
   age-matched head-to-head from each site's `crs_channels_estimates_` and `_tests_`.
   Figure 4's estimates pool per 0.1 log units of PFVC, converted from each site's own
   SD with that site's `jm_scale_{h}_{site}.csv`, by common-effect inverse variance
-  (two or three sites cannot support a random-effects variance), gated at rhat <= 1.1:
+  (two or three sites cannot support a random-effects variance), gated at rhat <= 1.1.
+  Each restricted or sensitivity arm (the file tags `day0_`, `sevstd_`, `sf<lo>to<hi>_`,
+  `nolag_`, `rrtcause_`, `offset_`) pools only with the same arm, and the script stops on
+  a second copy of any table in a site folder:
 
   ```bash
   mkdir -p results/fig4/MIMIC results/fig4/UCSF     # results/ is gitignored
@@ -61,8 +64,9 @@ to change; that stops once sites have returned `final/` folders.
   for strain: driving pressure and VT/PFVC as additive predictors of mortality, and
   whether age shifts the balance between them. `xsec_pfvc_age_control.R` asks whether
   log PFVC carries part of age's mortality gradient under ventilation only: the age
-  curve with and without log PFVC in the ventilated and no-support cohorts, and the
-  cohort x log PFVC contrast (needs scripts 01-03 run for both cohorts).
+  curve with and without log PFVC in the ventilated arm on invasive ventilation at ICU
+  admission (`icu_day0`) and the no-support cohort, and the cohort x log PFVC contrast,
+  with the control censored at escalation (needs scripts 01-03 run for both cohorts).
   `xsec_crs_channels.R` asks whether measured compliance scales like predicted FVC,
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
