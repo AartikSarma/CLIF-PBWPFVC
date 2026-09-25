@@ -199,6 +199,10 @@ MODEL_SPEC <- paste0("dose: between = index VT/PBW (vtpbw_idx), within = previou
                      "entry: first trajectory day, event_time > entry_day; ",
                      "clock: continuous days from the index, no measurement after the event time; ",
                      "lags: ", if (NO_LAGS) "none (previous-day SF and pressor dropped)" else "previous-day log SF and pressor flag")
+# the time trend is part of each marker's specification: a 3-df natural spline in day
+# on the daily grid, linear for the binary on/off marker (its spline did not mix)
+time_term_for <- function(mk) if (JM_GRID == "6h" || isTRUE(mk$binary)) "vent_day" else "ns(vent_day, 3)"
+model_spec_for <- function(mk) paste0(MODEL_SPEC, "; time: ", time_term_for(mk))
 # Renal replacement as a third competing cause, for creatinine only. Off by
 # default because it redefines the other two: with RRT in, the death hazard is
 # the hazard of death BEFORE dialysis, on a risk set that empties faster.
@@ -670,7 +674,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
     other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
                   if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
-                  if (!identical(r$model_spec, MODEL_SPEC)) "it was fitted under another model specification" else
+                  if (!identical(r$model_spec, model_spec_for(mk))) "it was fitted under another model specification" else
                   if (nzchar(SF_BAND) && !identical(r$sf_band_rule, SF_BAND_RULE)) "its baseline SF band was lo < SF <= hi" else
                   if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
     if (nzchar(other_data)) {
@@ -753,8 +757,9 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
     channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: a 3-df natural spline in day on the daily grid (figure 4); linear on the
-  # 6h grid, whose 48 hours are too short for a spline
-  time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
+  # 6h grid, whose 48 hours are too short for a spline, and for the binary on/off
+  # marker, whose spline did not mix at MIMIC (R-hat 4-8)
+  time_term <- time_term_for(mk)
   # the severity terms: the anchor's own level and trend, and its modification of the
   # size level and of the divergence (the three-way term is the test)
   sev_terms <- if (!is.na(sev_center)) c("sev_anchor_c", "sev_anchor_c:vent_day",
@@ -909,7 +914,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
                  acc_b = acc_b, n_iter = N_ITER, n_burnin = N_BURNIN, n_thin = N_THIN,
-                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, model_spec = MODEL_SPEC,
+                 entry_rule = entry_rule_for(mk), hazard_spec = HAZARD_SPEC, model_spec = model_spec_for(mk),
                  sf_band_rule = SF_BAND_RULE)
   # the small result list also goes to disk, so a cluster failure after the fits
   # finished loses nothing (the master collects these files if the cluster dies)
@@ -982,7 +987,7 @@ manifest <- map_dfr(results, function(r) {
            acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)
 }) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC,
-         model_spec = MODEL_SPEC, icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
+         model_spec = vapply(marker, function(m) model_spec_for(markers[[m]]), character(1)), icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,
@@ -1046,7 +1051,7 @@ if (identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1"))
     unlink(file.path(final_dir, paste0("jm_", nm, "_", out_tag, ".csv")))
 merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
-  if (file.exists(path) && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")) {
+  if (file.exists(path) && !REPLACE_TABLES && !identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")) {
     old <- read_csv(path, show_col_types = FALSE)
     # every fit this run ATTEMPTED replaces its old rows, including one that failed or
     # was skipped: otherwise a failed refit leaves the previous run's estimates in

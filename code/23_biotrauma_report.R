@@ -127,10 +127,11 @@ if (length(want_markers) && nzchar(want_markers[1])) {
   message("restricted to markers: ", paste(want_markers, collapse = ", "))
 }
 RESTRICTED <- length(want_markers) && nzchar(want_markers[1])
-# merge on write: keep the rows of markers this run did not refit
+# merge on write: keep the rows of markers this run did not refit (unless
+# PBWPFVC_JM_REPLACE_TABLES=1, 20_biotrauma_grid.R)
 report_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
-  if (RESTRICTED && file.exists(path) && nrow(new)) {
+  if (RESTRICTED && !REPLACE_TABLES && file.exists(path) && nrow(new)) {
     old <- read_csv(path, show_col_types = FALSE) %>% filter(!marker %in% want_markers)
     as_text <- function(d) d %>% mutate(across(everything(), as.character))
     if (nrow(old)) {

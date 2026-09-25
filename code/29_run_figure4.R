@@ -150,6 +150,7 @@ if (!DRY) dir.create(LOG_DIR, recursive = TRUE)
 Sys.unsetenv("PBWPFVC_COHORT")
 Sys.setenv(PBWPFVC_SITE_NAME = BASE_SITE,
            PBWPFVC_JM_GRID = "daily", PBWPFVC_JM_HORIZON = "7", PBWPFVC_JM_MODIFIER = "pfvc",
+           PBWPFVC_JM_REPLACE_TABLES = "1",   # each arm writes its tables whole: no stale markers
            PBWPFVC_JM_ITER = ITER, PBWPFVC_JM_BURNIN = BURNIN, PBWPFVC_JM_CHAINS = CHAINS,
            PBWPFVC_JM_THIN = THIN, PBWPFVC_JM_PAR = PAR)
 message("site ", BASE_SITE, "; markers ", MARKERS, if (CREATININE) ",creatinine", "; controls ", CONTROL_MARKERS,

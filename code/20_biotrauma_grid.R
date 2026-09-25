@@ -116,6 +116,12 @@ height_fingerprint <- function(height_cm, sex_category) {
 # survival submodel and the association of the marker with each cause) are reported
 # beside it as hazard_rhat and read with the longitudinal-only comparison
 # (jm_lme_check_*, 23_biotrauma_report.R), which shows whether they move the estimate.
+# Table writing. By default 22 and 23 merge on write: a run of one marker keeps the
+# other markers' rows in the same table, so a marker can be refitted by hand.
+# PBWPFVC_JM_REPLACE_TABLES=1 writes only this run's markers, so a marker dropped from
+# an arm cannot leave its old rows behind; 29_run_figure4.R sets it, because each of
+# its arms writes its tables in one run.
+REPLACE_TABLES <- identical(Sys.getenv("PBWPFVC_JM_REPLACE_TABLES", "0"), "1")
 RHAT_GATE <- 1.1   # the standard convergence threshold
 # the size terms per modifier form (22_biotrauma_fit.R, mod_terms): each form's size
 # level and its divergence (the level x vent_day interaction); an interaction is
