@@ -5,16 +5,15 @@
 # Respiratory-system compliance (Crs = VT / driving pressure) measures how much
 # volume the lung and chest wall take per unit pressure, and in a healthy lung it
 # scales with lung size. If PFVC tracks lung size, log Crs rises one-for-one with
-# log PFVC: an exponent of 1. Across sites, adjusted for age, sex and race, Crs
-# rises about 9 mL/cmH2O per litre of PFVC, close to proportional (pooled figure,
-# 2026-09-23). That estimate is identified by height alone. This script asks the
-# same question input by input, and against PBW.
+# log PFVC: an exponent of 1. Adjusted for age, sex and race (section 4), that
+# exponent is identified by height alone. This script asks the same question input
+# by input, and against PBW.
 #
 # 1. Channels. GLI-2012 log PFVC is, to a small remainder, a sum of a height piece,
 #    an age curve, a sex shift and a race shift (pfvc_channels() in
 #    20_biotrauma_grid.R, each in log-PFVC units). log Crs is regressed on the four
 #    pieces at once, so each coefficient is the Crs exponent through that input.
-#    Stated before the data (2026-09-23):
+#    Stated before the data:
 #      height, sex, race   the lung-size inputs: exponents near 1, and equal
 #      age                 no directional prediction. GLI FVC falls with age, and
 #                          on one reading of strain the usable tidal range (FVC
@@ -33,16 +32,19 @@
 #    (about 2.3). The head-to-head is repeated in women shorter than the median woman.
 #    log PBW and log PFVC are never entered together. A third exposure, PFVC at age
 #    25 (GLI's height, sex and race scaling without its age decline; script 03's
-#    pfvc_age25), and a second version of every model with ns(age, 4) added, followed
-#    MIMIC's first run (2026-09-23), where Crs tracked PFVC's height piece but not its
-#    age piece and PBW won the head-to-head.
+#    pfvc_age25), and a second version of every model with ns(age, 4) added, separate
+#    the formulas' structural scaling from GLI's age term: they ask whether PFVC and
+#    PBW differ once age is held fixed, since Crs need not follow the age piece.
 #
-# 2b. Specific elastance (Ers x predicted size) as a second outcome throughout. Stress
+# 2b. Specific elastance (Ers x predicted size), in sections 1 and 2b only. Stress
 #    = specific elastance x strain, so the two are interchangeable only where specific
-#    elastance is constant. Its exponent through a GLI piece is 1 minus that piece's
-#    Crs exponent, tested against 0: a non-zero value says the formula's predicted
-#    size difference and the pressure per unit of relative distension part company
-#    through that input. Age is where a loss of elastic recoil would show.
+#    elastance is constant. Section 1 regresses it on the four GLI pieces beside Crs:
+#    its exponent through a piece is 1 minus that piece's Crs exponent, tested
+#    against 0, and a non-zero value says the formula's predicted size difference and
+#    the pressure per unit of relative distension part company through that input.
+#    Age is where a loss of elastic recoil would show. Section 2b compares its spread
+#    across patients with Ers scaled by PFVC and by PFVC at age 25 (PBW is not scaled
+#    here).
 #
 # 3. Height elasticity by sex: d log Crs / d log height within each sex, beside
 #    GLI's height elasticity (2.41 men, 2.26 women) and Devine's at the sex's median
@@ -54,9 +56,10 @@
 # Covariates in every model: log SF, SOFA, PEEP (compliance depends on the volume
 # PEEP holds), BMI (Crs includes the chest wall; BMI enters because the outcome is
 # a pressure-derived measure). Sample: the plateau-measured index timepoint
-# (dp > 0; pressures are never forward-filled). Sensitivity: driving pressure >= 5
-# cmH2O, because a driving pressure near 1 gives compliances up to about 530 that
-# pass QC today. A model that warns stops the script.
+# (pressures are never forward-filled). QC removes driving pressures below 5 cmH2O,
+# the floor of the LRM paper, and compliances above 150 (02_quality_checks.R), so
+# no separate driving-pressure sensitivity is fitted. A model that warns stops the
+# script.
 #
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03)
 # Outputs: final/supplement/
@@ -84,7 +87,10 @@ site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
 source(here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, channels_equal_p()
 
-DP_FLOOR_SENSITIVITY <- 5   # cmH2O
+# minimum patients in the analysis sample, and in each subgroup (short women, each sex):
+# the CLIF minimum-count standard
+MIN_PATIENTS <- 100
+MIN_SUBGROUP_PATIENTS <- 50
 GLI_HEIGHT_ELASTICITY <- c(Male = 2.41, Female = 2.26)
 OKABE_ITO <- c(height = "#0072B2", age = "#E69F00", sex = "#009E73", race = "#CC79A7",
                PFVC = "#0072B2", PBW = "#D55E00")
@@ -116,11 +122,10 @@ mechanics_all <- read_parquet(file.path(config$output_dir, "analysis_cross_secti
          # exponent of 1 is the same statement as an Espec exponent of 0, and the
          # second is the one a reader weighs against "specific elastance is constant".
          log_espec = log(ers * pfvc), log_espec25 = log(ers * pfvc_age25))
-if (nrow(mechanics_all) < 100) stop("fewer than 100 patients with a measured plateau and every covariate")
-SAMPLES <- list(`all plateau-measured` = mechanics_all,
-                `driving pressure >= 5` = mechanics_all %>% filter(dp >= DP_FLOOR_SENSITIVITY))
-message(sprintf("=== xsec_crs_channels, %s: %d plateau-measured patients (%d with driving pressure >= %d) ===",
-                site_name, nrow(mechanics_all), nrow(SAMPLES[[2]]), DP_FLOOR_SENSITIVITY))
+if (nrow(mechanics_all) < MIN_PATIENTS)
+  stop("fewer than ", MIN_PATIENTS, " patients with a measured plateau and every covariate")
+SAMPLES <- list(`all plateau-measured` = mechanics_all)
+message(sprintf("=== xsec_crs_channels, %s: %d plateau-measured patients ===", site_name, nrow(mechanics_all)))
 
 COVARIATES <- "log_sf + sofa_total + peep_set + bmi"
 DEMOGRAPHICS <- "ns(age10, 4) + sex_category + race_category"
@@ -177,11 +182,12 @@ analyse_sample <- function(dat, sample_label) {
   # three exposures, each on its own, against PBW: PFVC; PFVC at age 25 (GLI's height,
   # sex and race scaling with its age decline removed, script 03's pfvc_age25); PBW.
   # Fitted without demographics, and again with ns(age, 4) in every model, which asks
-  # whether the formulas differ once age is held fixed (MIMIC, 2026-09-23: Crs follows
-  # PFVC's height piece but not its age piece, so PFVC lost to PBW overall).
+  # whether the formulas differ once age is held fixed: a Crs that follows PFVC's
+  # height piece but not its age piece would favour PBW without the age spline.
   H2H_EXPOSURES <- c(PFVC = "log_pfvc", `PFVC at age 25` = "log_pfvc25", PBW = "log_pbw")
-  # the same head-to-head on specific elastance: which scaling makes Ers x size most
-  # nearly constant across patients (the Chiumello reading of a correct normaliser)
+  # specific elastance under the two PFVC scalings (section 2b; no PBW version): which
+  # makes Ers x size most nearly constant across patients (the Chiumello reading of a
+  # correct normaliser)
   ESPEC_EXPOSURES <- c(PFVC = "log_espec", `PFVC at age 25` = "log_espec25")
   head_to_head <- function(sub_dat, subgroup, age_adjusted) {
     label <- paste0("head-to-head, ", subgroup, if (age_adjusted) ", age spline in every model" else "")
@@ -196,8 +202,8 @@ analyse_sample <- function(dat, sample_label) {
   short_women <- dat %>% filter(sex_category == "Female", height_cm < female_median_height)
   short_women_label <- sprintf("women shorter than %.0f cm", female_median_height)
   h2h <- list(head_to_head(dat, "everyone", FALSE), head_to_head(dat, "everyone", TRUE),
-              if (nrow(short_women) >= 50) head_to_head(short_women, short_women_label, FALSE),
-              if (nrow(short_women) >= 50) head_to_head(short_women, short_women_label, TRUE))
+              if (nrow(short_women) >= MIN_SUBGROUP_PATIENTS) head_to_head(short_women, short_women_label, FALSE),
+              if (nrow(short_women) >= MIN_SUBGROUP_PATIENTS) head_to_head(short_women, short_women_label, TRUE))
   estimates$head_to_head <- map_dfr(compact(h2h), "estimates")
   tests$head_to_head <- map_dfr(compact(h2h), "tests")
 
@@ -216,7 +222,7 @@ analyse_sample <- function(dat, sample_label) {
   # ---- 3. height elasticity by sex, beside GLI's and Devine's
   estimates$height_by_sex <- map_dfr(c("Male", "Female"), function(sx) {
     sub_dat <- dat %>% filter(sex_category == sx)
-    if (nrow(sub_dat) < 50) return(NULL)
+    if (nrow(sub_dat) < MIN_SUBGROUP_PATIENTS) return(NULL)
     fit <- fit_strict(lm(as.formula(paste("log_crs ~ log_height + ns(age10, 4) + race_category +", COVARIATES)), data = sub_dat))
     median_height <- median(sub_dat$height_cm)
     # Devine: PBW = a + 2.3 (h/2.54 - 60), so d log PBW / d log h = (2.3 h / 2.54) / PBW
