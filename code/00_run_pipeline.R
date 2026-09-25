@@ -14,13 +14,19 @@
 #   prep             01-03   cohort, quality checks, derived variables
 #   cross_sectional  04-05   figures 1-3: PBW bias by demographics, respiratory
 #                            mechanics, mortality
-#   injury           20-27   figure 4: organ-injury markers over 7 days, in the ventilated
-#                            cohort, its baseline SF classes and the no-support controls,
-#                            unmatched and matched on severity (29_run_figure4.R: builds
-#                            the control cohort, sets the severity floors, fits, draws)
+#   injury           20-29   figure 4: organ-injury markers over 7 days in the ventilated
+#                            cohort and the no-support controls (all, and hypoxemic with
+#                            SF < 315), each control standardised to the ventilated
+#                            cohort's severity rather than matched (29_run_figure4.R:
+#                            builds the control cohort, fits, draws)
 #
-# The default is "prep,cross_sectional", which is what this runner has always done.
-# The later stages take hours; ask for them by name, or --stages all.
+# The default is "prep,cross_sectional". The injury stage takes hours; ask for it by
+# name, or --stages all.
+#
+# Cohort switch: PBWPFVC_COHORT=imv (default; the paper's cohort) | nosupport
+# (negative control) | niv (built on request only). Environment variable only; it
+# selects the cohort that scripts 01-03 build, e.g.
+#   PBWPFVC_COHORT=nosupport uvr run code/01_cohort_identification.R
 #
 # Cross-cohort pooling (code/pooling/) is a separate, centrally-run step and is
 # intentionally not invoked here.
@@ -175,9 +181,8 @@ if (analysis_only) {
     stop("--analysis_only needs the script-03 outputs, which are missing:\n  ",
          paste(missing, collapse = "\n  "), "\nRun the full pipeline first.")
 }
-# NOTE: cross-cohort pooling (code/pooling/pooled_estimates.R) is NOT part of the per-site
-# pipeline. It is run centrally by the study coordinator after every site returns
-# its `final/` outputs, and is kept local (not in the repository).
+# NOTE: cross-cohort pooling (code/pooling/) is NOT part of the per-site pipeline. It is
+# run centrally by the study coordinator after every site returns its `final/` outputs.
 
 # --- Clear the cross-sectional block before it is rewritten --------------------
 # Scripts 03-05 rewrite final/cross_sectional/ whole, so a file an older version of

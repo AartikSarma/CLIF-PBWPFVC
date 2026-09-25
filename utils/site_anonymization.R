@@ -5,13 +5,13 @@
 # "Site A", "Site B", ... ordered from the LARGEST analytic cohort to the
 # smallest, so no shared output names a contributing institution.
 #
-# The size ranking comes from the per-site attrition logs (script 01), whose last
-# step is the analytic cohort N. Using that single source keeps a given cohort's
-# alias identical across every pooled script, even though the scripts key sites
-# differently: pooled_estimates.R uses the `site` column written into each results
-# table, while pooled_tte.R uses the results FOLDER name. The two can differ (a
-# folder named "EU" may hold results written by site "emory"), so both spellings
-# are registered as keys for the same alias.
+# The size ranking comes from the per-site attrition logs (written by script 03),
+# whose last step is the analytic cohort N. Using that single source keeps a given
+# cohort's alias identical across every pooled script (code/pooling/), even though a
+# pooled table may key sites by the `site` column written into each results table or
+# by the results FOLDER name. The two can differ (a folder named "EU" may hold
+# results written by site "emory"), so both spellings are registered as keys for the
+# same alias.
 #
 # The real-name -> alias crosswalk is only ever printed to the console
 # (print_site_alias_key); it is deliberately NOT written to the pooled output
@@ -41,7 +41,7 @@ read_site_cohort_size <- function(site_dir) {
                  Sys.glob(file.path(site_dir, "final", "cross_sectional", "attrition_log_*.csv")))
   if (length(log_files) == 0) {
     stop("No attrition_log_*.csv in ", site_dir, ". The pooled figures need it to ",
-         "rank cohorts by size for anonymized site labels; re-run script 01 for ",
+         "rank cohorts by size for anonymized site labels; re-run scripts 01-03 for ",
          "that cohort and copy its results in.")
   }
   attrition <- read_csv(log_files[[1]], show_col_types = FALSE)
