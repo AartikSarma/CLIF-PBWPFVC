@@ -1,8 +1,11 @@
 # =============================================================================
 # Script 20 (grid): the time grid shared by the biotrauma panel, fit and report
 # =============================================================================
-# Sourced by 21_biotrauma_panel.R, 22_biotrauma_fit.R and 23_biotrauma_report.R
-# so the three agree on the grid, the horizon and the output suffix.
+# Sourced by 21_biotrauma_panel.R, 22_biotrauma_fit.R, 23_biotrauma_report.R,
+# 24_biotrauma_figures.R, 27_control_comparison.R and 28_height_fingerprint.R (and
+# by supplement/xsec_crs_channels.R, supplement/xsec_pfvc_age_control.R and
+# tools/creatinine_positive_control.R for pfvc_channels() or h_suffix), so they
+# agree on the grid, the horizon, the output suffix and the cohort restrictions.
 #
 #   PBWPFVC_JM_GRID       "daily" (figure 4, the default) or "6h" (six-hour periods;
 #                         not in the paper)
@@ -82,8 +85,9 @@ pfvc_channels <- function(d, expo = c("log_pfvc", "ldisc")) {
 # Devine PBW is a line with an intercept and GLI FVC a power law in height, so the
 # ratio is an inverted U in height that peaks near 166 cm in men and 183 cm in
 # women. GLI's log-height coefficient does not depend on age or race, so the
-# reference age and race move each sex's curve by a constant and nothing else;
-# the sex term of any model that uses the fingerprint absorbs that constant.
+# reference age (60 years) and race (white) move each sex's curve by a constant and
+# nothing else, so any fixed choice gives the same fingerprint up to that constant,
+# which the sex term of any model that uses the fingerprint absorbs.
 # Returned in log units, relative to a 170 cm man.
 height_fingerprint <- function(height_cm, sex_category) {
   bad_sex <- setdiff(unique(sex_category), c("Male", "Female"))
@@ -107,52 +111,26 @@ channels_equal_p <- function(est, V) {
 }
 
 # ---- Cohort restrictions shared by the fit, the report and the figures ----------
-# Severity floor (PBWPFVC_JM_SEV_MIN): keep patients whose baseline severity anchor
-# is at or above a value, to severity-match the no-support control to the ventilated
-# cohort. The anchor is PER MARKER: the sum of the index-day cardiovascular,
+# The severity anchor, PER MARKER: the sum of the index-day cardiovascular,
 # coagulation, liver and renal SOFA components, leaving out the marker's OWN
-# component. A floor on a score containing the outcome selects extreme baselines,
-# which bends the average time trend through regression to the mean. Two components
-# are never in an anchor: respiratory (collinear with SF) and neurological (on the
-# day of intubation the worst GCS is sedation, so matching on it matches on the
-# treatment). The oxygenation and mechanics markers have no component to drop.
+# component, so the anchor never contains the outcome. Two components are never in an
+# anchor: respiratory (collinear with SF) and neurological (on the day of intubation
+# the worst GCS is sedation). The oxygenation and mechanics markers have no component
+# to drop.
 ANCHOR_POOL <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal")
 ANCHOR_DROP <- c(creatinine = "sofa_renal", platelets = "sofa_coag", bilirubin = "sofa_liver",
                  ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97", pressor_dose = "sofa_cv_97")
 anchor_components <- function(marker) setdiff(ANCHOR_POOL, unname(ANCHOR_DROP[marker]))
 anchor_label <- function(marker)
   paste(sub("_97", "", sub("sofa_", "", anchor_components(marker))), collapse = " + ")
-# The knob is one number (each marker's own anchor gets the same floor) or a list,
-# "platelets=2,bilirubin=1". The floor enters every cache name and the output tag, so
-# a restricted run never reuses an unrestricted fit.
-SEV_SPEC <- trimws(Sys.getenv("PBWPFVC_JM_SEV_MIN", ""))
-SEV_BY_MARKER <- grepl("=", SEV_SPEC)
-sev_floors <- if (SEV_BY_MARKER) {
-  pairs <- strsplit(trimws(strsplit(SEV_SPEC, ",")[[1]]), "=")
-  floors <- setNames(suppressWarnings(as.numeric(vapply(pairs, `[`, "", 2))), trimws(vapply(pairs, `[`, "", 1)))
-  if (anyNA(floors) || any(!nzchar(names(floors)))) stop("PBWPFVC_JM_SEV_MIN must be a number or 'marker=number,...'; got '", SEV_SPEC, "'")
-  floors[order(names(floors))]          # sorted, so the same floors always give the same tag
-} else numeric()
-sev_floor_for <- function(marker) {
-  if (!nzchar(SEV_SPEC)) return(NA_real_)
-  if (!SEV_BY_MARKER) return(as.numeric(SEV_SPEC))
-  if (!marker %in% names(sev_floors)) stop("PBWPFVC_JM_SEV_MIN lists floors by marker but has none for ", marker)
-  sev_floors[[marker]]
-}
-sev_sfx_for <- function(marker) { v <- sev_floor_for(marker); if (is.na(v)) "" else paste0("_sev", v) }
-# The output tag carries the floors themselves ("sev2_", or "sev_bilirubin1_platelets2_"):
-# a second choice of floor writes its own tables instead of replacing the first's.
-sev_tag <- if (!nzchar(SEV_SPEC)) "" else if (SEV_BY_MARKER)
-  paste0("sev_", paste0(names(sev_floors), sev_floors, collapse = "_"), "_") else paste0("sev", SEV_SPEC, "_")
-
 # Severity standardisation of the control (PBWPFVC_JM_SEV_CENTER = "creatinine=2.61,
-# platelets=3.05,..."; 2026-09-21, replacing the floor above in figure 4). The
+# platelets=3.05,..."; figure 4 uses it). The
 # objection to an unmatched control is effect modification, not confounding: PFVC is
 # fixed by height, age, sex and race, so illness cannot move it, but a smaller lung
 # might show in the trajectory only under physiological stress, and a healthier
 # control could be null for that reason alone. So the control keeps EVERY patient and
 # its divergence is allowed to vary with the marker's own anchor, which is centred at
-# the VENTILATED cohort's mean anchor (22_biotrauma_fit.R, section 13f):
+# the VENTILATED cohort's mean anchor (22_biotrauma_fit.R, section 22f):
 #   log_pfvc_sd:vent_day             the control's rate at the ventilated severity;
 #                                    linear in the anchor, so this is also the rate
 #                                    averaged over the ventilated anchor distribution
@@ -166,7 +144,6 @@ sev_centers <- if (nzchar(SEV_CENTER_SPEC)) {
   if (anyNA(centers) || any(!nzchar(names(centers)))) stop("PBWPFVC_JM_SEV_CENTER must be 'marker=number,...'; got '", SEV_CENTER_SPEC, "'")
   centers
 } else numeric()
-if (nzchar(SEV_CENTER_SPEC) && nzchar(SEV_SPEC)) stop("PBWPFVC_JM_SEV_CENTER and PBWPFVC_JM_SEV_MIN are alternatives: set one")
 sev_center_for <- function(marker) {
   if (!nzchar(SEV_CENTER_SPEC)) return(NA_real_)
   if (!marker %in% names(sev_centers)) stop("PBWPFVC_JM_SEV_CENTER has no centre for ", marker)
@@ -176,8 +153,8 @@ sev_center_sfx_for <- function(marker) { v <- sev_center_for(marker); if (is.na(
 sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
 
 # Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi on
-# the index day. The strata in use are "235,315", "115,235" and "0,115" (user-specified,
-# 2026-09-18; 315 and 235 are the Rice 2007 SF equivalents of P/F 300 and 200).
+# the index day. The strata in use are "235,315", "115,235" and "0,115" (315 and 235
+# are the Rice 2007 SF equivalents of P/F 300 and 200).
 # The upper bound is strict so that "0,315" is the ventilated cohort's own gate, SF < 315.
 SF_BAND_RULE <- "lo <= SF < hi"   # stored with each fit: a fit made under another rule is refitted
 SF_BAND <- trimws(Sys.getenv("PBWPFVC_JM_SF_BAND", ""))
@@ -187,5 +164,5 @@ if (nzchar(SF_BAND) && (length(sf_band_limits) != 2L || anyNA(sf_band_limits) ||
 sf_sfx <- if (nzchar(SF_BAND)) paste0("_sf", sf_band_limits[1], "to", sf_band_limits[2]) else ""
 sf_tag <- if (nzchar(SF_BAND)) paste0("sf", sf_band_limits[1], "to", sf_band_limits[2], "_") else ""
 # both restrictions, in the order every script uses
-restrict_tag <- paste0(sev_tag, sev_center_tag, sf_tag)
-restrict_sfx_for <- function(marker) paste0(sev_sfx_for(marker), sev_center_sfx_for(marker), sf_sfx)
+restrict_tag <- paste0(sev_center_tag, sf_tag)
+restrict_sfx_for <- function(marker) paste0(sev_center_sfx_for(marker), sf_sfx)
