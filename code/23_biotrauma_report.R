@@ -17,14 +17,24 @@
 #       association blocks move the answer
 #   final/jm_association_hr_{tag}.csv   hazard ratio for death, extubation (and RRT)
 #       per SD of the current log marker (value) and per unit slope
-#   final/jm_heterogeneity_{tag}.csv    the hetero model only: the strain slope at
-#       the 10th, 50th and 90th percentile of baseline Ers x PFVC
 #
-# The dose-response trajectories, the within-patient dose terms and their figures
-# were cut on 2026-09-24 (docs/output_manifest.md): the manuscript does not read
-# the dose inside the band, which is confounded by indication.
+# The within-patient dose terms are not reported: the manuscript does not read the
+# dose inside the band, which is confounded by indication.
 #
-# Usage: uvr run code/23_biotrauma_report.R     (PBWPFVC_JM_HORIZON, PBWPFVC_JM_BASELINE as in the fit)
+# Switches (environment), each as set for the fit being reported:
+#   PBWPFVC_JM_MODIFIER    size form (default pfvc)
+#   PBWPFVC_JM_RRT_EVENT   1 = the creatinine fit with dialysis as a third competing
+#                          cause, written as rrtcause_ tables (default 0)
+#   PBWPFVC_JM_MARKERS     comma list; report only these markers and merge their rows
+#                          into the existing tables (default: every marker fitted)
+#   PBWPFVC_JM_SF_BAND     "lo,hi": the baseline SF class (default none)
+#   PBWPFVC_JM_SEV_CENTER  a control read at the ventilated severity (default none)
+#   PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON   grid and window (default daily, 7 days)
+#   PBWPFVC_JM_BASELINE    baseline form (default free)
+# The last five are read through 20_biotrauma_grid.R, which builds the tag from them.
+# Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
+#
+# Usage: uvr run code/23_biotrauma_report.R
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -57,10 +67,10 @@ N_DRAWS <- 1000L
 set.seed(20260913)
 
 manifest <- read_csv(file.path(final_dir, paste0("jm_manifest_", out_tag, ".csv")), show_col_types = FALSE)
-# the gate by block, from the estimates table (so fits made before the block
-# gates existed are gated the same way): longitudinal for the trajectory
+# the gate by block, from the estimates table (so every fit is gated the same
+# way, whatever its manifest carries): longitudinal for the trajectory
 # contrasts and Q1, association for the death correction and Q2, hazard for Q3
-RHAT_GATE <- 1.1
+RHAT_GATE <- 1.1   # the standard convergence threshold
 # why each marker has no fit, from the manifest (skipped for too few patients or
 # deaths, or failed), for the messages below
 why_not <- function(m) {
@@ -138,13 +148,12 @@ beta_draws <- function(jm, lme_fit) {
   stopifnot(all(ref %in% colnames(b)))
   b[, ref, drop = FALSE]
 }
-assoc_rows <- list(); hetero_rows <- list()
+assoc_rows <- list()
 level_rows <- list(); movement_rows <- list(); lme_check_rows <- list()
 # Horizons for the level contrast: one per day out to the run's own endpoint,
 # plus the endpoint itself when the horizon is not a whole number of days. Even
 # spacing, because the contrast is a level plus a rate times time and a reader
-# comparing rows is reading a slope off the page. A 48 or 72-hour run gets the
-# 24/48(/72) rows it always had.
+# comparing rows is reading a slope off the page.
 # t = 0 is included so the trend panel starts at the index rather than at day 1.
 # The contrast there is the level term alone, which is an extrapolation: no
 # marker row exists at day 0 (each trajectory starts the period after that
@@ -224,9 +233,9 @@ for (i in seq_len(nrow(usable))) {
   # ---- does the death correction move the answer? The fit bundle carries the
   #      longitudinal submodel as fitted alone (nlme, before the joint model), so the
   #      size terms can be read with and without the linkage to death and extubation.
-  #      The hazard block fails R-hat at 7 days and the association block sometimes
-  #      does; if the joint model's level and divergence agree with the LME's, the
-  #      unconverged blocks are not what the estimate rests on. Continuous markers only
+  #      If the hazard or association block fails R-hat but the joint model's level
+  #      and divergence agree with the LME's, the unconverged blocks are not what the
+  #      estimate rests on. Continuous markers only
   #      (the any-pressor part is a GLMMadaptive fit on another scale).
   if (!binary && inherits(b$lme, "lme")) {
     fe <- nlme::fixef(b$lme); fe_v <- vcov(b$lme)
@@ -263,23 +272,9 @@ for (i in seq_len(nrow(usable))) {
       per = if (binary) "1 logit unit of P(any pressor)" else if (kind == "value") "1 SD of log marker" else "1 log-unit per day",
       n_patients = u$n_patients, n_deaths = u$n_deaths, rhat_gate = gate_assoc, association_rhat = u$association_rhat)
   }
-
-  # ---- heterogeneity: strain slope at Ers x PFVC percentiles
-  if (u$model == "hetero" && "ers_pfvc_0:l_vtpbw_within" %in% colnames(draws)) {
-    pt <- ld %>% distinct(hospitalization_id, ers_pfvc_0)
-    q <- quantile(pt$ers_pfvc_0, c(0.1, 0.5, 0.9))
-    for (k in seq_along(q)) {
-      v <- draws[, "l_vtpbw_within"] + draws[, "ers_pfvc_0:l_vtpbw_within"] * q[[k]]
-      hetero_rows[[length(hetero_rows) + 1L]] <- tibble(
-        marker = u$marker, ers_pfvc_pct = c(10, 50, 90)[k], ers_pfvc_value = q[[k]],
-        strain_slope = mean(v), lo = quantile(v, 0.025), hi = quantile(v, 0.975),
-        n_patients = u$n_patients, rhat_gate = gate_long)
-    }
-  }
 }
 
 association_hr  <- bind_rows(assoc_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
-heterogeneity   <- bind_rows(hetero_rows)  %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 movement        <- bind_rows(movement_rows) %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 level_contrast  <- bind_rows(level_rows)   %>% mutate(grid = JM_GRID, horizon_days = JM_HORIZON, baseline_form = BASELINE_FORM, site = site_name)
 if (nrow(level_contrast)) {
@@ -299,7 +294,6 @@ if (nrow(lme_check)) {
         row.names = FALSE)
 }
 report_write(association_hr,  "association_hr")
-if (nrow(heterogeneity)) report_write(heterogeneity, "heterogeneity")
 
 message("23_biotrauma_report complete: ", nrow(level_contrast), " contrast rows, ",
         nrow(association_hr), " association terms -> ", final_dir)

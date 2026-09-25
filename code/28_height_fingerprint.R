@@ -39,11 +39,13 @@
 #                    place of log PFVC. Under strain the two agree in sign and size:
 #                    the ratio should act the same whichever input moved it. This is
 #                    the predicted value F:day is read against.
-#   identifying SD   the SD of F left after ns(height, k) and sex. The formula's
-#                    whole range is 0.05 to 0.07; the lever is much smaller (0.008
-#                    on synthetic data, about 5% of the whole ratio's SD, and the
-#                    same at k = 3, 4 and 5, so the limit is the formula, not the
-#                    smooth). The table therefore carries the minimum detectable
+#   identifying SD   the SD of F left after ns(height, k) and sex (and, adjusted,
+#                    age and race). The formula's whole range is 0.05 to 0.07; the
+#                    lever left after the shared curve is a small fraction of the
+#                    whole ratio's SD, and it is reported at k = 3, 4 and 5 so a
+#                    reader can see that the limit is the formula, not the smooth.
+#                    For the whole-ratio rows the column holds the raw SD of log
+#                    PBW/PFVC instead. The table therefore carries the minimum detectable
 #                    effect (80% power, two-sided 5%) beside the predicted value, so
 #                    a null can be read as uninformative rather than as a refutation.
 #                    The comparison is the ventilated arm's read; in a control the
@@ -70,9 +72,8 @@
 # the ventilated run then writes the difference in differences if the control's
 # table is on disk.
 #
-# Death and extubation before day 7 are not modelled: this is the longitudinal
-# submodel alone, as in 26_quick_lme.R. The joint model is the next step if the
-# pooled contrast is not null.
+# Death and extubation before day 7 are not modelled: this is a linear mixed model
+# alone (nlme), so the estimate is conditional on remaining under observation.
 #
 # Inputs: the 7-day daily panel of 21_biotrauma_panel.R (jm_long_7d, jm_surv_7d).
 # Outputs, in final/injury/ (a control cohort's in final/controls/):
@@ -110,8 +111,14 @@ stopifnot(MARKER %in% c("platelets", "creatinine", "bilirubin"))
 y_col  <- MARKER
 y0_col <- c(platelets = "platelet_0", creatinine = "creatinine_0", bilirubin = "bilirubin_0")[[MARKER]]
 HAS_DOSE <- config$cohort == "imv"
-SHARED_DF <- c(3L, 4L, 5L)            # df of the shared height smooth; 3 is primary
-PRIMARY_DF <- 3L
+SHARED_DF <- c(3L, 4L, 5L)            # df of the shared height smooth; 4 and 5 are sensitivity analyses
+PRIMARY_DF <- 3L                      # the primary df of the shared height smooth
+# minimum counts for a fit: the CLIF minimum-count standard
+MIN_PATIENTS <- 100L
+MIN_PATIENTS_PER_SEX <- 50L
+# the minimum detectable effect is MDE_Z standard errors: 1.96 + 0.84, a two-sided
+# 5% test with 80% power
+MDE_Z <- qnorm(0.975) + qnorm(0.80)
 DEMO <- c("ns(age10, 4)", "race_category")
 okabe <- c(Male = "#0072B2", Female = "#D55E00")
 message("=== 28_height_fingerprint: ", MARKER, ", site ", site_name, " (cohort ", config$cohort, ") ===")
@@ -128,34 +135,50 @@ surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parque
 # severity standardisation of the control (20_biotrauma_grid.R): the marker's own
 # anchor, centred at the ventilated cohort's mean
 sev_center <- sev_center_for(MARKER)
+# each exclusion in turn, logged with the number of patients it drops
+drop_step <- function(dat, reason, ...) {
+  kept <- dat %>% filter(...)
+  message(sprintf("  %-58s dropped %5d, %d left", reason, n_distinct(dat$hospitalization_id) - n_distinct(kept$hospitalization_id),
+                  n_distinct(kept$hospitalization_id)))
+  kept
+}
+message(sprintf("  %d patients in the panel", nrow(surv)))
 pt <- surv %>%
-  filter(!is.na(.data[[y0_col]]), !is.na(np_sofa), !is.na(height_cm), !is.na(age10),
-         !is.na(race_category), if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE) %>%
+  drop_step("no baseline marker", !is.na(.data[[y0_col]])) %>%
+  drop_step("no non-respiratory SOFA", !is.na(np_sofa)) %>%
+  drop_step("no height", !is.na(height_cm)) %>%
+  drop_step("no age", !is.na(age10)) %>%
+  drop_step("no race", !is.na(race_category)) %>%
+  drop_step("no VT/PBW (ventilated cohort only)", if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE) %>%
   mutate(fingerprint = height_fingerprint(height_cm, sex_category),
          ldisc = log(pbw / pfvc_gli),
          sex_female = as.numeric(sex_category == "Female"),
          log_y0 = log(.data[[y0_col]]),
          sev_anchor_c = if (is.na(sev_center)) NA_real_ else
            rowSums(as.matrix(pick(all_of(anchor_components(MARKER))))) - sev_center)
-if (!is.na(sev_center)) pt <- pt %>% filter(!is.na(sev_anchor_c))
+if (!is.na(sev_center)) pt <- pt %>% drop_step("no severity anchor", !is.na(sev_anchor_c))
 
-d_all <- long %>%
+d_joined <- long %>%
   filter(period >= 1L, !is.na(.data[[y_col]]), .data[[y_col]] > 0, !is.na(l_sf), !is.na(l_pressor),
          if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE) %>%
   select(hospitalization_id, vent_day, y = all_of(y_col), l_sf, l_pressor, any_of("l_vtpbw_within")) %>%
   inner_join(pt %>% select(hospitalization_id, fingerprint, ldisc, height_cm, sex_category, sex_female,
                            age10, race_category, np_sofa, log_y0, sev_anchor_c, any_of("vtpbw_pt_mean")),
              by = "hospitalization_id") %>%
-  mutate(log_y = log(y), l_log_sf = log(l_sf)) %>%
-  group_by(hospitalization_id) %>% filter(n() >= 2L) %>% ungroup() %>%
+  mutate(log_y = log(y), l_log_sf = log(l_sf))
+message(sprintf("  %-58s dropped %5d, %d left", "no usable post-baseline day (marker, lagged SF, pressor, dose)",
+                n_distinct(pt$hospitalization_id) - n_distinct(d_joined$hospitalization_id),
+                n_distinct(d_joined$hospitalization_id)))
+d_all <- d_joined %>%
+  group_by(hospitalization_id) %>% drop_step("fewer than two post-baseline days", n() >= 2L) %>% ungroup() %>%
   mutate(id = factor(hospitalization_id))
 pt_used <- pt %>% filter(hospitalization_id %in% d_all$hospitalization_id)
 n_patients <- nrow(pt_used)
 n_by_sex <- count(pt_used, sex_category)
 message(sprintf("  %d patients with a baseline and two or more post-baseline days, %d patient-days; %s",
                 n_patients, nrow(d_all), paste(n_by_sex$sex_category, n_by_sex$n, collapse = ", ")))
-if (n_patients < 100 || any(n_by_sex$n < 50))
-  stop("too few patients for the fingerprint (need 100, and 50 of each sex)")
+if (n_patients < MIN_PATIENTS || any(n_by_sex$n < MIN_PATIENTS_PER_SEX))
+  stop("too few patients for the fingerprint (need ", MIN_PATIENTS, ", and ", MIN_PATIENTS_PER_SEX, " of each sex)")
 
 # =============================================================================
 # 2. The model
@@ -224,8 +247,9 @@ for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
   results[[length(results) + 1]] <- rows %>%
     mutate(marker = MARKER, shared_df = k, adjustment = adj_lab,
            lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, p = 2 * pnorm(-abs(estimate / se)),
+           # the fingerprint's residual SD; for the whole-ratio rows, the raw SD of log PBW/PFVC
            identifying_sd = if_else(model == "fingerprint", id_sd, sd(pt_used$ldisc)),
-           mde_80 = 2.80 * se,
+           mde_80 = MDE_Z * se,
            n_patients = n_patients, n_rows = nrow(dk))
   # the ladder, by maximum likelihood so the likelihoods compare
   ml <- list(shared      = fit_lme(rhs_of(NULL, k, "shared", adjusted), dk, "ML"),
