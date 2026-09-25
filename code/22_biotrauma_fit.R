@@ -87,7 +87,6 @@
 #   PBWPFVC_JM_PILOT        1 | 0   timing pilot before each fit
 #   PBWPFVC_JM_HEARTBEAT    60   seconds between progress lines (0 off)
 #   PBWPFVC_JM_FRESH        0 | 1   ignore cached fits and existing tables
-#   PBWPFVC_JM_RESUME       0 | 1   reuse a cached fit whose chain settings differ
 #
 # Usage: uvr run code/22_biotrauma_fit.R
 # =============================================================================
@@ -215,11 +214,11 @@ HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
 stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Every finished fit leaves a small result file (jm_result_*.rds) and a slim
 # bundle (jm_fit_*.rds: the posterior draws the report needs, not the model
-# object). A fit whose result file exists with the same chain settings is
-# reused, so a rerun after a crash costs only the fits that had not finished.
-#   PBWPFVC_JM_FRESH=1   ignore the cache and refit everything
-#   PBWPFVC_JM_RESUME=1  reuse a result file even if its chain settings differ
-USE_RESUME <- identical(Sys.getenv("PBWPFVC_JM_RESUME", "0"), "1")
+# object). A fit whose two files exist is reused as it is, whatever the settings or
+# the panel it was fitted on: to refit a fit, delete its files. The manifest records
+# each fit's own chain settings and model specification, so a reused fit is labelled
+# with what it was fitted under.
+#   PBWPFVC_JM_FRESH=1   ignore the saved fits and refit everything
 USE_FRESH  <- identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")
 # Memory: each fit runs its chains as separate processes, and a 7,000-patient
 # joint model is large, so fits at a time is capped (PBWPFVC_JM_PAR, default 1)
@@ -664,25 +663,13 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
                                               rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
+  # a saved fit is kept: it is refitted only when its files are missing (or with
+  # PBWPFVC_JM_FRESH=1)
   if (!USE_FRESH && !SHAPE_ONLY && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
-    same <- identical(as.integer(r$n_iter), N_ITER) && identical(as.integer(r$n_burnin), N_BURNIN)
-    # a fit made under another entry rule, or before the panel was last rebuilt (e.g.
-    # before ESRD and dialysis entered the RRT definition), is on different data:
-    # refit, whatever the chain settings, and PBWPFVC_JM_RESUME does not override that
-    rule_on_disk <- if (is.null(r$entry_rule)) "two_values" else r$entry_rule
-    panel_file <- file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet"))
-    other_data <- if (!identical(rule_on_disk, entry_rule_for(mk))) paste0("entry rule ", rule_on_disk, ", now ", entry_rule_for(mk)) else
-                  if (!identical(r$hazard_spec, HAZARD_SPEC)) "it was fitted with another survival submodel" else
-                  if (!identical(r$model_spec, model_spec_for(mk))) "it was fitted under another model specification" else
-                  if (nzchar(SF_BAND) && !identical(r$sf_band_rule, SF_BAND_RULE)) "its baseline SF band was lo < SF <= hi" else
-                  if (file.mtime(rf) < file.mtime(panel_file)) "it predates the current panel" else ""
-    if (nzchar(other_data)) {
-      stamp("result on disk is on other data (", other_data, "); refitting")
-    } else if (same || USE_RESUME) {
-      stamp("cached: ", basename(rf), if (same) "" else " (different chain settings; PBWPFVC_JM_RESUME=1)", "; no MCMC")
-      return(r)
-    } else stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
+    stamp("saved fit kept: ", basename(rf), " (", r$n_iter, "/", r$n_burnin,
+          " iterations; delete its jm_result_ and jm_fit_ files to refit)")
+    return(r)
   }
   fit_data <- prepare_fit_data(mk, stamp)
   ld <- fit_data$ld; sd_ <- fit_data$sd_; entry_steps <- fit_data$entry_steps
@@ -984,12 +971,17 @@ manifest <- map_dfr(results, function(r) {
            longitudinal_rhat = if (is.null(r$longitudinal_rhat)) NA_real_ else r$longitudinal_rhat,
            association_rhat  = if (is.null(r$association_rhat))  NA_real_ else r$association_rhat,
            worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
-           acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)
+           acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b,
+           # what this fit was fitted under (a kept fit can predate the current settings)
+           hazard_spec = if (is.null(r$hazard_spec)) NA_character_ else r$hazard_spec,
+           model_spec  = if (is.null(r$model_spec))  NA_character_ else r$model_spec,
+           n_iter      = if (is.null(r$n_iter))      NA_integer_  else as.integer(r$n_iter),
+           n_burnin    = if (is.null(r$n_burnin))    NA_integer_  else as.integer(r$n_burnin))
 }) %>%
-  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC,
-         model_spec = vapply(marker, function(m) model_spec_for(markers[[m]]), character(1)), icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
+  mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM,
+         icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
-         n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
+         n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,
          sev_center = vapply(marker, sev_center_for, numeric(1)),
          sev_anchor = if_else(is.na(sev_center), NA_character_, vapply(marker, anchor_label, character(1))),
