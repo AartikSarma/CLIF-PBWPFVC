@@ -170,12 +170,15 @@ if (config$cohort == "imv") {
   message("Control cohort (", config$cohort, "): escalation within ", FOLLOWUP_END_D, " days of the index for ",
           sum(base$escalation_time_days <= FOLLOWUP_END_D, na.rm = TRUE), " of ", nrow(base), " patients")
 }
-# Rows recorded after the patient's follow-up ends are dropped from every source
-# before its daily reduction.
+# Rows recorded at or after the end of the patient's follow-up are dropped from every
+# source before its daily reduction. The cut is strict: the waterfall and the
+# vasopressor dose-in-force series have a row every clock hour, so a patient followed
+# to FOLLOWUP_END_D would otherwise keep one record at exactly 168 h and a "day 7"
+# made of that single instant.
 followup_end <- base %>% transmute(hospitalization_id, end_t = as.numeric(t0) + followup_end_days * 86400)
 before_followup_end <- function(df, dttm_col) df %>%
   inner_join(followup_end, by = "hospitalization_id") %>%
-  filter(as.numeric(.data[[dttm_col]]) <= end_t) %>%
+  filter(as.numeric(.data[[dttm_col]]) < end_t) %>%
   select(-end_t)
 
 # =============================================================================
