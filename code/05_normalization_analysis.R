@@ -4,8 +4,9 @@
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
 # Pipeline script (run after 03). Reads the script 03 cross-sectional dataset and
-# writes per-site tables to final/cross_sectional/ with a <site> suffix;
-# pooled_estimates.R pools them across sites.
+# writes per-site tables to final/cross_sectional/ with a <site> suffix; they are
+# pooled across sites by the coordinator's pooling script (not distributed with
+# this code).
 #
 # For a multiplicative normalizer the discordance between the PBW- and the
 # PFVC-normalized metric is exactly the size ratio PBW/PFVC, whatever the metric:
@@ -22,14 +23,12 @@
 #     unadjusted and adjusted for age, sex and race (AIC, in-sample C, OR per log unit
 #     and per SD).
 #
-# The rest of what this script once wrote (age-interaction ladders, encompassing
-# tests, discrimination, value over driving pressure, prediction disagreement and
-# calibration) was cut on 2026-09-24: no claim of the manuscript rests on it, and
-# supplement/xsec_mortality_prediction.R and xsec_dp_vtpfvc_additive.R answer the
-# prediction and driving-pressure questions (docs/output_manifest.md).
+# Mortality prediction and the value of the normalizations over driving pressure
+# are answered in supplement/xsec_mortality_prediction.R and
+# supplement/xsec_dp_vtpfvc_additive.R.
 #
 # QC: rows with dp <= 0 (plateau < PEEP; nonphysiologic measurement error) are
-# dropped and counted.
+# dropped, as are rows missing any model variable; each filter reports its N.
 #
 # Input  : analysis_cross_sectional.parquet (script 03)
 # Outputs: final/cross_sectional/norm_{discordance_summary, discordance_reclassification,
@@ -66,6 +65,11 @@ n_dp_bad <- cross_sectional %>%
   filter(!is.na(dp), dp <= 0) %>% nrow()
 message("QC: ", n_dp_bad, " rows with dp <= 0 (plateau < PEEP) dropped.")
 
+# Age bands for the reclassification table (left-closed: <50, 50-64, >=65).
+# Reason for these cut points: author to supply.
+AGE_BAND_BREAKS <- c(0, 50, 65, Inf)
+AGE_BAND_LABELS <- c("<50", "50-64", ">=65")
+
 base <- cross_sectional %>%
   filter(!is.na(dp), dp > 0, !is.na(pfvc), pfvc > 0, !is.na(pbw), pbw > 0,
          !is.na(vtpbw), !is.na(bmi), !is.na(sofa_total), !is.na(sf_ratio),
@@ -77,14 +81,17 @@ base <- cross_sectional %>%
     sf10    = sf_ratio / 10,
     pbwpfvc = pbw / pfvc                       # the size-estimate discordance factor
   )
+message("Base frame (positive DP, PFVC and PBW; VT/PBW, BMI, SOFA, SF and in-hospital ",
+        "death recorded): ", nrow(cross_sectional), " -> ", nrow(base), " patients")
 
 ers_data <- base %>% filter(!is.na(ers), ers > 0) %>%
   mutate(ers_pbw = ers * pbw, ers_pfvc = ers * pfvc)
 mp_data  <- base %>% filter(!is.na(mechanical_power), mechanical_power > 0,
                             !is.na(mp_pbw), !is.na(mp_pfvc))
 
-message("Frames: base ", nrow(base), " | Ers ", nrow(ers_data),
-        " | MP ", nrow(mp_data))
+message("Elastance frame (Ers recorded and > 0): ", nrow(base), " -> ", nrow(ers_data), " patients")
+message("Mechanical-power frame (MP > 0, MP/PBW and MP/PFVC recorded): ",
+        nrow(base), " -> ", nrow(mp_data), " patients")
 
 # =============================================================================
 # PART 1 -- Physiologic discordance (the volume-estimate component = pbwpfvc)
@@ -109,8 +116,8 @@ reclassify <- function(data, pbw_var, pfvc_var, label) {
   t_pbw  <- dplyr::ntile(d2[[pbw_var]], 3)
   t_pfvc <- dplyr::ntile(d2[[pfvc_var]], 3)
   d2 <- d2 %>% mutate(reclassified = t_pbw != t_pfvc,
-                      age_grp = cut(age_at_admission, c(0, 50, 65, 200),
-                                    labels = c("<50", "50-65", ">65")))
+                      age_grp = cut(age_at_admission, AGE_BAND_BREAKS,
+                                    labels = AGE_BAND_LABELS, right = FALSE))
   overall <- tibble(metric = label, group_type = "Overall", group = "All",
                     n = nrow(d2), pct_reclassified = mean(d2$reclassified) * 100)
   by_grp <- bind_rows(
@@ -142,7 +149,9 @@ recl_tbl %>% filter(group_type == "Overall") %>%
 # =============================================================================
 # PART 2 -- Prognostic utility of the normalization (in-hospital mortality)
 # =============================================================================
-base_cov <- "vtpbw + sofa_total + sf10 + bmi"   # vtpbw adjusted (dose); see memory
+# VT/PBW is the delivered dose, so every mechanics-mortality model adjusts for it;
+# BMI because Ers and MP are driving-pressure derived (see 04_analysis.R, DP_DERIVED).
+base_cov <- "vtpbw + sofa_total + sf10 + bmi"
 demo_cov <- "age10 + sex_category + race_category"
 
 # 2x2 design (form x size) so the gain from "separate" can be split into model FORM
