@@ -383,7 +383,7 @@ pt_strain <- pf %>%
 # in the longitudinal table, for descriptive use. Each joint-model fit sets its own
 # entry day from the rows it keeps (22_biotrauma_fit.R).
 first_trajectory_day <- pf %>%
-  filter(period >= 1L, period <= N_PERIODS, vent_day <= followup_end_days) %>%   # followup_end_days from base
+  filter(period >= 1L, period <= N_PERIODS, vent_day < followup_end_days) %>%   # a day starting at the end has no follow-up
   group_by(hospitalization_id) %>% summarise(entry_day = min(vent_day), .groups = "drop")
 surv <- base %>%
   select(-followup_end_days) %>%
@@ -502,13 +502,13 @@ long <- pf %>%
   inner_join(surv %>% select(hospitalization_id, event_time, rrt_period, rrt_before_index,
                              vtpfvc_pt_mean, vtpbw_idx, ends_with("_0_day")),
              by = "hospitalization_id")
-# 10_panel_common.R has already dropped every measurement after the event time, so a
-# row whose day starts after it can only be empty; the filter keeps the joint
-# model's requirement (no longitudinal time after the event time) explicit.
+# 10_panel_common.R has already dropped every measurement at or after the event time,
+# so a row whose day starts at or after it can only be empty; the filter keeps the
+# joint model's requirement (no longitudinal time at or after the event time) explicit.
 message("Longitudinal rows within the horizon: ", nrow(long), " (", n_distinct(long$hospitalization_id),
-        " patients); ", sum(long$vent_day > long$event_time), " rows starting after the patient's event time dropped")
+        " patients); ", sum(long$vent_day >= long$event_time), " rows starting at or after the patient's event time dropped")
 long <- long %>%
-  filter(vent_day <= event_time) %>%
+  filter(vent_day < event_time) %>%
   mutate(
     # each marker's trajectory starts the period after its baseline observation
     creatinine    = if_else(!is.na(creatinine_0_day) & period <= creatinine_0_day, NA_real_, creatinine),
