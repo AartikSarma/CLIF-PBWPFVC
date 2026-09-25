@@ -194,9 +194,12 @@ fit_arm <- function(arm, cohort, markers, arm_env = character(0), with_creatinin
     FAILED <<- c(FAILED, paste0(arm, "_skipped"))
     return(invisible())
   }
-  marker_env <- c(arm_env, PBWPFVC_JM_MARKERS = markers)
-  run_step(paste0(arm, "_fit"),    "code/22_biotrauma_fit.R",    cohort, marker_env)
-  run_step(paste0(arm, "_report"), "code/23_biotrauma_report.R", cohort, marker_env)
+  # an empty marker list means creatinine only (an unset one would make 22 fit every marker)
+  if (nzchar(markers)) {
+    marker_env <- c(arm_env, PBWPFVC_JM_MARKERS = markers)
+    run_step(paste0(arm, "_fit"),    "code/22_biotrauma_fit.R",    cohort, marker_env)
+    run_step(paste0(arm, "_report"), "code/23_biotrauma_report.R", cohort, marker_env)
+  }
   if (with_creatinine) {
     creatinine_env <- c(arm_env, PBWPFVC_JM_MARKERS = "creatinine", PBWPFVC_JM_RRT_EVENT = "1")
     run_step(paste0(arm, "_creatinine_fit"),    "code/22_biotrauma_fit.R",    cohort, creatinine_env)
@@ -265,19 +268,28 @@ anchor_markers <- strsplit(ANCHOR_MARKERS, ",")[[1]]
 if (DRY) {
   message("[dry] centres: ventilated mean anchor per marker (", ANCHOR_MARKERS, ") from ", CENTER_FILE)
   SEV_CENTER <- "creatinine=M,platelets=M,..."
+  centred_markers <- anchor_markers
 } else {
-  # the file is written by anchors_ventilated; one "marker=mean" pair per control marker
+  # the file is written by anchors_ventilated; one "marker=mean" pair per control marker.
+  # A marker without a centre (too few ICU-day-0 patients with its day-0 value) is left
+  # out of the control arms and listed as a failed step; the other markers still run.
   anchor_means <- if (file.exists(CENTER_FILE)) read.csv(CENTER_FILE) else data.frame(marker = character(0), anchor_mean = numeric(0))
   anchor_means <- anchor_means[anchor_means$marker %in% anchor_markers, ]
+  centred_markers <- anchor_means$marker
   SEV_CENTER <- if (nrow(anchor_means)) paste0(anchor_means$marker, "=", sprintf("%.4f", anchor_means$anchor_mean), collapse = ",") else ""
-  if (!setequal(anchor_means$marker, anchor_markers)) {
-    message("severity centres missing for some of ", ANCHOR_MARKERS, " (found '", SEV_CENTER, "' in ",
-            CENTER_FILE, "); the control arm is skipped")
-    FAILED <- c(FAILED, "centres"); SEV_CENTER <- ""
-  } else {
-    message("[", timestamp(), "] severity centres (ventilated mean anchor): ", SEV_CENTER)
+  uncentred <- setdiff(anchor_markers, centred_markers)
+  if (length(uncentred)) {
+    message("severity centres missing for ", paste(uncentred, collapse = ", "), " in ", CENTER_FILE,
+            "; those markers are left out of the control arms")
+    FAILED <- c(FAILED, paste0("centre_", uncentred))
   }
+  if (nzchar(SEV_CENTER)) message("[", timestamp(), "] severity centres (ICU-day-0 ventilated mean anchor): ", SEV_CENTER)
 }
+# the markers each control arm can be read at: those with a centre
+centred_list <- function(markers) paste(intersect(strsplit(markers, ",")[[1]], centred_markers), collapse = ",")
+CONTROL_MARKERS_CENTRED   <- centred_list(CONTROL_MARKERS)
+HYPOXEMIC_MARKERS_CENTRED <- centred_list(HYPOXEMIC_CONTROL_MARKERS)
+CONTROL_CREATININE        <- CREATININE && "creatinine" %in% centred_markers
 
 # ---- 5 fits, arm by arm
 fit_arm("ventilated", "imv", MARKERS)
@@ -287,11 +299,14 @@ fit_arm("ventilated_day0", "imv", CONTROL_MARKERS, c(PBWPFVC_JM_ICU_DAY0 = "1"))
 for (band in SF_BANDS)
   fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
-  fit_arm("nosupport", "nosupport", CONTROL_MARKERS, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER))
+  if (nzchar(CONTROL_MARKERS_CENTRED) || CONTROL_CREATININE)
+    fit_arm("nosupport", "nosupport", CONTROL_MARKERS_CENTRED, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER),
+            with_creatinine = CONTROL_CREATININE)
   # the hypoxemic control: the same control, index SF < 315, with the same markers
-  if (nzchar(HYPOXEMIC_CONTROL_MARKERS))
-    fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_CONTROL_MARKERS,
-            c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"))
+  if (nzchar(HYPOXEMIC_CONTROL_MARKERS) && (nzchar(HYPOXEMIC_MARKERS_CENTRED) || CONTROL_CREATININE))
+    fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_MARKERS_CENTRED,
+            c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"),
+            with_creatinine = CONTROL_CREATININE)
 }
 
 # the sensitivity without the previous-day SF and pressor terms, full ventilated cohort

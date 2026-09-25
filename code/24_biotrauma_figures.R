@@ -437,8 +437,8 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
       geom_point(size = 2.2, position = position_dodge(width = 0.5)) +
       facet_wrap(~ marker_lab) +
       scale_colour_manual(values = okabe[c(1, 2)], name = NULL) +
-      labs(title = NULL, subtitle = paste("60-day death before escalation (the control censored when it escalates),",
-                                          "at the ventilated severity (Cox); age only = adjusted for age alone"),
+      labs(title = NULL, subtitle = paste0("60-day death, the control censored at escalation (Cox), at the ventilated severity;\n",
+                                           "\"age only\" is adjusted for age alone"),
            x = NULL, y = "log hazard ratio toward harm\nper SD lower log PFVC")
   }
   # the sensitivity without the lags: the ventilated rate (full cohort) with and without
