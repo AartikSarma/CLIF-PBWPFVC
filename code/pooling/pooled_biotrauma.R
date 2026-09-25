@@ -26,7 +26,14 @@
 #           Two families are pooled without an rhat gate: the association hazard
 #           ratios, because the hazard blocks of the 7-day fits do not converge (read
 #           as descriptive), and the level contrasts (each site's table carries its
-#           rhat columns, which are not applied here).
+#           rhat columns, which are not applied to the pool; a site whose exposure
+#           terms did not converge is drawn as a hollow point in the forest).
+#   arms    each joint-model table's arm tag (day0_, sevstd_, sf<lo>to<hi>_, nolag_,
+#           rrtcause_, offset_; parse_jm_name) is a grouping key, so a restricted or
+#           sensitivity fit pools only with the same arm at other sites; the figures
+#           draw the full ventilated cohort (no tag)
+#   units   rows per SD of log PBW/PFVC (ldisc_sd, the retired disc form) are left
+#           out: no site exports that SD, so they cannot be put on one unit
 #
 # What is pooled (each row is estimate + standard error per site):
 #   jm_level_contrast_*    the joint model's marker difference per SD of log PFVC
@@ -108,18 +115,23 @@ toward_injury <- function(d) {
 }
 # One forest in the cross-sectional style: sites as coloured points with capped
 # intervals, the pooled estimate as a black diamond at the foot, one row per marker
-# and one column per `column`, each column on its own x scale.
+# and one column per `column`, each column on its own x scale. A site row whose
+# `converged` column is FALSE (its chain did not converge for the exposure terms; the
+# pool does not gate on it) is drawn as a hollow point.
 draw_forest <- function(d, title, subtitle, x_label) {
+  if (!"converged" %in% names(d)) d$converged <- NA
   d <- d %>% mutate(site = factor(site, levels = c(POOLED_LABEL, rev(site_levels))),
-                    kind = if_else(site == POOLED_LABEL, "Pooled", "Site"))
+                    kind = case_when(site == POOLED_LABEL ~ "Pooled",
+                                     !is.na(converged) & !converged ~ "Site, not converged",
+                                     TRUE ~ "Site"))
   ggplot(d, aes(x = estimate, y = site, colour = site)) +
     geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
     geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.25, orientation = "y") +
     geom_point(aes(size = kind, shape = kind)) +
     facet_grid(marker_label ~ column, scales = "free_x", drop = FALSE) +
     scale_colour_manual(values = forest_palette, guide = "none") +
-    scale_shape_manual(values = c(Site = 16, Pooled = 18), guide = "none") +
-    scale_size_manual(values = c(Site = 2.3, Pooled = 3.4), guide = "none") +
+    scale_shape_manual(values = c(Site = 16, `Site, not converged` = 1, Pooled = 18), guide = "none") +
+    scale_size_manual(values = c(Site = 2.3, `Site, not converged` = 2.3, Pooled = 3.4), guide = "none") +
     labs(title = title, subtitle = subtitle, x = x_label, y = "Cohort") +
     theme_minimal(base_size = 11) +
     theme(strip.text.x = element_text(face = "bold"),
@@ -129,7 +141,13 @@ draw_forest <- function(d, title, subtitle, x_label) {
 }
 forest_height <- function(d) 2 + 0.28 * n_distinct(d$marker_label) * (n_distinct(d$site) + 1.5)
 
-# read one file family from every site, tagging the site; tolerant of absent files
+# read one file family from every site, tagging the site; tolerant of absent files.
+# Every table a site returns is named {family}_{tags}{site name}.csv, and one family
+# can hold several tables per site (one per panel, form or restriction tag), so a
+# table is keyed by its name without the site name. The same key twice in one site
+# folder (a flat return beside the block-sorted one, say) is a stale or duplicated
+# copy, and so is a table carrying another site name: reading both would count the
+# site twice and reading either would be a guess, so the script stops and names them.
 read_family <- function(pattern, folders = c("", "injury")) {
   map_dfr(sites, function(s) {
     # a returned final/ is sorted by block; most tables pooled here are in injury/, the
@@ -138,6 +156,16 @@ read_family <- function(pattern, folders = c("", "injury")) {
     # folder itself is listed too, for a flat (older) return.
     fs <- list.files(file.path(root, s, folders), pattern = pattern, full.names = TRUE)
     if (!length(fs)) return(NULL)
+    site_suffix <- paste0("_", alias_tbl$table$site[alias_tbl$table$folder == s], ".csv")
+    other_site <- fs[!endsWith(basename(fs), site_suffix)]
+    if (length(other_site))
+      stop("site folder ", s, " holds table(s) not named for its site (", sub("^_", "", site_suffix),
+           "); remove the stale copy:\n  ", paste(other_site, collapse = "\n  "))
+    table_key <- substr(basename(fs), 1, nchar(basename(fs)) - nchar(site_suffix))
+    repeated <- table_key[duplicated(table_key)]
+    if (length(repeated))
+      stop("site folder ", s, " holds more than one copy of a table; expected one. Remove the stale copy:\n  ",
+           paste(fs[table_key %in% repeated], collapse = "\n  "))
     map_dfr(fs, function(f) read_csv(f, show_col_types = FALSE, guess_max = 1e5) %>%
               mutate(site = anon(s), file = basename(f), .before = 1))
   })
@@ -174,9 +202,22 @@ pool_one <- function(d) {
          sites = paste(d$site, collapse = ";"), site_estimates = paste(signif(d$estimate, 4), collapse = ";"))
 }
 pool_by <- function(d, ...) d %>% group_by(...) %>% group_modify(~ pool_one(.x)) %>% ungroup()
-# the modifier form and the panel horizon from a joint-model file name
-jm_form  <- function(file, family, default) str_match(file, paste0("^", family, "_(?:(\\w+?)_)?(\\d+[hd])_"))[, 2] %>% replace_na(default)
-jm_panel <- function(file, family) str_match(file, paste0("^", family, "_(?:(\\w+?)_)?(\\d+[hd])_"))[, 3]
+# A joint-model table is named jm_{table}_{arm tag}{form_}{panel}_{site}.csv (22_biotrauma_fit.R),
+# where the arm tag is, in this order: rrtcause_ (creatinine's dialysis-as-third-cause
+# fit), day0_ (the ICU-day-0 arm of the ventilated-vs-control comparison), sevstd_
+# (severity standardised), sf<lo>to<hi>_ (an index SF band), nolag_ (no previous-day SF
+# and pressor terms), offset_ (baseline offset). Each arm tag is its own arm: arm_tag is a
+# grouping key in every pool, so a restricted or sensitivity fit never pools with the
+# full ventilated cohort's (arm_tag ""), which is what the figures draw.
+JM_ARM_TAGS <- "(rrtcause_)?(day0_)?(sevstd_)?(sf[0-9.]+to[0-9.]+_)?(nolag_)?(offset_)?"
+parse_jm_name <- function(file, family) {
+  parts <- str_match(file, paste0("^", family, "_", JM_ARM_TAGS, "(?:(\\w+?)_)?(\\d+[hd])_"))
+  tibble(arm_tag = apply(parts[, 2:7, drop = FALSE], 1, function(tags) paste(na.omit(tags), collapse = "")),
+         form = parts[, 8], panel_h = parts[, 9])
+}
+jm_form  <- function(file, family, default) parse_jm_name(file, family)$form %>% replace_na(default)
+jm_panel <- function(file, family) parse_jm_name(file, family)$panel_h
+jm_arm   <- function(file, family) parse_jm_name(file, family)$arm_tag
 CHANNELS <- c("ch_height", "ch_age", "ch_sex", "ch_race")
 # an interaction is written in whichever order the model formula produced it
 # (log_pfvc_sd:vent_day at one site, vent_day:log_pfvc_sd at another): sort the
@@ -214,17 +255,32 @@ to_log_units <- function(d, per_sd, other_unit) {
 }
 
 pooled <- list()
+PFVC_UNIT <- paste0("per ", PER_LOG_PFVC, " log PFVC")   # the harmonised unit the figures draw
+
+# The retired disc form's exposure, ldisc_sd, is log PBW/PFVC standardised within each
+# site's panel, and no table carries its SD, so its estimates are in a different unit
+# at every site: they are left out of every pool, and the script says how many.
+drop_ldisc_sd <- function(d, column, family_label) {
+  is_ldisc <- str_detect(d[[column]], "ldisc_sd")
+  if (any(is_ldisc)) message(family_label, ": ", sum(is_ldisc), " row(s) per SD of log PBW/PFVC (ldisc_sd) left out: ",
+                             "the per-site SD is not exported, so the unit differs by site")
+  d[!is_ldisc, ]
+}
 
 # --- 1. joint-model level contrasts (the PFVC-level question), pooled without an
-#        rhat gate (see the header)
+#        rhat gate (see the header). A site whose exposure terms did not converge
+#        (rhat_gate_exposure FALSE in its own table) is drawn hollow in the forest.
 lc <- read_family("^jm_level_contrast_.*\\.csv$")
 if (nrow(lc)) {
   lc <- lc %>% mutate(se = (hi - lo) / 3.92,
                       grid = if ("grid" %in% names(lc)) grid else NA_character_,
+                      converged = if ("rhat_gate_exposure" %in% names(lc)) as.logical(rhat_gate_exposure) else NA,
+                      arm_tag = jm_arm(file, "jm_level_contrast"),
                       form = jm_form(file, "jm_level_contrast", "pfvc"), panel_h = jm_panel(file, "jm_level_contrast")) %>%
+    drop_ldisc_sd("exposure", "level contrasts") %>%
     to_log_units(per_sd = .$exposure == "log_pfvc_sd",
                  other_unit = if_else(.$exposure == "vtpfvc_c", "per point of VT/PFVC", "per site unit of the exposure"))
-  pooled$level_contrast <- pool_by(lc, marker, model, adjustment, exposure, unit, panel_h, horizon_h, grid, form) %>%
+  pooled$level_contrast <- pool_by(lc, marker, model, adjustment, exposure, unit, panel_h, horizon_h, grid, arm_tag, form) %>%
     mutate(scale = "log marker; log-odds for any_pressor")
 }
 
@@ -233,8 +289,9 @@ ah <- read_family("^jm_association_hr_.*\\.csv$")
 if (nrow(ah)) {
   ah <- ah %>% mutate(estimate = log_hr, se = (log_hr_hi - log_hr_lo) / 3.92,
                       grid = if ("grid" %in% names(ah)) grid else NA_character_,
+                      arm_tag = jm_arm(file, "jm_association_hr"),
                       form = jm_form(file, "jm_association_hr", "disc"), panel_h = jm_panel(file, "jm_association_hr"))
-  pooled$association <- pool_by(ah, marker, model, adjustment, kind, cause, panel_h, grid, form) %>%
+  pooled$association <- pool_by(ah, marker, model, adjustment, kind, cause, panel_h, grid, arm_tag, form) %>%
     mutate(hr = exp(pooled), hr_lo = exp(lo), hr_hi = exp(hi))
 }
 
@@ -242,25 +299,29 @@ if (nrow(ah)) {
 es <- read_family("^jm_estimates_.*\\.csv$")
 if (nrow(es)) {
   # written with the interaction components in either order; canonical_term sorts them
+  # (ldisc_sd and its slope are not keys: see drop_ldisc_sd)
   key <- canonical_term(c("l_vtpbw_within", "l_vtpbw_within:ldisc_c", "l_vtpbw_within:age10_c",
-           "log_pfvc_sd", "log_pfvc_sd:vent_day", "ldisc_sd", "ldisc_sd:vent_day",
+           "log_pfvc_sd", "log_pfvc_sd:vent_day",
            "vtpfvc_c", "vtpfvc_c:vent_day",
-           "ers_pfvc_0:l_vtpbw_within", "vtpbw_pt_mean",
+           "ers_pfvc_0:l_vtpbw_within", "vtpbw_idx",
            CHANNELS, paste0(CHANNELS, ":vent_day")))
-  es <- es %>% mutate(term = canonical_term(term)) %>% filter(block == "longitudinal", term %in% key) %>%
+  es <- es %>% mutate(term = canonical_term(term)) %>% filter(block == "longitudinal") %>%
+    drop_ldisc_sd("term", "longitudinal terms") %>%
+    filter(term %in% key) %>%
     mutate(se = sd, grid = if ("grid" %in% names(es)) grid else NA_character_,
+           arm_tag = jm_arm(file, "jm_estimates"),
            form = jm_form(file, "jm_estimates", "disc"), panel_h = jm_panel(file, "jm_estimates"))
   # a site enters only if its own chain converged for that term; the dropped rows
   # are named, not counted, so a reader can see which marker lost which site
   dropped <- es %>% filter(!is.na(rhat), rhat > RHAT_MAX) %>%
-    transmute(what = paste0(site, " ", marker, " ", adjustment, " ", term, " (", form, " ", panel_h,
+    transmute(what = paste0(site, " ", marker, " ", adjustment, " ", term, " (", arm_tag, form, " ", panel_h,
                             ", rhat ", round(rhat, 2), ")"))
   if (nrow(dropped)) message("longitudinal terms dropped for rhat > ", RHAT_MAX, ":\n  ",
                              paste(dropped$what, collapse = "\n  "))
   es <- es %>% filter(is.na(rhat) | rhat <= RHAT_MAX) %>%
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
-  pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, form)
+  pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, arm_tag, form)
 }
 
 # --- 4. the figure-4 causal support: the difference-in-differences against the
@@ -553,13 +614,15 @@ fig4_pooled <- function(d, column_key, keep = TRUE) {
     transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = POOLED_LABEL,
               estimate = pooled, lo, hi)
 }
+# the divergence column is the full ventilated cohort's fit (arm tag "", pfvc form)
+is_primary_divergence <- function(d) d$term == DIVERGENCE[["pfvc"]] & d$model == "main" & d$arm_tag == "" & d$form == "pfvc"
 fd4 <- bind_rows(
-  fig4_rows(es, "divergence", es$term == DIVERGENCE[["pfvc"]] & es$model == "main"),
-  fig4_pooled(pooled$longitudinal_terms, "divergence",
-              pooled$longitudinal_terms$term == DIVERGENCE[["pfvc"]] & pooled$longitudinal_terms$model == "main"),
+  if (exists("es") && nrow(es)) fig4_rows(es, "divergence", is_primary_divergence(es)),
+  if (!is.null(pooled$longitudinal_terms))
+    fig4_pooled(pooled$longitudinal_terms, "divergence", is_primary_divergence(pooled$longitudinal_terms)),
   fig4_rows(did, "did"), fig4_pooled(pooled$control_did, "did"))
 if (!is.null(fd4) && nrow(fd4)) {
-  fd4 <- fd4 %>% filter(startsWith(unit, "per ")) %>%
+  fd4 <- fd4 %>% filter(unit == PFVC_UNIT) %>%
     mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
     toward_injury()
   for (adj in c("adjusted", "unadjusted")) {
@@ -577,13 +640,16 @@ if (!is.null(fd4) && nrow(fd4)) {
 
 # --- forests: the PFVC-level contrast per marker and horizon, per site and pooled,
 #     one file per adjustment
-if (nrow(lc) && any(lc$form == "pfvc" & lc$panel_h == paste0(lc$horizon_h, "h"))) {
-  # the primary read: the pfvc form's contrast at each contrast horizon, from the panel of the same length
-  fd <- lc %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
-    transmute(marker, adjustment, horizon_h, unit, site, estimate, lo, hi) %>%
-    bind_rows(pooled$level_contrast %>% filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", panel_h == paste0(horizon_h, "h")) %>%
+if (nrow(lc) && any(lc$form == "pfvc" & lc$arm_tag == "" & lc$panel_h == paste0(lc$horizon_h, "h"))) {
+  # the primary read: the full ventilated cohort's pfvc-form contrast at each contrast
+  # horizon, from the panel of the same length
+  primary_contrast <- function(d) d %>%
+    filter(exposure == "log_pfvc_sd", model == "main", form == "pfvc", arm_tag == "", panel_h == paste0(horizon_h, "h"))
+  fd <- lc %>% primary_contrast() %>%
+    transmute(marker, adjustment, horizon_h, unit, site, estimate, lo, hi, converged) %>%
+    bind_rows(pooled$level_contrast %>% primary_contrast() %>%
                 transmute(marker, adjustment, horizon_h, unit, site = POOLED_LABEL, estimate = pooled, lo, hi)) %>%
-    filter(startsWith(unit, "per ")) %>%
+    filter(unit == PFVC_UNIT) %>%
     mutate(column = factor(paste0("Marker difference at ", horizon_h, " h"),
                            levels = paste0("Marker difference at ", sort(unique(horizon_h)), " h"))) %>%
     toward_injury()
@@ -594,7 +660,7 @@ if (nrow(lc) && any(lc$form == "pfvc" & lc$panel_h == paste0(lc$horizon_h, "h"))
       title = paste0("Marker difference by predicted lung size at the horizon, joint model (", adj, ")"),
       subtitle = paste0("log marker per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI, death before the horizon modelled; ",
                         "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0); ",
-                        "any-vasopressor rows are log-odds"),
+                        "any-vasopressor rows are log-odds; hollow point = the site's exposure terms did not converge (pooled regardless)"),
       x_label = "difference toward injury per 10% smaller predicted lung (95% CI)")
     ggsave(file.path(out_dir, paste0("pooled_biotrauma_level_contrast", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
            p, width = 4 + 3.5 * n_distinct(d$horizon_h), height = forest_height(d), limitsize = FALSE)

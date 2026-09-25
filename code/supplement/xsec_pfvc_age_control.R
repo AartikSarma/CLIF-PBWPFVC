@@ -47,13 +47,26 @@
 # ventilator) and informative censoring at escalation. Two further reads address
 # escalation: the control's deaths counted up to intubation rather than up to any
 # support, and the PFVC association with escalation itself, which says whether
-# censoring at escalation selects on PFVC. Script 03 removes
-# control patients escalated within 24 hours of the index; those escalated later
-# stay in, and their deaths can follow ventilation. The severity form reads the
+# censoring at escalation selects on PFVC. Every control patient stays in the
+# cohort whenever they escalate; a control's follow-up for the comparison ends at
+# escalation, which is why "before escalation" is the comparison outcome (the rows
+# figure 4's checks read), and deaths after escalation, which can follow
+# ventilation, are counted only in the "all" outcomes. The severity form reads the
 # control at the ventilated cohort's severity, as figure 4 does, because the
 # control is much less sick and a smaller lung may show only under stress.
 #
-# Log PFVC is per SD of the ventilated cohort, so both cohorts share one unit. A
+# Both arms are defined at ICU admission (ICU day 0). The ventilated arm is the
+# ventilated cohort's patients on invasive ventilation at ICU admission (script
+# 03's icu_day0), in every table here; the control is the no-support cohort, from
+# which script 03 has already removed every patient of that ventilated arm, so no
+# patient is in both. Every clock starts at the index (script 03's index_dttm: the
+# first qualifying ventilator row, or the control's ICU-admission row).
+#
+# Death times follow script 03: an expired patient with no death time is dated at
+# discharge (03 writes that time into death_dttm), and a death stamped between
+# hospital admission and the index counts on the index day, at SAME_DAY_DEATH_D days.
+#
+# Log PFVC is per SD of the ventilated arm, so both cohorts share one unit. A
 # model that warns (non-convergence, separation) stops the script: no model is
 # silently replaced by a simpler one.
 #
@@ -65,9 +78,10 @@
 # Outputs: final/supplement/
 #   pfvc_age_control_estimates_{site}.csv  per cohort and adjustment: PFVC OR per SD,
 #                                          likelihood-ratio p, share of the age
-#                                          gradient absorbed, counts, and the patients
-#                                          excluded for missing data or a death
-#                                          before the index
+#                                          gradient absorbed, counts, the patients
+#                                          excluded for missing data, and the deaths
+#                                          stamped before the index (counted on the
+#                                          index day)
 #   pfvc_age_control_curves_{site}.csv     the age curves with and without log PFVC
 #   pfvc_age_control_contrast_{site}.csv   PFVC ratio per cohort and their difference,
 #                                          by outcome, severity form and adjustment,
@@ -128,22 +142,27 @@ AGE_CURVE_GRID <- seq(20, 90, by = 10)
 # hypoxemia models: the CLIF minimum-count standard
 MIN_EVENTS <- 10L
 SF_HYPOXEMIA_THRESHOLD <- 315   # script 03's index gate for the ventilated cohort
+SAME_DAY_DEATH_D <- 0.5         # script 03's day for a death stamped between admission and the index
 COHORTS <- c("Ventilated", "No support")
 OKABE_ITO <- c(without_pfvc = "#E69F00", with_pfvc = "#0072B2")
 
 # =============================================================================
 # Data: both cross-sectional cohorts, on shared columns
 # =============================================================================
-cohort_columns <- c("hospitalization_id", "recorded_dttm", "age_at_admission", "sex_category",
+cohort_columns <- c("hospitalization_id", "index_dttm", "age_at_admission", "sex_category",
                     "race_category", "pfvc", "sf_ratio", "sofa_total",
                     "sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal",
-                    "deceased", "death_dttm", "discharge_dttm", "height_cm")
+                    "deceased", "admission_dttm", "death_dttm", "discharge_dttm", "height_cm")
 control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_cross_sectional.parquet")
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
-ventilated <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
-  select(all_of(cohort_columns), vtpbw) %>%
+# the ventilated arm: patients on invasive ventilation at ICU admission (icu_day0)
+ventilated_cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
+  select(all_of(cohort_columns), vtpbw, icu_day0)
+ventilated <- ventilated_cohort %>% filter(icu_day0) %>% select(-icu_day0) %>%
   mutate(cohort = "Ventilated", escalation_dttm = as.POSIXct(NA))
+message("Ventilated arm: ", nrow(ventilated), " of ", nrow(ventilated_cohort),
+        " ventilated-cohort patients on invasive ventilation at ICU admission (icu_day0)")
 no_support <- read_parquet(control_file) %>%
   select(all_of(cohort_columns), escalation_dttm) %>%
   mutate(cohort = "No support", vtpbw = NA_real_)
@@ -156,7 +175,7 @@ no_support <- read_parquet(control_file) %>%
 control_imv <- read_parquet(file.path(config$output_dir, "controls", "nosupport", "resp_support_waterfall_clean.parquet"),
                             col_select = c("hospitalization_id", "recorded_dttm", "device_category", "tidal_volume_set")) %>%
   filter(tolower(device_category) == "imv" | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
-  inner_join(no_support %>% select(hospitalization_id, index_dttm = recorded_dttm), by = "hospitalization_id") %>%
+  inner_join(no_support %>% select(hospitalization_id, index_dttm), by = "hospitalization_id") %>%
   filter(recorded_dttm >= index_dttm) %>%
   group_by(hospitalization_id) %>% summarise(imv_dttm = min(recorded_dttm), .groups = "drop")
 no_support <- no_support %>% left_join(control_imv, by = "hospitalization_id")
@@ -174,9 +193,12 @@ if (grepl("^synthetic_clif", site_name)) {
   simulated_day   <- pmin(pmax(rlnorm(nrow(both_cohorts), log(9), 0.95), 0.04), 60)
   both_cohorts <- both_cohorts %>%
     mutate(deceased = simulated_death,
-           death_dttm = if_else(simulated_death == 1L, recorded_dttm + simulated_day * 86400, as.POSIXct(NA)),
-           discharge_dttm = if_else(simulated_death == 1L, death_dttm, pmax(discharge_dttm, recorded_dttm)))
+           death_dttm = if_else(simulated_death == 1L, index_dttm + simulated_day * 86400, as.POSIXct(NA)),
+           discharge_dttm = if_else(simulated_death == 1L, death_dttm, pmax(discharge_dttm, index_dttm)))
 }
+# script 03 dates an expired patient with no death time at discharge
+if (any(both_cohorts$deceased == 1 & is.na(both_cohorts$death_dttm), na.rm = TRUE))
+  stop("expired patients without a death time: rebuild the cohorts with script 03, which dates them at discharge")
 
 HORIZON_DAYS <- 60
 index_day <- function(dttm, index) as.numeric(difftime(dttm, index, units = "days"))
@@ -195,11 +217,14 @@ both_cohorts <- both_cohorts %>%
          sex_category  = factor(sex_category, levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          log_pfvc_z    = log(pfvc) / ventilated_log_pfvc_sd,
-         # every clock starts at the index; 03's surv_time runs from hospital admission
-         death_index_day     = index_day(death_dttm, recorded_dttm),
-         discharge_index_day = index_day(discharge_dttm, recorded_dttm),
-         escalation_day      = index_day(escalation_dttm, recorded_dttm),
-         imv_day             = index_day(imv_dttm, recorded_dttm),   # control only; NA in the ventilated cohort
+         # every clock starts at the index, as script 03's surv_time does; a death
+         # stamped before the index (after admission: 03 has already cleared stamps
+         # before admission) counts on the index day, as in 03
+         death_stamped_before_index = !is.na(death_dttm) & death_dttm < index_dttm,
+         death_index_day     = if_else(death_stamped_before_index, SAME_DAY_DEATH_D, index_day(death_dttm, index_dttm)),
+         discharge_index_day = index_day(discharge_dttm, index_dttm),
+         escalation_day      = index_day(escalation_dttm, index_dttm),
+         imv_day             = index_day(imv_dttm, index_dttm),   # control only; NA in the ventilated cohort
          # figure 4's severity anchor: SOFA without its respiratory and neurological parts
          anchor = sofa_cv_97 + sofa_coag + sofa_liver + sofa_renal,
          age10 = age_at_admission / 10)
@@ -211,21 +236,20 @@ print(as.data.frame(missing_data_counts), row.names = FALSE)
 if (anyNA(both_cohorts$vtpbw[both_cohorts$cohort == "Ventilated"]))
   stop("ventilated patients without VT/PBW in the cross-sectional table")
 if (anyNA(both_cohorts$anchor)) stop("patients without the SOFA components of the severity anchor")
-# Deaths timestamped before the index are excluded: a death cannot precede the
-# index, so either time is wrong and neither can be repaired. The breakdown is
-# printed and the counts excluded per cohort are written with the estimates.
-death_before_index <- both_cohorts %>% filter(!is.na(death_index_day), death_index_day < 0) %>%
-  mutate(how_far = if_else(death_index_day >= -1, "within 1 day before the index", "more than 1 day before the index")) %>%
+# Deaths stamped before the index are kept and counted on the index day (above); the
+# breakdown is printed and the counts per cohort are written with the estimates.
+death_before_index <- both_cohorts %>% filter(death_stamped_before_index) %>%
+  mutate(how_far = if_else(index_day(death_dttm, index_dttm) >= -1, "within 1 day before the index",
+                           "more than 1 day before the index")) %>%
   count(cohort, how_far, in_hospital_death = deceased == 1, name = "n_patients")
 if (nrow(death_before_index)) {
-  message("Excluded, death timestamped before the index:")
+  message("Death stamped before the index, counted on the index day (", SAME_DAY_DEATH_D, " days):")
   print(as.data.frame(death_before_index), row.names = FALSE)
 }
 excluded_by_cohort <- both_cohorts %>% group_by(cohort) %>%
-  summarise(n_patients_excluded_death_before_index = sum(!is.na(death_index_day) & death_index_day < 0), .groups = "drop") %>%
+  summarise(n_patients_death_before_index_counted_on_index_day = sum(death_stamped_before_index), .groups = "drop") %>%
   mutate(cohort = as.character(cohort)) %>%
   left_join(missing_data_counts %>% select(cohort, n_patients_excluded_missing_data), by = "cohort")
-both_cohorts <- both_cohorts %>% filter(is.na(death_index_day) | death_index_day >= 0)
 ventilated_mean_anchor <- mean(both_cohorts$anchor[both_cohorts$cohort == "Ventilated"])
 both_cohorts <- both_cohorts %>% mutate(anchor_c = anchor - ventilated_mean_anchor)
 
@@ -280,13 +304,15 @@ if (HAS_CODE_STATUS) {
                by = "patient_id", relationship = "many-to-many") %>%
     # keyed by cohort too: a hospitalization can hold a no-support index and, later,
     # a ventilated one
-    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, index_dttm = recorded_dttm,
+    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, index_dttm,
                                           end_dttm = pmin(death_dttm, discharge_dttm,
-                                                          recorded_dttm + HORIZON_DAYS * 86400, na.rm = TRUE)),
+                                                          index_dttm + HORIZON_DAYS * 86400, na.rm = TRUE)),
                by = "hospitalization_id", relationship = "many-to-many") %>%
     mutate(is_full = tolower(code_status_category) %in% FULL_CODE_CATEGORIES)
+  # a status counts only from this hospitalization's admission on: the table is
+  # patient-level, and an order from an earlier stay says nothing about this one
   baseline_status <- code_status %>%
-    filter(start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
+    filter(start_dttm >= admission_dttm, start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
     group_by(cohort, hospitalization_id) %>% slice_max(start_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
     transmute(cohort, hospitalization_id, code_status_at_index = if_else(is_full, "full code", "limited or other"))
   limited_later <- code_status %>%
@@ -407,7 +433,7 @@ cohort_fits <- expand_grid(cohort = COHORTS, adjustment = names(ADJUSTMENTS)) %>
   mutate(fit = map2(cohort, adjustment, ~ fit_cohort(filter(both_cohorts, cohort == .x), .y)))
 estimates <- cohort_fits %>% mutate(estimates = map(fit, "estimates")) %>% select(-fit) %>% unnest(estimates) %>%
   left_join(excluded_by_cohort %>% mutate(cohort = as.character(cohort)), by = "cohort") %>%
-  mutate(scale = "OR per SD of log PFVC (ventilated cohort SD)", site = site_name)
+  mutate(scale = "OR per SD of log PFVC (SD of the ICU-day-0 ventilated arm)", site = site_name)
 curves <- cohort_fits %>% mutate(curves = map(fit, "curves")) %>% select(-fit) %>% unnest(curves) %>%
   mutate(scale = "log-odds of in-hospital death relative to age 40", site = site_name)
 
@@ -419,9 +445,11 @@ curves <- cohort_fits %>% mutate(curves = map(fit, "curves")) %>% select(-fit) %
 # each cohort keep its own baseline hazard. The difference is the no-support log
 # ratio minus the ventilated one, with the variances of independent samples.
 #
-# The outcome grid. Every clock starts at the index (intubation for the ventilated
-# cohort, ICU admission for the control); 03's surv_time runs from hospital
-# admission and is not used here. Six cause-specific Cox models, 60-day horizon:
+# The outcome grid. Every clock starts at the index (the first qualifying ventilator
+# row for the ventilated arm, ICU admission for the control), the origin of script
+# 03's surv_time; the times are recomputed here because the escalation-censored
+# outcomes need the death, discharge and escalation days on one clock. Six
+# cause-specific Cox models, 60-day horizon:
 #   in-hospital death, all                          censored at discharge
 #   in-hospital death, before escalation            censored at discharge and at escalation
 #   in-hospital death, before invasive ventilation  censored at discharge and at intubation
@@ -463,11 +491,12 @@ outcome_data <- function(cohort_data, outcome_key) {
   censor_escalation <- grepl("before_esc", outcome_key)
   censor_imv <- grepl("before_imv", outcome_key)
   in_hospital <- grepl("^inhosp", outcome_key)
-  # an in-hospital death is dated by death_dttm, or by discharge if that is missing;
-  # discharge censors survivors only (a death's timestamp can trail its discharge)
+  # one death time for every outcome: death_dttm, which script 03 dates at discharge
+  # for an expired patient with no death time. In-hospital outcomes count only
+  # in-hospital deaths, and discharge censors survivors only (a death's timestamp
+  # can trail its discharge)
   cohort_data %>% mutate(
-    death_day = if (in_hospital) if_else(deceased == 1, coalesce(death_index_day, discharge_index_day), NA_real_)
-                else death_index_day,
+    death_day = if (in_hospital) if_else(deceased == 1, death_index_day, NA_real_) else death_index_day,
     censor_day = pmin(HORIZON_DAYS,
                       if (in_hospital) if_else(deceased == 1, Inf, discharge_index_day) else Inf,
                       if (censor_escalation) coalesce(escalation_day, Inf) else Inf,
@@ -519,7 +548,7 @@ contrast <- bind_rows(per_cohort %>% select(-outcome, -model), difference) %>%
          ratio = exp(log_ratio), ratio_lo = exp(log_ratio - 1.96 * se), ratio_hi = exp(log_ratio + 1.96 * se),
          p = 2 * pnorm(-abs(log_ratio / se)), severity = SEVERITY_LABELS[severity],
          population = POPULATIONS[population],
-         scale = "per SD of log PFVC (ventilated cohort SD)",
+         scale = "per SD of log PFVC (SD of the ICU-day-0 ventilated arm)",
          ventilated_log_pfvc_sd = ventilated_log_pfvc_sd, site = site_name) %>%
   select(population, outcome, ratio_type, adjustment, severity, quantity, ratio, ratio_lo, ratio_hi, p, log_ratio, se,
          n_patients, n_deaths, note, scale, ventilated_log_pfvc_sd, site)
@@ -593,13 +622,13 @@ control_panel_dir <- file.path(config$output_dir, "controls", "nosupport")
 HAS_CONTROL_PANEL <- all(file.exists(file.path(control_panel_dir, c("jm_long_7d.parquet", "jm_surv_7d.parquet"))))
 hypoxemia_pathway <- NULL
 if (HAS_CONTROL_PANEL) {
-  day0_sf <- read_parquet(file.path(control_panel_dir, "jm_surv_7d.parquet"), col_select = c("hospitalization_id", "sf_0"))
+  index_sf <- read_parquet(file.path(control_panel_dir, "jm_surv_7d.parquet"), col_select = c("hospitalization_id", "sf_index"))
   onset <- read_parquet(file.path(control_panel_dir, "jm_long_7d.parquet"), col_select = c("hospitalization_id", "vent_day", "sf")) %>%
     filter(vent_day >= 1, !is.na(sf), sf < SF_HYPOXEMIA_THRESHOLD) %>%
     group_by(hospitalization_id) %>% summarise(hypoxemia_day = min(vent_day), .groups = "drop")
   hypoxemia_population <- function(population) population_data(population, "No support") %>%
-    inner_join(day0_sf, by = "hospitalization_id") %>%
-    filter(!is.na(sf_0), sf_0 >= SF_HYPOXEMIA_THRESHOLD) %>%
+    inner_join(index_sf, by = "hospitalization_id") %>%
+    filter(!is.na(sf_index), sf_index >= SF_HYPOXEMIA_THRESHOLD) %>%
     left_join(onset, by = "hospitalization_id") %>%
     # onset counts only while the patient is still unsupported
     mutate(hypoxemia_day = if_else(!is.na(escalation_day) & hypoxemia_day > escalation_day, NA_real_, hypoxemia_day))
@@ -621,7 +650,9 @@ if (HAS_CONTROL_PANEL) {
   }
   fit_death_by_state <- function(population, adjustment, horizon) {
     dat <- hypoxemia_population(population) %>%
-      mutate(censor_day = pmin(horizon, coalesce(escalation_day, Inf), discharge_index_day),
+      # discharge censors survivors only: an in-hospital death stamped after its
+      # discharge is still a death
+      mutate(censor_day = pmin(horizon, coalesce(escalation_day, Inf), if_else(deceased == 1, Inf, discharge_index_day)),
              death_day = death_index_day,
              event = as.integer(!is.na(death_day) & death_day <= censor_day),
              end_day = pmax(if_else(event == 1L, death_day, censor_day), 0.01),
