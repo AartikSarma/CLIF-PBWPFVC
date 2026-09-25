@@ -12,20 +12,37 @@
 #             lung, so SF should be better early in the smaller predicted lung, then
 #             reverse)
 #   arms      ventilated, all patients           (panels A, B and C)
+#             ventilated, on IMV at ICU admission (the ventilated side of every comparison
+#                                                with a control: status is assigned at ICU
+#                                                admission in both arms; the control markers
+#                                                and creatinine)
 #             no respiratory support             (panel B, the negative control): every
 #                                                patient, the divergence read at the
-#                                                ventilated cohort's mean severity
-#             no support, hypoxemic on the index day (index-day SF < 315, the ventilated
+#                                                ventilated cohort's mean severity; follow-up
+#                                                ends at escalation to invasive ventilation,
+#                                                NIPPV or another advanced support (the
+#                                                control's competing event), and no patient
+#                                                is in both arms (03 drops from the control
+#                                                every patient of the ICU-admission arm)
+#             no support, hypoxemic at the index (index SF < 315, the ventilated
 #                                                cohort's own gate), read at the ventilated severity:
 #                                                the arms then differ in ventilation, not
 #                                                hypoxemia (27 writes its DiD separately;
 #                                                HYPOXEMIC_CONTROL_MARKERS, the control's markers by default)
+#             ventilated, without the lags       (sensitivity: the full ventilated cohort
+#                                                without the previous-day SF and pressor
+#                                                terms; NOLAG_MARKERS and creatinine)
 #             optional: ventilated by baseline SF class (SF_BANDS; off by default)
 #   The control is standardised, not matched: severity cannot confound a
 #   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
 #   control's divergence varies with its severity anchor and is read at the ventilated
-#   mean (20_biotrauma_grid.R, PBWPFVC_JM_SEV_CENTER). No control patient is discarded,
-#   and the severity x divergence term tests whether sicker controls diverge faster.
+#   mean (20_biotrauma_grid.R, PBWPFVC_JM_SEV_CENTER). No control patient is discarded
+#   for severity, and the severity x divergence term tests whether sicker controls
+#   diverge faster.
+#   Every fit runs on one clock: days from the index (the first qualifying ventilator
+#   row; ICU admission in the control), each patient entering the survival submodel at
+#   their first trajectory day; the baseline marker is the index-day value; the dose is
+#   VT/PBW at the index and the previous day's VT/PBW minus the index (22_biotrauma_fit.R).
 #   each fit adjusted and unadjusted for age, sex and race
 #
 # Steps, each logged to output/{site}_output/logs/figure4_{stamp}/:
@@ -35,12 +52,15 @@
 #   3 anchors   the severity-anchor distributions of both cohorts, and the ventilated
 #               mean anchor per marker (final/injury/jm_severity_anchor_mean_*)
 #   4 centres   each control marker's centre = that ventilated mean
-#   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm
-#   6 figure    supplement/xsec_pfvc_age_control.R (death against each control, the
-#               checks figure's mortality rows), 27_control_comparison.R (the
-#               difference-in-differences), then 24_biotrauma_figures.R: figure 4 and
-#               the checks figure (biotrauma_fig_checks_*: every outcome against each
-#               control)
+#   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm: ventilated
+#               (all, then on IMV at ICU admission), any SF classes, the two controls,
+#               and the sensitivity without the lags
+#   6 figure    supplement/xsec_pfvc_age_control.R (60-day death before escalation
+#               against each control, the checks figure's mortality rows),
+#               27_control_comparison.R (the difference-in-differences, ventilated at ICU
+#               admission against each control), then 24_biotrauma_figures.R: figure 4
+#               and the checks figure (biotrauma_fig_checks_*: every outcome against each
+#               control, and the rates with and without the lags)
 #   7 channels  the supplement's channel breakdown: the ventilated divergence read through
 #               each GLI piece of log PFVC (height, age, sex, race; 22's channels form, one
 #               fit per marker, the pieces standing in for the demographics), and its
@@ -58,8 +78,9 @@
 # through the library path `uvr run` sets.
 #   caffeinate -i nohup uvr run code/29_run_figure4.R > figure4.out 2>&1 &
 #   uvr run code/29_run_figure4.R -- --dry-run
-# Site default: 28 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
-# and creatinine in each control, the whole one and the hypoxemic one; each adjusted and
+# Site default: 44 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
+# and creatinine in the ventilated arm at ICU admission and in each control, the whole one
+# and the hypoxemic one; 3 markers and creatinine without the lags; each adjusted and
 # unadjusted) plus 1 channel fit, at 2000 / 500 iterations, four at a time. The survival
 # submodel is deliberately small (22_biotrauma_fit.R, HAZARD_SPEC) so that its hazard
 # blocks converge alongside the divergence terms the figure rests on.
@@ -69,7 +90,8 @@
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
 #   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, CONTROL_MARKERS by default, with creatinine as in the other arms; empty
-#   skips it),
+#   skips it), NOLAG_MARKERS (the sensitivity without the lags, "platelets,bilirubin,osi"
+#   by default, with creatinine as in the other arms; empty skips it),
 #   CHANNEL_MARKERS (step 7, platelets by default; empty skips it),
 #   FORCE_BUILD, FORCE_PANEL.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
@@ -95,6 +117,7 @@ knob_or_skip <- function(name, default) Sys.getenv(name, unset = default)
 MARKERS                   <- knob("MARKERS", "osi,sf,pressor_dose,platelets,bilirubin")   # creatinine runs on its own, with RRT as a third cause
 CONTROL_MARKERS           <- knob("CONTROL_MARKERS", "pressor_dose,platelets,bilirubin")
 HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", CONTROL_MARKERS)   # the hypoxemic control arm
+NOLAG_MARKERS             <- knob_or_skip("NOLAG_MARKERS", "platelets,bilirubin,osi")     # the sensitivity without the lags
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
 CREATININE  <- knob("CREATININE", "1") == "1"
 SF_BANDS    <- strsplit(trimws(knob("SF_BANDS", "")), "[[:space:]]+")[[1]]   # e.g. "235,315 115,235 0,115"; off by default
@@ -186,8 +209,14 @@ build_cohort <- function(cohort, derived) {   # cohort, folder holding its deriv
   # a cohort lacking rrt_sources_available.rds (or, for the control,
   # cohort_icu_stays.parquet) was built by an older 01-03, and its panel cannot be
   # built: it is rebuilt.
+  # The control is built after the ventilated cohort and without its ICU-admission arm
+  # (03), so a ventilated table newer than the control's rebuilds the control.
   icu_ok <- cohort != "nosupport" || file.exists(file.path(derived, "cohort_icu_stays.parquet"))
-  if (!FORCE_BUILD && icu_ok && file.exists(file.path(derived, "analysis_cross_sectional.parquet")) &&
+  own_table <- file.path(derived, "analysis_cross_sectional.parquet")
+  ventilated_table <- file.path(ROOT, "intermediate", "analysis_cross_sectional.parquet")
+  control_current <- cohort != "nosupport" || !file.exists(own_table) || !file.exists(ventilated_table) ||
+    file.mtime(ventilated_table) <= file.mtime(own_table)
+  if (!FORCE_BUILD && icu_ok && control_current && file.exists(own_table) &&
       file.exists(file.path(derived, "rrt_sources_available.rds"))) {
     message("[", timestamp(), "] ", cohort, ": cohort already built, scripts 01-03 skipped (FORCE_BUILD=1 rebuilds)")
     return(invisible())
@@ -223,12 +252,15 @@ build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"
 # skips the whole control arm (step 4)
 ANCHOR_MARKERS <- paste0("creatinine,", CONTROL_MARKERS)
 anchor_env <- c(PBWPFVC_JM_ANCHOR_ONLY = "1", PBWPFVC_JM_MARKERS = ANCHOR_MARKERS)
-run_step("anchors_ventilated", "code/22_biotrauma_fit.R", "imv",       anchor_env)
+# the controls are read at the mean anchor of the ventilated arm they are compared with,
+# the patients on IMV at ICU admission (the difference-in-differences' ventilated side)
+ventilated_anchor_env <- c(anchor_env, PBWPFVC_JM_ICU_DAY0 = "1")
+run_step("anchors_ventilated", "code/22_biotrauma_fit.R", "imv",       ventilated_anchor_env)
 run_step("anchors_nosupport",  "code/22_biotrauma_fit.R", "nosupport", anchor_env)
 
 # ---- 4 centres: the ventilated cohort's mean anchor per control marker, where each
 #      control fit reads its divergence (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R)
-CENTER_FILE <- file.path(ROOT, "final", "injury", paste0("jm_severity_anchor_mean_7d_", BASE_SITE, ".csv"))
+CENTER_FILE <- file.path(ROOT, "final", "injury", paste0("jm_severity_anchor_mean_day0_7d_", BASE_SITE, ".csv"))
 anchor_markers <- strsplit(ANCHOR_MARKERS, ",")[[1]]
 if (DRY) {
   message("[dry] centres: ventilated mean anchor per marker (", ANCHOR_MARKERS, ") from ", CENTER_FILE)
@@ -249,23 +281,31 @@ if (DRY) {
 
 # ---- 5 fits, arm by arm
 fit_arm("ventilated", "imv", MARKERS)
+# the ventilated side of the comparisons with a control: patients on IMV at ICU
+# admission, fitted for the control's markers (and creatinine)
+fit_arm("ventilated_day0", "imv", CONTROL_MARKERS, c(PBWPFVC_JM_ICU_DAY0 = "1"))
 for (band in SF_BANDS)
   fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
   fit_arm("nosupport", "nosupport", CONTROL_MARKERS, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER))
-  # the hypoxemic control: the same control, index-day SF < 315, with the same markers
+  # the hypoxemic control: the same control, index SF < 315, with the same markers
   if (nzchar(HYPOXEMIC_CONTROL_MARKERS))
     fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_CONTROL_MARKERS,
             c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"))
 }
 
+# the sensitivity without the previous-day SF and pressor terms, full ventilated cohort
+if (nzchar(NOLAG_MARKERS))
+  fit_arm("ventilated_nolag", "imv", NOLAG_MARKERS, c(PBWPFVC_JM_NO_LAGS = "1"))
+
 # ---- 6 comparison table and the figure
 # figure rows are fixed; changing MARKERS does not change them (a marker with no fit
 # on disk is left out of the figure)
 FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",pressor_dose,osi,sf")
-# death against each control: the PFVC association with death in the ventilated cohort
-# and in the no-support control, everyone and hypoxemic at the index (the checks
-# figure's mortality rows); it reads both cohorts' tables and the control's 7-day panel
+# death against each control: the PFVC association with 60-day death before escalation
+# in the ventilated arm at ICU admission and in the no-support control, everyone and
+# hypoxemic at the index (the checks figure's mortality rows); it reads both cohorts'
+# tables and the control's 7-day panel
 run_step("mortality_contrast", "code/supplement/xsec_pfvc_age_control.R")
 run_step("comparison", "code/27_control_comparison.R")
 run_step("figure", "code/24_biotrauma_figures.R", "imv",

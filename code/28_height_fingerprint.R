@@ -23,8 +23,9 @@
 #
 #   log marker ~ ns(day, 3) + F + F:day
 #                + ns(height, k) + ns(height, k):day + sex + sex:day   (shared)
-#                + VT/PBW (patient mean, within-patient change) + baseline marker
-#                + lagged SF and pressor + non-respiratory SOFA
+#                + VT/PBW at the index + (previous day's VT/PBW - index VT/PBW)
+#                + baseline marker (the index-day value) + lagged SF and pressor
+#                + non-respiratory SOFA
 #                [+ ns(age, 4) + race]                                 (adjusted)
 #   random intercept and slope on day per patient (unstructured)
 #
@@ -34,18 +35,25 @@
 # What is reported, per marker, shared-smooth df k (3 primary; 4, 5) and adjustment:
 #   F:day            divergence per day per log unit of PBW/PFVC moved by height
 #                    within sex. The primary read.
-#   ldisc:day        the same per log unit of the WHOLE ratio (age, sex, race and
-#                    height together), from figure 4's model with log PBW/PFVC in
-#                    place of log PFVC. Under strain the two agree in sign and size:
-#                    the ratio should act the same whichever input moved it. This is
-#                    the predicted value F:day is read against.
+#   ldisc:day        the predicted value F:day is read against: the same per log unit
+#                    of log PBW/PFVC, from figure 4's model with log PBW/PFVC in
+#                    place of log PFVC and sex held fixed (no shared height smooth).
+#                    Adjusted, age and race are held fixed too, so the ratio moves
+#                    only through height within sex: the fingerprint's own variation
+#                    without the shared smooth taken out. Unadjusted, the ratio moves
+#                    through height, age and race within sex. Sex is in both pairs
+#                    because the fingerprint model always holds it. Under strain the
+#                    two agree in sign and size: the ratio should act the same
+#                    whichever input moved it. These rows carry model "whole ratio"
+#                    (the name the pooling reads).
 #   identifying SD   the SD of F left after ns(height, k) and sex (and, adjusted,
 #                    age and race). The formula's whole range is 0.05 to 0.07; the
 #                    lever left after the shared curve is a small fraction of the
-#                    whole ratio's SD, and it is reported at k = 3, 4 and 5 so a
+#                    benchmark's, and it is reported at k = 3, 4 and 5 so a
 #                    reader can see that the limit is the formula, not the smooth.
-#                    For the whole-ratio rows the column holds the raw SD of log
-#                    PBW/PFVC instead. The table therefore carries the minimum detectable
+#                    For the ldisc rows the column holds the SD of log PBW/PFVC
+#                    left after the same terms the benchmark holds fixed (sex; and,
+#                    adjusted, age and race). The table therefore carries the minimum detectable
 #                    effect (80% power, two-sided 5%) beside the predicted value, so
 #                    a null can be read as uninformative rather than as a refutation.
 #                    The comparison is the ventilated arm's read; in a control the
@@ -60,6 +68,9 @@
 #                    not this one.
 #   curves           the rate by height and sex from the free model and from the
 #                    fingerprint model, beside F itself: the plot a reader checks.
+#   sev_center       every table carries the severity centre the fit was read at (NA
+#                    when none), so the ventilated run can refuse a control table that
+#                    was not read at the ventilated severity.
 #
 # "Unadjusted" drops age and race only. Height and sex stay in every model: they
 # define the contrast.
@@ -70,10 +81,13 @@
 # rate is read at the ventilated cohort's severity, as in figure 4 (the anchor, its
 # rate, and its modification of F level and rate are added). Run the control first:
 # the ventilated run then writes the difference in differences if the control's
-# table is on disk.
+# table is on disk, and stops if that table was fitted without a severity centre.
 #
 # Death and extubation before day 7 are not modelled: this is a linear mixed model
-# alone (nlme), so the estimate is conditional on remaining under observation.
+# alone (nlme), so the estimate is conditional on remaining under observation. Days
+# count from the index (the first qualifying ventilator row; ICU admission in the
+# control), and the panel holds no measurement after a patient's death, extubation or
+# escalation (21_biotrauma_panel.R).
 #
 # Inputs: the 7-day daily panel of 21_biotrauma_panel.R (jm_long_7d, jm_surv_7d).
 # Outputs, in final/injury/ (a control cohort's in final/controls/):
@@ -149,7 +163,7 @@ pt <- surv %>%
   drop_step("no height", !is.na(height_cm)) %>%
   drop_step("no age", !is.na(age10)) %>%
   drop_step("no race", !is.na(race_category)) %>%
-  drop_step("no VT/PBW (ventilated cohort only)", if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE) %>%
+  drop_step("no index VT/PBW (ventilated cohort only)", if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE) %>%
   mutate(fingerprint = height_fingerprint(height_cm, sex_category),
          ldisc = log(pbw / pfvc_gli),
          sex_female = as.numeric(sex_category == "Female"),
@@ -163,7 +177,7 @@ d_joined <- long %>%
          if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE) %>%
   select(hospitalization_id, vent_day, y = all_of(y_col), l_sf, l_pressor, any_of("l_vtpbw_within")) %>%
   inner_join(pt %>% select(hospitalization_id, fingerprint, ldisc, height_cm, sex_category, sex_female,
-                           age10, race_category, np_sofa, log_y0, sev_anchor_c, any_of("vtpbw_pt_mean")),
+                           age10, race_category, np_sofa, log_y0, sev_anchor_c, any_of("vtpbw_idx")),
              by = "hospitalization_id") %>%
   mutate(log_y = log(y), l_log_sf = log(l_sf))
 message(sprintf("  %-58s dropped %5d, %d left", "no usable post-baseline day (marker, lagged SF, pressor, dose)",
@@ -198,8 +212,9 @@ ctrl <- lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)
 rhs_of <- function(size_terms, k, height = "shared", adjusted = TRUE) {
   hs <- hs_names(k)
   height_terms <- switch(height,
-    # the whole ratio, as figure 4 enters log PFVC: sex is an adjuster like age and race
-    none   = if (adjusted) "sex_female",
+    # the benchmark: log PBW/PFVC as figure 4 enters log PFVC, with sex held fixed in
+    # both adjustments, as the fingerprint model holds it
+    none   = "sex_female",
     shared = c(hs, paste0(hs, ":vent_day"), "sex_female", "sex_female:vent_day"),
     free   = c(hs, paste0(hs, ":vent_day"), "sex_female", "sex_female:vent_day",
                paste0(hs, ":sex_female"), paste0(hs, ":sex_female:vent_day")))
@@ -207,7 +222,7 @@ rhs_of <- function(size_terms, k, height = "shared", adjusted = TRUE) {
                                          if (length(size_terms)) c(paste0(size_terms, ":sev_anchor_c"),
                                                                    paste0(size_terms, ":vent_day:sev_anchor_c")))
   paste(c("ns(vent_day, 3)", size_terms, if (length(size_terms)) paste0(size_terms, ":vent_day"),
-          height_terms, sev_terms, if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_pt_mean"),
+          height_terms, sev_terms, if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_idx"),
           "log_y0", "l_log_sf", "l_pressor", "np_sofa", if (adjusted) DEMO), collapse = " + ")
 }
 fit_lme <- function(rhs, dat, method = "REML")
@@ -226,6 +241,12 @@ identifying_sd <- function(k, adjusted) {
   f <- as.formula(paste("fingerprint ~", paste(c(hs_names(k), "sex_female", if (adjusted) DEMO), collapse = " + ")))
   sd(resid(lm(f, data = dd)))
 }
+# the benchmark's variation: what is left of log PBW/PFVC after the terms its model
+# holds fixed (sex; and, adjusted, age and race)
+benchmark_sd <- function(adjusted) {
+  f <- as.formula(paste("ldisc ~", paste(c("sex_female", if (adjusted) DEMO), collapse = " + ")))
+  sd(resid(lm(f, data = pt_used)))
+}
 
 results <- list(); ladder <- list(); fits_keep <- list()
 for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
@@ -236,8 +257,8 @@ for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
   rows <- bind_rows(coef_row(fp, c("fingerprint", "vent_day")) %>% mutate(model = "fingerprint", quantity = "rate"),
                     coef_row(fp, "fingerprint") %>% mutate(model = "fingerprint", quantity = "level"))
   if (k == PRIMARY_DF) {
-    # the predicted value: the whole ratio, figure 4's model with log PBW/PFVC in place
-    # of log PFVC; height is on the ratio's causal path, so no height smooth here
+    # the predicted value: figure 4's model with log PBW/PFVC in place of log PFVC and
+    # sex held fixed; height is on the ratio's causal path, so no height smooth here
     rt <- fit_lme(rhs_of("ldisc", k, "none", adjusted), dk)
     rows <- bind_rows(rows,
                       coef_row(rt, c("ldisc", "vent_day")) %>% mutate(model = "whole ratio", quantity = "rate"),
@@ -247,8 +268,9 @@ for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
   results[[length(results) + 1]] <- rows %>%
     mutate(marker = MARKER, shared_df = k, adjustment = adj_lab,
            lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, p = 2 * pnorm(-abs(estimate / se)),
-           # the fingerprint's residual SD; for the whole-ratio rows, the raw SD of log PBW/PFVC
-           identifying_sd = if_else(model == "fingerprint", id_sd, sd(pt_used$ldisc)),
+           # the fingerprint's residual SD; for the whole-ratio rows, the SD of log PBW/PFVC
+           # left after the terms the benchmark holds fixed
+           identifying_sd = if_else(model == "fingerprint", id_sd, benchmark_sd(adjusted)),
            mde_80 = MDE_Z * se,
            n_patients = n_patients, n_rows = nrow(dk))
   # the ladder, by maximum likelihood so the likelihoods compare
@@ -271,16 +293,16 @@ for (k in SHARED_DF) for (adjusted in c(TRUE, FALSE)) {
     mutate(marker = MARKER, shared_df = k, adjustment = adj_lab, n_patients = n_patients)
 }
 res <- bind_rows(results) %>%
-  # the predicted value beside every fingerprint row: the whole ratio's rate at the
-  # same adjustment, and how many of the fingerprint's standard errors it lies away
+  # the predicted value beside every fingerprint row: the benchmark's rate at the
+  # same adjustment, and whether it clears the fingerprint's minimum detectable effect
   left_join(bind_rows(results) %>% filter(model == "whole ratio", quantity == "rate") %>%
               select(adjustment, predicted_rate = estimate), by = "adjustment") %>%
   mutate(predicted_rate = if_else(model == "fingerprint" & quantity == "rate", predicted_rate, NA_real_),
          detectable = if_else(model == "fingerprint" & quantity == "rate", abs(predicted_rate) >= mde_80, NA),
-         cohort = config$cohort, site = site_name) %>%
+         cohort = config$cohort, sev_center = sev_center, site = site_name) %>%
   select(marker, cohort, model, quantity, term, shared_df, adjustment, estimate, se, lo, hi, p,
-         predicted_rate, mde_80, detectable, identifying_sd, n_patients, n_rows, site)
-ladder <- bind_rows(ladder) %>% mutate(cohort = config$cohort, site = site_name)
+         predicted_rate, mde_80, detectable, identifying_sd, n_patients, n_rows, sev_center, site)
+ladder <- bind_rows(ladder) %>% mutate(cohort = config$cohort, sev_center = sev_center, site = site_name)
 
 # =============================================================================
 # 3. Difference in differences (the ventilated run, when the control's table exists)
@@ -291,10 +313,15 @@ if (HAS_DOSE) {
                          paste0("fingerprint_", MARKER, "_", config$base_site, "_nosupport.csv"))
   if (file.exists(ctrl_file)) {
     ctl <- read_csv(ctrl_file, show_col_types = FALSE)
+    # the control must be read at the ventilated severity, as in figure 4
+    if (!"sev_center" %in% names(ctl) || all(is.na(ctl$sev_center)))
+      stop("the control's fingerprint table ", ctrl_file, " was fitted without a severity centre: rerun it with ",
+           "PBWPFVC_COHORT=nosupport PBWPFVC_JM_SEV_CENTER=", MARKER, "=<ventilated mean anchor>")
     did <- res %>% filter(model == "fingerprint", quantity == "rate") %>%
       select(shared_df, adjustment, estimate_ventilated = estimate, se_ventilated = se, n_patients_ventilated = n_patients) %>%
       inner_join(ctl %>% filter(model == "fingerprint", quantity == "rate") %>%
-                   select(shared_df, adjustment, estimate_control = estimate, se_control = se, n_patients_control = n_patients),
+                   select(shared_df, adjustment, estimate_control = estimate, se_control = se, n_patients_control = n_patients,
+                          control_sev_center = sev_center),
                  by = c("shared_df", "adjustment")) %>%
       mutate(did_estimate = estimate_ventilated - estimate_control,
              did_se = sqrt(se_ventilated^2 + se_control^2),
@@ -341,12 +368,13 @@ rate_curve <- function(fit, model_label, k = PRIMARY_DF) {
 curves <- bind_rows(rate_curve(fits_keep[["free_adjusted"]], "free sex-specific height curves"),
                     rate_curve(fits_keep[["adjusted"]], "shared curve + fingerprint")) %>%
   mutate(fingerprint = height_fingerprint(height_cm, sex_category), marker = MARKER,
-         cohort = config$cohort, site = site_name)
+         cohort = config$cohort, sev_center = sev_center, site = site_name)
 
 # =============================================================================
 # 5. Print, write, draw
 # =============================================================================
-message("\nThe fingerprint (F:day) against the whole ratio (ldisc:day), log ", MARKER, " per day per log unit of PBW/PFVC.")
+message("\nThe fingerprint (F:day) against the benchmark (ldisc:day, sex held fixed), log ", MARKER,
+        " per day per log unit of PBW/PFVC.")
 message("Strain predicts the two agree; detectable = |predicted| >= the 80%-power minimum detectable effect.")
 print(as.data.frame(res %>% filter(quantity == "rate") %>%
                       select(model, shared_df, adjustment, estimate, lo, hi, p, predicted_rate, mde_80, detectable, identifying_sd) %>%
