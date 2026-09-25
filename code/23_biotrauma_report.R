@@ -14,7 +14,8 @@
 #   final/jm_lme_check_{tag}.csv        the level and divergence terms from the joint
 #       model beside the same terms from the longitudinal submodel fitted alone (no
 #       death or extubation correction), each with its interval, and their difference:
-#       whether the hazard links move the answer
+#       whether the hazard links move the answer (the logistic mixed model for any
+#       vasopressor, on the log-odds scale)
 #   final/jm_association_hr_{tag}.csv   hazard ratio for each cause (death;
 #       extubation, or escalation in the control; RRT in the rrtcause_ fits) per SD
 #       of the current log marker (value) and per unit slope; the cause is the
@@ -237,10 +238,17 @@ for (i in seq_len(nrow(usable))) {
   #      size terms can be read with and without the linkage to death and extubation.
   #      If the hazard or association block fails R-hat but the joint model's level
   #      and divergence agree with the LME's, the unconverged blocks are not what the
-  #      estimate rests on. Continuous markers only
-  #      (the any-pressor part is a GLMMadaptive fit on another scale).
-  if (!binary && inherits(b$lme, "lme")) {
-    fe <- nlme::fixef(b$lme); fe_v <- vcov(b$lme)
+  #      estimate rests on. For the yes/no marker (any_pressor) the longitudinal
+  #      submodel is the logistic mixed model (GLMMadaptive) fitted before the joint
+  #      model, read the same way on the log-odds scale: its fixed effects and their
+  #      covariance (the fixed-effects block only; the full vcov also holds the
+  #      random-effects variances).
+  if (inherits(b$lme, "lme") || inherits(b$lme, "MixMod")) {
+    if (inherits(b$lme, "MixMod")) {
+      fe <- GLMMadaptive::fixef(b$lme); fe_v <- vcov(b$lme, parm = "fixed-effects")
+    } else {
+      fe <- nlme::fixef(b$lme); fe_v <- vcov(b$lme)
+    }
     for (ex in intersect(c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS), colnames(draws))) {
       rate <- intersect(c(paste0(ex, ":vent_day"), paste0("vent_day:", ex)), colnames(draws))
       for (tm in c(ex, rate)) {
@@ -251,6 +259,7 @@ for (i in seq_len(nrow(usable))) {
           term = if (tm == ex) "level" else "divergence per day",
           jm_estimate = mean(v), jm_lo = quantile(v, 0.025), jm_hi = quantile(v, 0.975),
           lme_estimate = unname(fe[[tm]]), lme_se = sqrt(fe_v[tm, tm]),
+          scale = if (binary) "log-odds of any pressor" else "log marker",
           lme_lo = lme_estimate - 1.96 * lme_se, lme_hi = lme_estimate + 1.96 * lme_se,
           jm_minus_lme = jm_estimate - lme_estimate,
           jm_minus_lme_in_lme_se = jm_minus_lme / lme_se,

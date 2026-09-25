@@ -174,10 +174,15 @@ what this runner has always done, so existing site instructions still work.
 
 `code/29_run_figure4.R` runs everything behind figure 4 for a site and draws it:
 
-- **Markers:** platelets, bilirubin, creatinine, vasopressor dose on pressor days, and
-  the oxygen saturation index, each over the first 7 days, adjusted and unadjusted.
+- **Markers:** platelets, bilirubin, creatinine, vasopressors, and the oxygen
+  saturation index, each over the first 7 days, adjusted and unadjusted.
   Creatinine ends at renal replacement of any kind, continuous or intermittent, which
   is modelled as a third competing event; patients with ESRD are censored at day 0.
+  Vasopressors are a two-part outcome, reported as a pair: on/off (`any_pressor`,
+  every patient-day, in log-odds) and the dose on the days a pressor runs
+  (`pressor_dose`). Being on a pressor is itself an outcome, so the dose part is
+  conditional on it and is read only in the ventilated cohort; every comparison with
+  the controls uses the on/off part.
 - **Arms:** all ventilated patients, and the negative control, patients with no
   respiratory support. The ventilated cohort by baseline SF class is optional:
   `SF_BANDS="235,315 115,235 0,115"`.
@@ -191,10 +196,10 @@ It builds the control cohort when missing, reuses finished fits, carries on past
 failed step and lists the failures at the end. With the figure it writes the
 difference-in-differences (ventilated minus control divergence), and after it the
 channel breakdown for the supplement (`CHANNEL_MARKERS`, empty skips it).
-By default it runs 23 fits at 2,000
-iterations, four at a time (`PAR=4`). An earlier estimate put one 7-day fit at a
-7,000-patient site at 15-25 GB of memory, so four at once can need 60-100 GB: lower
-`PAR` on a smaller machine. `ITER` and `BURNIN` lengthen the chains.
+By default it runs 46 fits (plus one channel fit) at 5,000 iterations with 1,000
+burn-in, four at a time (`PAR=4`). One 7-day fit at a 7,000-patient site needs about
+15-25 GB of memory, so four at once can need 60-100 GB: lower `PAR` on a smaller
+machine. `ITER` and `BURNIN` set the chain length.
 `uvr run code/29_run_figure4.R -- --dry-run` lists every step.
 
 ```bash

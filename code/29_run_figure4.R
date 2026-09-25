@@ -6,11 +6,18 @@
 # script produces it for one site, from the CLIF tables to the PDF:
 #
 #   markers   platelets, bilirubin, creatinine (dialysis, continuous or intermittent,
-#             as a third competing cause; ESRD censored at day 0), vasopressor dose on
-#             pressor days, oxygen saturation index, and the SF ratio (a row of the
-#             figure; the positive control for mechanics: a larger VT/PFVC recruits
-#             lung, so SF should be better early in the smaller predicted lung, then
-#             reverse)
+#             as a third competing cause; ESRD censored at day 0), vasopressors,
+#             oxygen saturation index, and the SF ratio (a row of the figure; the
+#             positive control for mechanics: a larger VT/PFVC recruits lung, so SF
+#             should be better early in the smaller predicted lung, then reverse)
+#   vasopressors are a two-part (hurdle) outcome, reported as a pair: on/off
+#             (any_pressor, every patient-day, a logistic mixed model) and the dose
+#             on the days a pressor runs (pressor_dose, conditional on being on a
+#             pressor that day). Being on a pressor is itself an outcome, so the
+#             dose part conditions on it and is read only in the full ventilated
+#             cohort; every comparison with a control (the ICU-admission arm, both
+#             controls, the difference-in-differences) uses the on/off part, which
+#             conditions on nothing
 #   arms      ventilated, all patients           (panels A, B and C)
 #             ventilated, on IMV at ICU admission (the ventilated side of every comparison
 #                                                with a control: status is assigned at ICU
@@ -78,7 +85,7 @@
 # through the library path `uvr run` sets.
 #   caffeinate -i nohup uvr run code/29_run_figure4.R > figure4.out 2>&1 &
 #   uvr run code/29_run_figure4.R -- --dry-run
-# Site default: 44 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
+# Site default: 46 figure-4 fits (6 markers and creatinine in the ventilated cohort; 3 markers
 # and creatinine in the ventilated arm at ICU admission and in each control, the whole one
 # and the hypoxemic one; 3 markers and creatinine without the lags; each adjusted and
 # unadjusted) plus 1 channel fit, at 5000 / 1000 iterations, four at a time; a run takes
@@ -118,8 +125,8 @@ knob <- function(name, default) {
 }
 knob_or_skip <- function(name, default) Sys.getenv(name, unset = default)
 
-MARKERS                   <- knob("MARKERS", "osi,sf,pressor_dose,platelets,bilirubin")   # creatinine runs on its own, with RRT as a third cause
-CONTROL_MARKERS           <- knob("CONTROL_MARKERS", "pressor_dose,platelets,bilirubin")
+MARKERS                   <- knob("MARKERS", "osi,sf,any_pressor,pressor_dose,platelets,bilirubin")   # creatinine runs on its own, with RRT as a third cause
+CONTROL_MARKERS           <- knob("CONTROL_MARKERS", "any_pressor,platelets,bilirubin")   # the on/off part, never the dose
 HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", CONTROL_MARKERS)   # the hypoxemic control arm
 NOLAG_MARKERS             <- knob_or_skip("NOLAG_MARKERS", "platelets,bilirubin,osi")     # the sensitivity without the lags
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
@@ -256,7 +263,8 @@ build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"
 
 # ---- 3 anchors
 # creatinine is always anchored, even with CREATININE=0, so a missing creatinine centre
-# skips the whole control arm (step 4)
+# skips the whole control arm (step 4); any_pressor's anchor drops the cardiovascular
+# SOFA (20_biotrauma_grid.R, ANCHOR_DROP)
 ANCHOR_MARKERS <- paste0("creatinine,", CONTROL_MARKERS)
 anchor_env <- c(PBWPFVC_JM_ANCHOR_ONLY = "1", PBWPFVC_JM_MARKERS = ANCHOR_MARKERS)
 # the controls are read at the mean anchor of the ventilated arm they are compared with,
@@ -320,7 +328,7 @@ if (nzchar(NOLAG_MARKERS))
 # ---- 6 comparison table and the figure
 # figure rows are fixed; changing MARKERS does not change them (a marker with no fit
 # on disk is left out of the figure)
-FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",pressor_dose,osi,sf")
+FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",any_pressor,pressor_dose,osi,sf")
 # death against each control: the PFVC association with 60-day death before escalation
 # in the ventilated arm at ICU admission and in the no-support control, everyone and
 # hypoxemic at the index (the checks figure's mortality rows); it reads both cohorts'

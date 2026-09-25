@@ -8,6 +8,8 @@ which also decides where files are written.
 
 **Convergence.** Figure 4's estimates are gated on the lung-size terms the figure reads (for the pfvc form, `log_pfvc_sd` and `log_pfvc_sd:vent_day`): a fit counts as converged when their R-hat is at most 1.1 (`RHAT_GATE`, `20_biotrauma_grid.R`). The R-hat of the hazard links is reported beside it (`hazard_rhat`), and `jm_lme_check_` gives each estimate from the longitudinal model fitted alone, so a reader can see whether the joint model's correction for patients leaving the panel moves the answer.
 
+**Vasopressors.** Vasopressors are a two-part (hurdle) outcome, reported as a pair: on/off (`any_pressor`, every patient-day, a logistic mixed model, in log-odds) and the dose on the days a pressor runs (`pressor_dose`, conditional on being on a pressor that day). Being on a pressor is itself an outcome, so the dose part is read only in the ventilated cohort; the controls, the difference-in-differences and the checks figure use the on/off part.
+
 **Output file names are an interface between scripts.** The pooling and figure
 scripts find their inputs by file-name prefix, so a prefix changes together with
 its readers, in one commit. No other site has the code yet, so names are still free

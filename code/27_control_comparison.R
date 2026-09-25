@@ -44,6 +44,13 @@
 # the longitudinal-only comparison: the same difference-in-differences from each arm's
 # longitudinal submodel fitted alone (did_lme_*, from jm_lme_check_*).
 #
+# Vasopressors are a two-part (hurdle) outcome: on/off (any_pressor, every patient-day,
+# a logistic mixed model, its rate in log-odds per day) and the dose on the days a
+# pressor runs (pressor_dose). Being on a pressor is itself an outcome, so the dose part
+# is conditional on it and is never compared with a control: the difference-in-
+# differences uses the on/off part. Rescaling a control's rate by the ratio of the SDs
+# of log PFVC is the same for the log-odds of a yes/no marker as for a log marker.
+#
 # A control arm is informative only if its marker MOVES. The movement panel (mean
 # change from baseline by day, from jm_movement_*) is therefore read before the
 # divergence: no movement, no possible divergence, and the arm cannot adjudicate.
@@ -132,6 +139,8 @@ lme_check <- each_arm("lme_check")
 # the gate of every fit in every arm, from its own estimates (20_biotrauma_grid.R)
 convergence <- fit_convergence(estimates, MOD_FORM, by = c("arm", "marker", "model", "adjustment"))
 
+# the unit of a marker's rate: log-odds for the yes/no marker, the log marker otherwise
+marker_scale <- function(marker) if_else(marker == "any_pressor", "log-odds of any vasopressor", "log marker")
 # ---- the comparison table: divergence and level per SD of log PFVC, with what qualifies them
 # sev_modification = the control's log_pfvc_sd:vent_day:sev_anchor_c: the change in the
 # divergence per point of the severity anchor (NA in arms without it)
@@ -166,7 +175,7 @@ comparison <- size_terms %>%
   left_join(convergence %>% filter(model == "main") %>% select(arm, marker, adjustment, size_terms_rhat, size_gate, hazard_rhat),
             by = c("arm", "marker", "adjustment")) %>%
   mutate(arm = factor(arm, levels = arms$arm),
-         unit = "log marker per day per SD of log PFVC in this arm's cohort",
+         unit = paste(marker_scale(marker), "per day per SD of log PFVC in this arm's cohort"),
          form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
@@ -211,6 +220,9 @@ if (is.na(to_vent_sd)) {
 # No difference exists without both sides (the SD rescaling missing, or no fit on
 # one side): that is an empty table, which the callers report, not an error.
 VENTILATED_DID_ARM <- "Ventilated, at ICU admission"
+# the dose part is conditional on being on a pressor (an outcome) and is not compared
+# with a control, even where an older run left its rows in an arm's tables
+CONDITIONAL_MARKERS <- "pressor_dose"
 # The same difference from the longitudinal submodels fitted alone (each arm's
 # jm_lme_check_*: maximum likelihood, no correction for patients leaving the panel), so
 # the difference-in-differences can be read without the hazard links. The LME's
@@ -220,7 +232,7 @@ lme_did_against <- function(control_arm) {
   none <- tibble(marker = character(), adjustment = character())
   sides <- if (is.null(lme_check) || !nrow(lme_check)) tibble() else lme_check %>%
     filter(model == "main", exposure == "log_pfvc_sd", term == "divergence per day",
-           arm %in% c(VENTILATED_DID_ARM, control_arm))
+           arm %in% c(VENTILATED_DID_ARM, control_arm), !marker %in% CONDITIONAL_MARKERS)
   missing <- setdiff(c(VENTILATED_DID_ARM, control_arm), unique(sides$arm))
   if (length(missing)) {
     message("--- no longitudinal-only difference-in-differences against ", control_arm, ": no jm_lme_check_* divergence for ",
@@ -242,7 +254,7 @@ lme_did_against <- function(control_arm) {
 }
 did_against <- function(control_arm) {
   both_arms <- comparison %>%
-    filter(!is.na(to_vent_sd), arm %in% c(VENTILATED_DID_ARM, control_arm)) %>%
+    filter(!is.na(to_vent_sd), arm %in% c(VENTILATED_DID_ARM, control_arm), !marker %in% CONDITIONAL_MARKERS) %>%
     mutate(side = if_else(cohort == "imv", "ventilated", "control"))
   if (!all(c("ventilated", "control") %in% both_arms$side)) return(tibble())
   both_arms %>%
@@ -261,7 +273,7 @@ did_against <- function(control_arm) {
          p_did_gt0 = pnorm(did_estimate / did_sd),
          both_converged = size_gate_ventilated & size_gate_control,
          control_to_ventilated_sd = to_vent_sd, ventilated_arm = VENTILATED_DID_ARM, control_arm = control_arm,
-         unit = "log marker per day per SD of log PFVC in the ventilated cohort", form = MOD_FORM, panel = h_suffix, site = base_site) %>%
+         unit = paste(marker_scale(marker), "per day per SD of log PFVC in the ventilated cohort"), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   select(-size_gate_ventilated, -size_gate_control) %>%
   left_join(lme_did_against(control_arm), by = c("marker", "adjustment"))
 }
@@ -281,7 +293,7 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
   write_csv(did, did_path)
-  message("--- difference-in-differences: ventilated at ICU admission minus no-support divergence (log marker per day per SD of log PFVC)")
+  message("--- difference-in-differences: ventilated at ICU admission minus no-support divergence (log marker, or log-odds for any_pressor, per day per SD of log PFVC)")
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                         lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
@@ -292,7 +304,7 @@ if (nrow(did)) {
   unlink(did_path)
 }
 
-message("--- divergence per day per SD of log PFVC (log marker units), adjusted")
+message("--- divergence per day per SD of log PFVC (log marker units; log-odds for any_pressor), adjusted")
 print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
                       transmute(marker, arm, n_patients, n_deaths, divergence = signif(divergence_estimate, 3),
                                 lo = signif(divergence_lo, 3), hi = signif(divergence_hi, 3),
@@ -314,9 +326,9 @@ forest <- ggplot(comparison, aes(divergence_estimate, fct_rev(arm), colour = arm
   scale_shape_manual(values = c(adjusted = 16, unadjusted = 1), name = NULL) +
   scale_linetype_manual(values = c(`TRUE` = 1, `FALSE` = 3), labels = c(`TRUE` = "size terms R-hat <= 1.1", `FALSE` = "size terms R-hat > 1.1"), name = NULL) +
   labs(title = "Divergence by lung size, arm by arm",
-       subtitle = paste("Change in the log marker per day, per SD of log predicted FVC (95% credible interval);",
+       subtitle = paste("Change in the log marker (log-odds for any vasopressor) per day, per SD of log predicted FVC (95% credible interval);",
                         "each arm on its own cohort's SD; the difference-in-differences table rescales the control"),
-       x = "log marker per day per SD", y = NULL) +
+       x = "log marker (log-odds for any vasopressor) per day per SD", y = NULL) +
   theme_minimal(base_size = 11) + theme(legend.position = "bottom")
 panels <- list(forest)
 if (nrow(movement)) {
