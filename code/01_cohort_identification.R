@@ -1,5 +1,36 @@
 # =============================================================================
 # Script 01: Cohort Identification
+# PBW vs PFVC Replication Using CLIF Data
+# =============================================================================
+# Builds the cohort from the site's CLIF tables and extracts every row-level input
+# the later scripts need, restricted to that cohort.
+#
+# Population (PBWPFVC_COHORT, environment variable only):
+#   imv (default; the paper's cohort)  adults (age >= 18) with an ICU stay and any
+#       recorded set tidal volume > 0 in the hospitalization, with no ventilator-mode
+#       requirement; one hospitalization per patient, the last that qualifies. The
+#       height, VT/PBW 6-8 and SF < 315 gates follow in script 03.
+#   nosupport (the negative control)   adults with an ICU stay and a room-air or
+#       nasal-cannula row before any advanced support (HFNC, NIPPV, CPAP, IMV);
+#       script 03 sets the index at ICU admission.
+#   niv (built on request only)         adults with an ICU stay whose first advanced
+#       support is HFNC, NIPPV or CPAP, with no invasive ventilation before it.
+# Separately, for every adult ICU patient, it classifies hypoxemia for the two
+# non-hypoxemic negative-control cohorts of script 04 (section 4j).
+#
+# Inputs:  config/config.json (utils/config.R); the CLIF tables patient,
+#   hospitalization, adt, respiratory_support, vitals, labs,
+#   medication_admin_continuous, patient_assessments, and, where the site has them,
+#   crrt_therapy, patient_procedures and hospital_diagnosis.
+# Outputs (config$output_dir, patient-level, never shared):
+#   cohort_hospitalization_ids.rds, resp_support_waterfall, cohort_vitals,
+#   cohort_labs, cohort_heights           -> cleaned by script 02
+#   cohort_demographics, cohort_weights, cohort_meds, cohort_assessments -> script 03
+#   nc_cohort                             -> script 03 (3k), the negative controls
+#   cohort_icu_stays                      -> script 03 (the no-support index), 29
+#   cohort_crrt, cohort_dialysis, cohort_esrd, crrt_available.rds,
+#   rrt_sources_available.rds             -> 21_biotrauma_panel.R, 29
+#   attrition_log_partial.csv (steps 1-3) -> script 03, which completes the log
 # =============================================================================
 rm(list= ls())
 library(tidyverse)
@@ -26,7 +57,7 @@ tables_path <- path.expand(tables_path)
 # Fail loudly if the data DIRECTORY itself is unreachable (e.g. the remote drive is not
 # mounted). Without this, a missing mount can surface as a confusing per-file "Missing
 # table" error -- or, worse, a stale/empty mount passes every check and the pipeline runs
-# silently on empty data (see the disconnected-drive incident).
+# silently on empty data.
 if (!dir.exists(tables_path)) {
   stop("CLIF data path does not exist: '", tables_path,
        "'. Is the remote drive mounted? Check config$tables_path.")
@@ -65,7 +96,7 @@ open_clif <- function(tbl) {
 # Category whitelists for the big event tables. Defined once and used BOTH for the
 # load-time predicate pushdown here AND the downstream extraction filters below.
 # Pre-filtering at load is safe: each big table is consumed only within its
-# whitelist. ph_arterial/ph_venous feed the target trial emulation [T5b] pH sensitivity.
+# whitelist. ph_arterial/ph_venous feed the daily worst-pH series of 10_panel_common.R.
 vitals_categories_needed     <- c("height_cm", "weight_kg", "spo2", "map")
 med_categories_needed        <- c("norepinephrine", "epinephrine", "vasopressin",
                                   "dopamine", "phenylephrine", "dobutamine")
@@ -110,8 +141,8 @@ clif_crrt <- if (crrt_available) {
 }
 
 # Intermittent dialysis and chronic dialysis dependence. Renal replacement of any
-# kind ends the creatinine trajectory and is its competing event (user, 2026-09-21),
-# and crrt_therapy covers only continuous therapy. Intermittent haemodialysis, SLED
+# kind ends the creatinine trajectory and is its competing event, and crrt_therapy
+# covers only continuous therapy. Intermittent haemodialysis, SLED
 # and other dialysis come from patient_procedures (the procedure's billed time is its
 # start); end-stage renal disease from hospital_diagnosis, and an ESRD patient is on
 # renal replacement before the index, so has no creatinine trajectory at all. Both
@@ -169,19 +200,15 @@ if (any(.core_counts == 0L)) {
 # Cohort filtering
 # =============================================================================
 
-# Pull the last recorded hospitalization where the patient received IMV with VC/AC in the ICU
-
-# Identify hospitalizations that received invasive ventilation with a recorded
-# set tidal volume.
+# Ventilated cohort: hospitalizations with any recorded set tidal volume > 0, in an
+# ICU; one per patient, the last such hospitalization.
 #
 # The original analysis (PBWvsFVC) imposed NO ventilator-mode requirement: a
 # patient was eligible if a *set* tidal volume was ever recorded (MIMIC itemid
 # 224684). We mirror that here using tidal_volume_set, rather than requiring
-# mode_category to map exactly to "assist control-volume control". In CLIF,
+# mode_category to map exactly to "assist control-volume control": in CLIF,
 # mode_category is recorded only at mode-change events (far sparser than the set
-# tidal volume) and depends on ETL-specific string mapping, so the strict mode
-# filter dropped many ventilated patients the original analysis retained. The
-# downstream VT/PBW 6-8 gate restricts to volume-targeted breaths, matching the
+# tidal volume) and depends on ETL-specific string mapping. The downstream VT/PBW 6-8 gate restricts to volume-targeted breaths, matching the
 # original's ccperkg 6-8 criterion.
 imv_ids <- clif_respiratory_support %>%
   mutate(tidal_volume_set_numeric = suppressWarnings(as.numeric(tidal_volume_set))) %>%
@@ -194,8 +221,8 @@ icu_ids <- clif_adt %>%
     distinct(hospitalization_id) %>%
     pull(hospitalization_id)
 
-# Never-intubated control (config$cohort == "niv"): hospitalizations whose FIRST
-# advanced respiratory support is HFNC / NIPPV / CPAP with no invasive-ventilation
+# niv cohort (config$cohort == "niv", built on request only; not a control):
+# hospitalizations whose FIRST advanced respiratory support is HFNC / NIPPV / CPAP with no invasive-ventilation
 # signal (device imv, or a set tidal volume) before it. Intubation later in the
 # stay does not exclude at entry; script 03 records it and the biotrauma suite
 # treats it as a competing event (escalation), like extubation in the analytic cohort.
@@ -220,10 +247,11 @@ cohort_rule <- switch(config$cohort,
   imv = "No invasive ventilation with set tidal volume",
   niv = "No HFNC / non-invasive ventilation as the first advanced support",
   nosupport = "No room-air / nasal-cannula period before any advanced support")
+attrition_steps <- attrition_steps_for(config$cohort)   # step labels (utils/attrition_log.R)
 
 cohort_patient_and_hospitalization_ids <- clif_hospitalization %>%
   filter(age_at_admission >= 18) %>% # Only adults
-  filter(hospitalization_id %in% cohort_ids) %>% # who received VC ventilation (or, for the control, HFNC/NIV first)
+  filter(hospitalization_id %in% cohort_ids) %>% # with a set tidal volume (or the nosupport / niv first-support rule)
   filter(hospitalization_id %in% icu_ids) %>% # in the ICU 
   arrange(desc(admission_dttm)) %>% # if multiple hospitalizations, we want the last admission
   distinct(patient_id, .keep_all = T) %>%
@@ -251,10 +279,10 @@ funnel <- funnel %>% filter(hospitalization_id %in% cohort_ids)
 n_imv <- n_distinct(funnel$patient_id)   # == length(eligible_patients)
 
 attrition <- attrition_init() %>%
-  attrition_add(ATTRITION_STEPS[1], n_adult) %>%
-  attrition_add(ATTRITION_STEPS[2], n_icu,
+  attrition_add(attrition_steps[1], n_adult) %>%
+  attrition_add(attrition_steps[2], n_icu,
                 exclusion_reason = "No ICU admission") %>%
-  attrition_add(ATTRITION_STEPS[3], n_imv, exclusion_reason = cohort_rule)
+  attrition_add(attrition_steps[3], n_imv, exclusion_reason = cohort_rule)
 
 message("Attrition (steps 1-3): adults=", n_adult, ", +ICU=", n_icu, ", +IMV=", n_imv)
 
@@ -305,7 +333,7 @@ message("Heights extracted: ", nrow(cohort_heights), " hospitalizations")
 # Extract weights (for vasopressor dose standardization to mcg/kg/min)
 # =============================================================================
 
-# Use mean recorded weight per hospitalization (sanity-bounded to 30-1100 kg).
+# Use mean recorded weight per hospitalization (weights outside 30-1100 kg dropped).
 # Weight is used downstream to convert norepinephrine doses reported in mcg/min
 # to mcg/kg/min. Patient-level median is used when no admission weight is
 # recorded, matching the height imputation pattern.
@@ -343,13 +371,9 @@ cohort_spo2 <- clif_vitals %>%
   mutate(vital_value = as.numeric(vital_value)) %>%
   select(hospitalization_id, recorded_dttm, vital_value) %>%
   rename(spo2_value = vital_value)
-  # SpO2 is NO LONGER capped at <= 97 here. The SF-validity bounds (80-97) live where the
-  # SF ratio is actually formed -- script 03 (filter >= 80 & <= 97 for the cross-sectional
-  # index SF) and the target trial emulation (SpO2 clamped to [80,97] for the daily worst SF). Capping here
-  # poisoned the SHARED cohort_vitals intermediate: well-oxygenated patient-days (SpO2
-  # always >= 98) lost ALL their SpO2 rows, so the target trial emulation's longitudinal panel read them as
-  # "no SpO2 charted" and dropped them. The QC outlier threshold (spo2 50-100) now governs
-  # the upper bound in cohort_vitals_clean; downstream SF filtering is unchanged.
+# Every SpO2 is kept here; only script 02's plausibility screen (50-100) applies. The
+# SF ratio's 80-97 bounds are applied where the ratio is formed (script 03, 3b), so a
+# patient-day with SpO2 always >= 98 still counts as charted in the daily panels.
 
 # =============================================================================
 # Extract MAP
@@ -372,9 +396,8 @@ cohort_vitals <- bind_rows(
 # Extract labs (PaO2, creatinine, bilirubin_total, platelets)
 # =============================================================================
 
-# lab_categories_needed (incl. ph_arterial/ph_venous for the target trial emulation [T5b]
-# sensitivity) is defined at load above and already pushed down at read time;
-# this filter is now a no-op safeguard on the in-memory frame.
+# lab_categories_needed is defined at load above and already pushed down at read
+# time; this filter repeats it on the in-memory frame.
 cohort_labs <- clif_labs %>%
   filter(hospitalization_id %in% eligible_hospitalizations,
          lab_category %in% lab_categories_needed) %>%
@@ -455,10 +478,10 @@ message("Mortality rate: ", round(mean(cohort_demographics$deceased) * 100, 1), 
 #
 # One row per patient (last adult ICU admission, as for the analytic cohort).
 # Hypoxemia is classified from every SpO2 in the hospitalization: each SpO2 is
-# joined to the most recent respiratory-support record within 4 h; FiO2 comes from
+# joined to the most recent respiratory-support record within FIO2_LOOKBACK_H (4 h); FiO2 comes from
 # fio2_set (fractions), from room-air device category (0.21), or from nasal-cannula
 # flow (0.21 + 0.03 x L/min, capped at 0.60); a SpO2 with no support record within
-# 4 h is taken as room air. Hypoxemic = any SF < 315 among SpO2 80-97 with a known
+# that window is taken as room air. Hypoxemic = any SF < 315 among SpO2 80-97 with a known
 # FiO2, or any SpO2 < 80. Patients with no SpO2 at all cannot be classified and are
 # dropped. This is deliberately lighter than the analytic cohort's waterfall (no
 # hourly scaffold), because it runs on every adult ICU hospitalization.
@@ -502,9 +525,9 @@ nc_spo2 <- clif_vitals %>%
   transmute(hospitalization_id, spo2_dttm = as.numeric(recorded_dttm), spo2)
 nc_fio2_dt <- as.data.table(nc_fio2); setkey(nc_fio2_dt, hospitalization_id, fio2_dttm)
 nc_spo2_dt <- as.data.table(nc_spo2); setkey(nc_spo2_dt, hospitalization_id, spo2_dttm)
-nc_sf <- nc_fio2_dt[nc_spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, fio2_dttm = spo2_dttm)] %>%
+nc_sf <- nc_fio2_dt[nc_spo2_dt, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, fio2_dttm = spo2_dttm)] %>%
   as_tibble() %>%
-  mutate(fio2_est = coalesce(fio2_est, 0.21),          # no support record within 4 h = room air
+  mutate(fio2_est = coalesce(fio2_est, 0.21),          # no support record in the look-back = room air
          sf = spo2 / fio2_est,
          hypox_obs = spo2 < 80 | (spo2 <= 97 & sf < 315)) %>%
   summarize(n_spo2 = n(), hypoxemic = any(hypox_obs), min_sf = min(sf), .by = hospitalization_id)
@@ -530,7 +553,7 @@ vent_spo2 <- cohort_spo2 %>%
   filter(spo2_t >= t_start, spo2_t <= t_end) %>%
   select(hospitalization_id, spo2_t, spo2) %>% as.data.table()
 setkey(vent_spo2, hospitalization_id, spo2_t)
-vent_spo2 <- imv_fio2_dt[vent_spo2, roll = 4 * 3600, on = .(hospitalization_id, fio2_t = spo2_t)] %>%
+vent_spo2 <- imv_fio2_dt[vent_spo2, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, fio2_t = spo2_t)] %>%
   as_tibble() %>%
   summarize(spo2_hypox = any(spo2 < 80 | (spo2 <= 97 & !is.na(fio2_set) & spo2 / fio2_set < 315)),
             .by = hospitalization_id)
@@ -542,7 +565,7 @@ vent_pao2 <- clif_labs %>%
   filter(pao2_t >= t_start, pao2_t <= t_end) %>%
   select(hospitalization_id, pao2_t, pao2) %>% as.data.table()
 setkey(vent_pao2, hospitalization_id, pao2_t)
-vent_pao2 <- imv_fio2_dt[vent_pao2, roll = 4 * 3600, on = .(hospitalization_id, fio2_t = pao2_t)] %>%
+vent_pao2 <- imv_fio2_dt[vent_pao2, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, fio2_t = pao2_t)] %>%
   as_tibble() %>%
   summarize(pf_hypox = any(!is.na(fio2_set) & pao2 / fio2_set < 300), .by = hospitalization_id)
 vent_hypox <- imv_span %>%

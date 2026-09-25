@@ -1,8 +1,4 @@
-# Load necessary libraries
-if (!requireNamespace("jsonlite", quietly = TRUE)) {
-  install.packages("jsonlite")
-}
-
+# Packages come from the project library that uvr installs (uvr.lock).
 library(jsonlite)
 
 # Load the site configuration from config/config.json, then apply any overrides
@@ -35,16 +31,16 @@ load_config <- function() {
   }
   if (!config$file_type %in% c("parquet", "csv", "fst"))
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
-  # Cohort (PBWPFVC_COHORT), the strain gradient of the biotrauma suite:
-  #   "imv"        the analytic cohort: invasive ventilation with a set tidal volume
-  #   "niv"        the middle arm: first advanced support is high-flow nasal cannula
-  #                or non-invasive ventilation (spontaneous volumes, titrated
-  #                pressures; a weaker, less controlled strain), no invasive
-  #                ventilation before it; intubation later is a competing event
+  # Cohort (PBWPFVC_COHORT; environment variable only):
+  #   "imv"        default, the paper's cohort: invasive ventilation with a set tidal volume
   #   "nosupport"  the negative control: room air or nasal cannula only, no
   #                advanced support before the index nor in the 24 h after it, so
   #                strain per lung size cannot act; escalation to any support
   #                later is a competing event
+  #   "niv"        built on request only, not part of the paper: first advanced
+  #                support is high-flow nasal cannula or non-invasive ventilation,
+  #                with no invasive ventilation before it; intubation later is a
+  #                competing event
   config$cohort <- Sys.getenv("PBWPFVC_COHORT", "imv")
   if (!config$cohort %in% c("imv", "niv", "nosupport"))
     stop("PBWPFVC_COHORT must be imv, niv or nosupport; got '", config$cohort, "'")
@@ -59,8 +55,8 @@ load_config <- function() {
   #     final/controls/                  the control cohorts' aggregates, all in one folder
   # A control's FILE NAMES carry {site}_{cohort} (e.g. jm_estimates_pfvc_7d_MIMIC_nosupport.csv),
   # so config$site_name is that tag and config$base_site is the site itself. Setting
-  # PBWPFVC_COHORT is enough; a PBWPFVC_SITE_NAME that already ends in _{cohort} (the
-  # older convention) is read the same way. The pooling scripts list final/ without
+  # PBWPFVC_COHORT is enough; a PBWPFVC_SITE_NAME that already ends in _{cohort} is
+  # read the same way (the suffix is not doubled). The pooling scripts list final/ without
   # recursing, so final/controls/ never leaks into a cross-site pool of the main cohort.
   config$base_site <- config$site_name
   if (config$cohort != "imv") {
@@ -85,15 +81,19 @@ final_dir_for <- function(block) {
   dir.create(block_dir, recursive = TRUE, showWarnings = FALSE)
   block_dir
 }
-# device categories (CLIF mCIDE, lower case): the middle arm's, the control's, and
+# device categories (CLIF mCIDE, lower case): the niv cohort's, the control's, and
 # everything that counts as advanced support (escalation)
 NIV_DEVICES       <- c("high flow nc", "nippv", "cpap")
 NOSUPPORT_DEVICES <- c("room air", "nasal cannula")
 SUPPORT_DEVICES   <- c("imv", NIV_DEVICES)
+# An SpO2 or PaO2 is paired with the most recent FiO2 recorded up to this many hours
+# before it (scripts 01 and 03). The window is short so that the ratio reflects the
+# support in force early in ventilation, not a setting charted hours earlier.
+FIO2_LOOKBACK_H <- 4
 # FiO2 on room air and nasal cannula, for the no-support control only (the
 # analytic cohort's SF uses documented FiO2): 0.21 on room air, 0.21 + 0.03 per
-# L/min on a cannula capped at 0.60, the rule script 01 uses for its mortality
-# controls. Documented fio2_set is kept where present.
+# L/min on a cannula capped at 0.60, the rule script 01 uses for its negative-control
+# cohorts. Documented fio2_set is kept where present.
 estimate_fio2_nosupport <- function(df) {
   if (config$cohort != "nosupport") return(df)
   dev <- tolower(df$device_category)
@@ -106,7 +106,7 @@ estimate_fio2_nosupport <- function(df) {
   df
 }
 
-# Small cells: no script masks or suppresses a count (2026-09-24). Every table in final/
+# Small cells: no script masks or suppresses a count. Every table in final/
 # carries raw counts; masking, whether censoring small cells or a deterministic scheme
 # agreed with CLIF, is a separate step applied to final/ before a site shares it.
 

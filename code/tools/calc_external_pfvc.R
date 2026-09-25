@@ -1,14 +1,15 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# calc_external_pfvc.R -- GLI-2012 PFVC + FVC_age25 for an external trial table (e.g. ARMA),
-#                         by study arm, on the SAME scale as the project TTE cohort (script 03).
+# calc_external_pfvc.R -- GLI-2012 PFVC, PFVC at age 25 and Devine PBW for an external trial
+#                         table (e.g. ARMA), by study arm, on the same scale as script 03.
 # =============================================================================
-# Purpose: anchor the TTE strain ceiling to a RANDOMIZED benchmark. Given a trial's individual
-# data (age, sex, race, height, study arm), compute each patient's predicted FVC (race-specific
-# GLI-2012, actual age) and FVC_age25 (age pinned to 25 = the structural-only normalizer), then
-# report mean + 25th/50th/75th percentiles per arm. Mirrors script 03's PFVC computation EXACTLY
-# (rspiro::pred_GLI; race -> GLI ethnicity 1/2/5; height in cm; valid ages 3-95) so the values are
-# directly comparable to the cohort's pfvc / pfvc_age25 and the TTE strain ceilings.
+# Given a trial's individual data (age, sex, race, height, study arm), computes each patient's
+# predicted FVC (race-specific GLI-2012 at the actual age, pfvc), predicted FVC at age 25
+# (pfvc_age25: GLI's height, sex and race scaling without its age decline) and Devine PBW, and
+# reports the mean and 25th/50th/75th percentiles per arm. With a delivered tidal volume it also
+# reports VT/PBW, VT/PFVC and VT/PFVC at age 25 per arm. The computation mirrors script 03
+# (rspiro::pred_GLI; race -> GLI ethnicity 1/2/5; height in cm; valid ages 3-95), so the values
+# are directly comparable to the cohort's pfvc, pfvc_age25, pbw, vtpbw and vtpfvc.
 #
 # Input CSV columns (case-insensitive; common synonyms auto-detected):
 #   age    years
@@ -17,13 +18,10 @@
 #   height cm   (inches / metres auto-detected & converted, with a printed note)
 #   arm    any label (e.g. "6 mL/kg", "12 mL/kg")
 #   tidal_volume  OPTIONAL delivered VT (mL or L auto-detected). If present, also reports the
-#                 actual delivered strain per arm: VT/PBW (mL/kg), VT/PFVC (%), VT/FVC_age25 (%).
+#                 delivered strain per arm: VT/PBW (mL/kg), VT/PFVC (%), VT/PFVC at age 25 (%).
 # Usage:  uvr run code/tools/calc_external_pfvc.R <input.csv> [output.csv]
 #
-# PBW (Devine) is reported per arm. With delivered VT, VT/PFVC and VT/FVC_age25 are the strain
-# each arm actually received -- directly comparable to the TTE ceilings (C_LOW=11, C_HIGH=16),
-# anchoring them to ARMA's randomized 6-vs-12 mL/kg contrast on BOTH normalizer scales.
-# Every assumption (column match, race mapping, height + VT units, dropped rows) is PRINTED for audit.
+# Every assumption (column match, race mapping, height and VT units, dropped rows) is printed for audit.
 # =============================================================================
 suppressPackageStartupMessages({ library(tidyverse); library(rspiro) })
 args <- commandArgs(trailingOnly = TRUE)
@@ -89,7 +87,7 @@ if (sum(!keep) > 0)
 df <- df[keep, ]
 stopifnot(nrow(df) > 0)
 
-# GLI PFVC (actual age) + FVC_age25 (age=25), Devine PBW -- identical to script 03
+# GLI PFVC (actual age) and pfvc_age25 (age 25), Devine PBW -- identical to script 03
 df <- df %>% mutate(
   pfvc       = pred_GLI(age = age,          height = height_cm / 100, gender = gender, ethnicity = ethnicity, param = "FVC"),
   pfvc_age25 = pred_GLI(age = rep(25, n()), height = height_cm / 100, gender = gender, ethnicity = ethnicity, param = "FVC"),
@@ -106,7 +104,7 @@ if (!is.na(c_vt) && any(is.finite(df$vt))) {
   cat(sprintf("Tidal volume unit detected: %s (median %.1f -> %.0f mL)\n", vunit, med_v, median(df$vt_ml, na.rm = TRUE)))
   df <- df %>% mutate(vtpbw        = vt_ml / pbw,                 # mL/kg PBW (sanity: ~6 / ~12 by arm)
                       vtpfvc       = vt_ml / pfvc * 0.1,          # % strain, PFVC scale (engine units)
-                      vtpfvc_age25 = vt_ml / pfvc_age25 * 0.1)    # % strain, FVC_age25 scale
+                      vtpfvc_age25 = vt_ml / pfvc_age25 * 0.1)    # % strain, pfvc_age25 scale
   metrics <- c(metrics, "vtpbw", "vtpfvc", "vtpfvc_age25")
 }
 
@@ -120,13 +118,13 @@ parts <- c(unname(lapply(split(df, df$arm), function(d) summ_one(d, d$arm[1]))),
 out <- bind_rows(parts) %>% mutate(across(c(mean, p25, p50, p75), ~round(., 3)))
 write_csv(out, out_path)
 
-cat("\n=== Predicted FVC / FVC_age25 / PBW by study arm (mean + quartiles, litres / kg) ===\n")
+cat("\n=== pfvc / pfvc_age25 / PBW by study arm (mean + quartiles, litres / kg) ===\n")
 print(as.data.frame(out), row.names = FALSE)
-cat("\nBy randomization PFVC/FVC_age25/PBW should be ~equal across arms (balance check).\n")
+cat("\nBy randomization pfvc / pfvc_age25 / PBW should be about equal across arms (balance check).\n")
 if ("vtpfvc" %in% metrics) {
   cat("SANITY: vtpbw should be ~6 (low arm) and ~12 (high arm). vtpfvc / vtpfvc_age25 are the\n",
-      "delivered strain on each ceiling scale -- directly comparable to the TTE C_LOW/C_HIGH (11/16).\n")
+      "delivered strain on each scale, comparable to the cohort's vtpfvc (script 03).\n")
 } else {
-  cat("No tidal-volume column found -- send delivered VT to also get VT/PFVC & VT/FVC_age25 strain per arm.\n")
+  cat("No tidal-volume column found -- send delivered VT to also get VT/PFVC and VT/PFVC at age 25 per arm.\n")
 }
 message("Wrote ", out_path)

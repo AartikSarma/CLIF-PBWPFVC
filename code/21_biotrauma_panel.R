@@ -6,7 +6,7 @@
 # Builds the two tables the biotrauma joint models (22_biotrauma_fit.R) consume,
 # from the shared daily panel of 10_panel_common.R:
 #
-#   jm_long_{48h|72h|24h|7d}.parquet  one row per patient-period (index period 0
+#   jm_long_{tag}.parquet  one row per patient-period (index period 0
 #                          to the horizon) with the organ-injury markers observed
 #                          in that period, the previous period's strain and
 #                          confounders, and the patient's baseline covariates
@@ -24,26 +24,28 @@
 # The tag is set by 20_biotrauma_grid.R (PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON_H);
 # panels for different horizons sit side by side.
 #
-# Design (docs/joint_model_plan_2026-09.md, sections 3 and 4):
-#   * every index-IMV patient enters at day 0; no survival-based restriction, and
-#     no structural-positivity exclusion
-#   * the exposure is the PREVIOUS day's median VT/PBW (the clinician's dose) as a
-#     deviation from the patient's mean over the course, taken by joining on
-#     vent_day - 1 so a missing day gives a missing lag rather than a two-day-old
-#     one; PBW/PFVC discordance (log, centred) is the effect modifier; VT/PFVC,
-#     its running mean and the count of days above 11% are carried for the
-#     sensitivity forms
+# Design:
+#   * every patient in the cohort (the ventilated cohort or a control) enters at
+#     day 0; no survival-based restriction
+#   * the size term is log PFVC (the survival table carries it, per SD and in its
+#     GLI channel pieces); the fit enters it as a level and as a divergence in day
+#   * in the ventilated cohort the clinician's dose is the PREVIOUS day's median
+#     VT/PBW, split into the patient's mean over the window and the day's deviation
+#     from it; the lag is taken by joining on vent_day - 1, so a missing day gives
+#     a missing lag rather than a two-day-old one. VT/PFVC, its running mean and
+#     the count of days above STRAIN_CEILING are carried for the other model forms
 #   * markers on the day of observation: creatinine (daily max), platelets (daily
 #     min), bilirubin (daily max), SF ratio (daily worst), driving pressure (daily
-#     max, plateau-measured days only), NE-equivalent dose (daily peak)
-#   * creatinine is censored at the first CRRT record: days on or after RRT start
-#     are set to missing, and a patient already on CRRT at the index has no
-#     creatinine trajectory at all
+#     max, plateau-measured days only), NE-equivalent dose (daily peak), and the
+#     oxygenation indices OSI and OI (daily worst)
+#   * creatinine is censored at renal replacement: the first CRRT record or
+#     dialysis procedure; ESRD patients from day 0, so they have no creatinine
+#     trajectory at all
 #   * rows are truncated at the event day, as a joint model requires
 #
-# Horizon: PBWPFVC_JM_HORIZON days (default 7, figure 4's). The shared
-# panel is built with the TTE's 28-day death window so death_day and the
-# extubation day are identical objects in both analyses.
+# Horizon: PBWPFVC_JM_HORIZON days (default 7, figure 4's). The shared panel of
+# 10_panel_common.R is built with a 28-day death window and 28 days of support
+# records; the joint-model horizon is cut from it.
 #
 # Usage: uvr run code/21_biotrauma_panel.R
 # =============================================================================
@@ -62,11 +64,10 @@ output_dir <- config$output_dir
 final_dir  <- final_dir_for("injury")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
-# --- shared-panel contract (identical windows to the TTE, so the event objects match)
+# --- shared-panel contract (10_panel_common.R): a 28-day death window, days 0-27
 HORIZON      <- 28L
 MAX_VENT_DAY <- 27L
 is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synthetic_clif, synthetic_clif_b, ...)
-PANEL_NORM   <- "pfvc"          # the joint models always normalize to GLI PFVC
 source(here("code", "10_panel_common.R"))
 
 # --- time grid. Figure 4 (the default) is "daily": one row per ventilator day over
@@ -75,7 +76,9 @@ source(here("code", "10_panel_common.R"))
 # Both grids share the 22_biotrauma_fit.R / _report.R code through the `period`
 # index and the numeric time `vent_day` (days).
 source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP_H, STEP, JM_HORIZON, N_PERIODS, h_suffix
-STRAIN_CEILING <- 11   # VT/PFVC % above which a period counts toward the cumulative-strain exposure
+# VT/PFVC (% of predicted FVC) above which a period counts toward the cumulative-strain
+# exposure: 11% is about the 75th percentile of VT/PFVC in the ARMA low tidal volume arm
+STRAIN_CEILING <- 11
 message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " days (",
         N_PERIODS, " periods), site ", site_name, " ===")
 
@@ -88,36 +91,39 @@ message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " da
 # OSI = FiO2(%) x mean airway pressure / SpO2      (the saturation analogue, dense)
 #     = 100 x mean airway pressure / SF, exactly, since SF = SpO2 / FiO2 as a fraction
 # Higher is worse for both. Each index is computed AT A MEASUREMENT from values taken
-# at the same time (user, 2026-09-21: an index whose numerator and denominator come
-# from different hours is uninterpretable):
-#   OSI at each SpO2: SpO2 clamped to 80-97 as for SF, FiO2 from the last 4 h (as for
-#                     SF), mean airway pressure the nearest RECORDED value within
-#                     OXY_MATCH_H hours either side (never forward-filled)
-#   OI at each PaO2:  FiO2 from the last 4 h, mean airway pressure as above
+# at the same time, because an index whose numerator and denominator come from
+# different hours is uninterpretable:
+#   OSI at each SpO2: SpO2 clamped to 80-97 as for SF, FiO2 from the last
+#                     FIO2_LOOKBACK_H hours (as for SF), mean airway pressure the
+#                     nearest RECORDED value within OXY_MATCH_H hours either side
+#                     (never forward-filled)
+#   OI at each PaO2:  FiO2 from the last FIO2_LOOKBACK_H hours, mean airway pressure as above
 # and a period keeps its WORST (highest) index. A measurement with no mean airway
 # pressure within the window has no index, so coverage is the thing to read first.
 #
-# CAUTION, and it is the reason OI was parked in the first place: mean airway
-# pressure is a ventilator setting that the exposure moves arithmetically. A
+# CAUTION: mean airway pressure is a ventilator setting that the exposure moves
+# arithmetically. A
 # bigger tidal volume at the same PEEP and compliance raises mean airway
 # pressure, so OI can worsen with VT/PFVC through its own numerator, with
 # nothing happening in the lung. Read OI beside its components (this script
 # writes the mean airway pressure by day), and treat PEEP-per-PFVC as the
 # mediator it is, not as a nuisance.
 OXY_MATCH_H <- as.numeric(Sys.getenv("PBWPFVC_OXY_MATCH_H", "1"))
+FIO2_PERCENT_THRESHOLD <- 1.5   # fio2_set values above are percent, below are fractions
+FIO2_LOOKBACK_H        <- 4     # hours an FiO2 is carried forward to a measurement (chosen to capture early ventilation)
 maw_near <- copy(maw_dt)[, t_maw := t]                     # keeps the matched reading's own time
 near_maw <- function(pts) {                                # nearest mean airway pressure, within the window
   as_tibble(maw_near[pts, roll = "nearest", on = .(hospitalization_id, t)]) %>%
     filter(!is.na(map_aw), abs(t - t_maw) <= OXY_MATCH_H * 3600)
 }
-osi_pts <- fio2_dt[spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
+osi_pts <- fio2_dt[spo2_dt, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
   near_maw() %>%
-  mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set),
+  mutate(fio2_frac = if_else(fio2_set > FIO2_PERCENT_THRESHOLD, fio2_set / 100, fio2_set),
          osi = 100 * map_aw / (spo2_clamped / fio2_frac)) %>%
   filter(is.finite(osi), osi > 0) %>% select(hospitalization_id, t, osi)
-oi_pts <- fio2_dt[copy(pao2_dt), roll = 4 * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
+oi_pts <- fio2_dt[copy(pao2_dt), roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, t)][!is.na(fio2_set)] %>%
   near_maw() %>%
-  mutate(fio2_pct = if_else(fio2_set > 1.5, fio2_set, fio2_set * 100), oi = fio2_pct * map_aw / pao2) %>%
+  mutate(fio2_pct = if_else(fio2_set > FIO2_PERCENT_THRESHOLD, fio2_set, fio2_set * 100), oi = fio2_pct * map_aw / pao2) %>%
   filter(is.finite(oi), oi > 0) %>% select(hospitalization_id, t, oi)
 message("Oxygenation indices from matched measurements (mean airway pressure within ", OXY_MATCH_H, " h): ",
         nrow(osi_pts), " OSI and ", nrow(oi_pts), " OI values")
@@ -160,11 +166,11 @@ if (JM_GRID == "daily") {
     filter(vital_category == "map") %>% inner_join(b0, by = "hospitalization_id") %>%
     mutate(period = per(recorded_dttm, t0)) %>% filter(period >= 0L, period <= MAXP) %>%
     group_by(hospitalization_id, period) %>% summarise(map = median(vital_value, na.rm = TRUE), .groups = "drop")
-  # SF per SpO2 measurement (FiO2 rolled back within 4 h, SpO2 clamped to 80-97, as in the daily panel), worst per period
+  # SF per SpO2 measurement (FiO2 rolled back within FIO2_LOOKBACK_H, SpO2 clamped to 80-97, as in the daily panel), worst per period
   t0_num <- b0 %>% transmute(hospitalization_id, t0n = as.numeric(t0))
-  sf_p <- fio2_dt[spo2_dt, roll = 4 * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
+  sf_p <- fio2_dt[spo2_dt, roll = FIO2_LOOKBACK_H * 3600, on = .(hospitalization_id, t)] %>% as_tibble() %>%
     filter(!is.na(fio2_set)) %>%
-    mutate(fio2_frac = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set), sf_pt = spo2_clamped / fio2_frac) %>%
+    mutate(fio2_frac = if_else(fio2_set > FIO2_PERCENT_THRESHOLD, fio2_set / 100, fio2_set), sf_pt = spo2_clamped / fio2_frac) %>%
     filter(is.finite(sf_pt)) %>% inner_join(t0_num, by = "hospitalization_id") %>%
     mutate(period = as.integer(floor((t - t0n) / 3600 / STEP_H))) %>% filter(period >= 0L, period <= MAXP) %>%
     group_by(hospitalization_id, period) %>% summarise(sf = min(sf_pt), .groups = "drop")
@@ -238,7 +244,7 @@ death_time <- base %>%
 # the marker analogue of the simulated survival in 10_panel_common.R, multiplies
 # each marker by a patient-specific log-normal intercept and slope so the
 # machinery can be exercised end to end. It changes nothing about which patients
-# or days are present and never runs at a real site. Requested 2026-09-13.
+# or days are present and never runs at a real site.
 if (is_synthetic) {
   message("*** SYNTHETIC SITE: adding a patient-level random intercept and slope to every marker (plumbing only). ***")
   marker_sd <- c(creatinine = 0.6, platelets = 0.4, bilirubin = 0.6, sf = 0.2, dp = 0.15,
@@ -272,7 +278,7 @@ if (is_synthetic) {
 # =============================================================================
 # The markers are modelled on the log scale. The lab outlier thresholds (script
 # 02) admit zero for creatinine, platelets and bilirubin, and a zero is charted
-# at real sites (MIMIC has creatinine rows of 0), which is not a measurement and
+# at real sites (some chart creatinine rows of 0), which is not a measurement and
 # is -Inf on the log scale: nlme then fails with "NA/NaN/Inf in foreign function
 # call". Such values are set to missing here and counted per marker in the
 # summary table. NE-equivalent dose keeps its true zeros (the fit adds an offset).
@@ -290,12 +296,12 @@ if (any(nonpositive_counts > 0))
           paste(sprintf("%s %d", names(nonpositive_counts), nonpositive_counts), collapse = ", "))
 
 # =============================================================================
-# 13a. RRT start day: the first CRRT record or dialysis procedure (script 01)
+# 21a. RRT start day: the first CRRT record or dialysis procedure (script 01)
 # =============================================================================
 # Renal replacement of any kind, continuous or intermittent, ends the creatinine
 # trajectory and is its competing event. A patient with end-stage renal disease is
 # on renal replacement before the index: censored at day 0, so no creatinine
-# trajectory at all (user, 2026-09-21).
+# trajectory at all.
 crrt_available <- readRDS(file.path(output_dir, "crrt_available.rds"))
 rrt_sources    <- readRDS(file.path(output_dir, "rrt_sources_available.rds"))
 if (!crrt_available)
@@ -323,21 +329,20 @@ message("RRT (CRRT or dialysis procedure, or ESRD): ", nrow(rrt), " patients; ",
 rrt <- rrt %>% select(-esrd)
 
 # =============================================================================
-# 13b. Survival table: death vs extubation within JM_HORIZON, tie = death
+# 21b. Survival table: death vs extubation within JM_HORIZON, tie = death
 # =============================================================================
 # death_day (index-anchored, all-cause, NA past 28 days; synthetic site simulated)
 # and imv_extub_day (last IMV day + 1) come from the shared panel. Censoring at
-# the horizon otherwise. JMbayes2 needs strictly positive times, so an event on
-# day 0 is placed at day 1 (the TTE's pmax(., 1) convention).
+# the horizon otherwise. JMbayes2 needs strictly positive times, so an event at
+# time 0 is placed at the end of the first period (pmax(., STEP)).
 # Marker baselines are the FIRST OBSERVED daily value of each marker within the
 # horizon (the same reduction as the trajectory: creatinine and bilirubin max,
 # platelets min, SF worst, DP max, NE-equivalent peak), with the day it was
 # observed recorded as {marker}_0_day; the trajectory for that marker starts the
 # day after. Day 0 is the baseline for everyone with a day-0 value (SF, DP and
 # the NE-equivalent dose always; creatinine for most). Labs are not drawn every
-# day, so requiring a day-0 value cost a third of the creatinine cohort at MIMIC
-# (3,427 of 5,382 patients with two or more observations); the summary table
-# reports how many baselines fall on day 0 and how many later. The
+# day, so requiring a day-0 value would drop a large share of the lab cohorts; the
+# summary table reports how many baselines fall on day 0 and how many later. The
 # cross-sectional table's index-timepoint labs are not used: they are matched
 # inside a narrow window, missing for most patients, and carry no bilirubin.
 marker_cols <- c(creatinine = "creatinine", platelets = "platelets", bilirubin = "bilirubin",
@@ -443,10 +448,10 @@ message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 
         ", ", COMPETING_EVENT, "s ", sum(surv$event == 2L), ", censored ", sum(surv$event == 0L))
 
 # =============================================================================
-# 13c. Longitudinal table: markers by day with the previous day's exposure
+# 21c. Longitudinal table: markers by day with the previous day's exposure
 # =============================================================================
-# One row per patient-day with a set tidal volume (the `daily` grid), day 0 to
-# JM_HORIZON. The previous day's values are attached by joining on vent_day - 1,
+# One row per patient-day on the panel spine (a set tidal volume in the ventilated
+# cohort; a support record with FiO2 in a control), day 0 to JM_HORIZON. The previous day's values are attached by joining on vent_day - 1,
 # so a gap in charting yields a missing lag (reported below) instead of a stale one.
 prev <- pf %>%
   transmute(hospitalization_id, period = period + 1L,
@@ -457,8 +462,8 @@ prev <- pf %>%
 # dose history without growing with time. cum_days_above (days above 11%) is the
 # sensitivity form: for a patient above the ceiling throughout it equals the
 # ventilator day exactly, so it is an interaction of day with a patient indicator
-# and competes with the day spline and the random slope (R-hat 3 to 4 on it in
-# every fit, synthetic and MIMIC).
+# and competes with the day spline and the random slope, which stops the sampler
+# converging.
 cum_above <- pf %>%
   group_by(hospitalization_id) %>% arrange(period, .by_group = TRUE) %>%
   transmute(hospitalization_id, period = period + 1L,
@@ -476,7 +481,10 @@ long <- pf %>%
   mutate(cum_days_above = if_else(period == 0L, 0, cum_days_above)) %>%   # mean_prior_vtpfvc stays NA at period 0
   inner_join(surv %>% select(hospitalization_id, event_day, rrt_period, rrt_before_index,
                              vtpfvc_pt_mean, vtpbw_pt_mean, ends_with("_0_day")),
-             by = "hospitalization_id") %>%
+             by = "hospitalization_id")
+message("Longitudinal rows within the horizon: ", nrow(long), " (", n_distinct(long$hospitalization_id),
+        " patients); ", sum(long$vent_day > long$event_day), " rows after the patient's event day dropped")
+long <- long %>%
   filter(vent_day <= event_day) %>%
   mutate(
     # each marker's trajectory starts the period after its baseline observation
@@ -503,7 +511,7 @@ message("Longitudinal table: ", nrow(long), " patient-periods, ",
         sum(long$creat_censored_rrt))
 
 # =============================================================================
-# 13d. Aggregate summary (deliverable) and persistence
+# 21d. Aggregate summary (deliverable) and persistence
 # =============================================================================
 markers <- c("creatinine", "platelets", "bilirubin", "sf", "dp", "ne_equiv_peak", "oi", "osi")
 per_marker <- map_dfr(markers, function(m) {
@@ -545,8 +553,7 @@ write_csv(summary_tbl, file.path(final_dir, paste0("jm_panel_summary_", h_suffix
 write_parquet(long, file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
 write_parquet(surv, file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
 saveRDS(list(grid = JM_GRID, step_hours = STEP_H, step = STEP, horizon = JM_HORIZON, n_periods = N_PERIODS,
-             h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING,
-             panel_cohort_tag = panel_cohort_tag, site_name = site_name,
+             h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING, site_name = site_name,
              n_patients = nrow(surv), n_days = nrow(long), built_at = as.character(Sys.time())),
         file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
 message("21_biotrauma_panel complete (", h_suffix, "): tables in ", output_dir,

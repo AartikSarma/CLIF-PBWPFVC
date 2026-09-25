@@ -20,22 +20,27 @@
 #                              the index day ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
-# These are the arms 29_run_figure4.R fits. Tables from designs it no longer runs
-# (severity floors, the unstandardised control, the noninvasive cohort, which is not a
-# control) are ignored even when present on disk, so an old run cannot add an arm.
+# These are the arms 29_run_figure4.R fits. Only these arm tags are read (arm_pattern
+# below); any other tables in the folders are ignored.
+#
+# Both differences-in-differences are written and pooled: the hypoxemic one (SF < 315)
+# isolates ventilation, the all-patients one is the larger sample.
+#
+# Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
 #
 # A control arm is informative only if its marker MOVES. The movement panel (mean
 # change from baseline by day, from jm_movement_*) is therefore read before the
 # divergence: no movement, no possible divergence, and the arm cannot adjudicate.
 #
 # Arms are discovered from the files present: the ventilated cohort's tables in
-# final/injury/, the control cohorts' in final/controls/ (file names tagged
-# {site}_nosupport, {site}_niv); each restriction carries its own tag. Run with
+# final/injury/, the control cohort's in final/controls/ (file names tagged
+# {site}_nosupport); each restriction carries its own tag. Run with
 # PBWPFVC_COHORT unset.
 #
 # Outputs, in final/injury/:
-#   jm_control_comparison_{form}_{tag}_{site}.csv
-#   jm_control_comparison_{form}_{tag}_{site}.pdf
+#   jm_control_comparison_{form}_{h}_{site}.csv    each arm's divergence, per SD of log
+#                                                  PFVC in that arm's own cohort
+#   jm_control_comparison_{form}_{h}_{site}.pdf
 #   jm_control_did_{form}_{h}_{site}.csv            ventilated minus the control
 #   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  ventilated minus the hypoxemic control
 #
@@ -55,7 +60,7 @@ base_site <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 stopifnot(MOD_FORM %in% c("pfvc", "channels"))
-RHAT_GATE <- 1.1
+RHAT_GATE <- 1.1   # the standard convergence threshold
 final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
@@ -119,7 +124,7 @@ size_terms <- estimates %>%
   pivot_wider(names_from = quantity, values_from = c(estimate, sd, lo, hi, rhat), names_glue = "{quantity}_{.value}")
 # Movement is summarised over ALL days, not the last one: platelets fall and recover
 # inside a week, and a marker that moved and came back would read as still on day 7.
-last_movement <- if (nrow(movement)) movement %>%
+movement_summary <- if (nrow(movement)) movement %>%
   # a yes/no marker (any vasopressor) has no change from baseline: its rows are empty
   filter(model == "main", is.finite(mean_change)) %>%
   group_by(arm, marker, adjustment) %>% arrange(day, .by_group = TRUE) %>%
@@ -135,9 +140,11 @@ comparison <- size_terms %>%
               select(arm, marker, adjustment, n_patients, n_deaths, n_competing = n_extubations, status,
                      hazard_rhat, any_of(c("sev_center", "sev_anchor", "sf_band", "n_iter"))),
             by = c("arm", "marker", "adjustment")) %>%
-  left_join(last_movement, by = c("arm", "marker", "adjustment")) %>%
+  left_join(movement_summary, by = c("arm", "marker", "adjustment")) %>%
   mutate(divergence_converged = divergence_rhat <= RHAT_GATE,
-         arm = factor(arm, levels = arms$arm), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
+         arm = factor(arm, levels = arms$arm),
+         unit = "log marker per day per SD of log PFVC in this arm's cohort",
+         form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
 out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
 write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
@@ -170,7 +177,7 @@ if (is.na(to_vent_sd)) {
 }
 # The same difference against any control arm: the primary one, and the hypoxemic
 # control (index-day SF < 315, the ventilated cohort's own gate; PBWPFVC_JM_SF_BAND=0,315
-# on the control fit, 2026-09-23). The ventilated cohort is hypoxemic by construction and
+# on the control fit). The ventilated cohort is hypoxemic by construction and
 # the whole control mostly is not, so the primary difference also contrasts hypoxemia;
 # against the hypoxemic control the arms differ in ventilation alone. Both use the
 # control's whole-panel SD of log PFVC (a restricted fit keeps it, 22_biotrauma_fit.R).
@@ -243,7 +250,8 @@ forest <- ggplot(comparison, aes(divergence_estimate, fct_rev(arm), colour = arm
   scale_shape_manual(values = c(adjusted = 16, unadjusted = 1), name = NULL) +
   scale_linetype_manual(values = c(`TRUE` = 1, `FALSE` = 3), labels = c(`TRUE` = "R-hat <= 1.1", `FALSE` = "R-hat > 1.1"), name = NULL) +
   labs(title = "Divergence by lung size, arm by arm",
-       subtitle = "Change in the log marker per day, per SD of log predicted FVC (95% credible interval)",
+       subtitle = paste("Change in the log marker per day, per SD of log predicted FVC (95% credible interval);",
+                        "each arm on its own cohort's SD; the difference-in-differences table rescales the control"),
        x = "log marker per day per SD", y = NULL) +
   theme_minimal(base_size = 11) + theme(legend.position = "bottom")
 panels <- list(forest)

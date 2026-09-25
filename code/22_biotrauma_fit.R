@@ -31,32 +31,50 @@
 #   Markers: creatinine, platelets, bilirubin, sf, osi, pressor_dose, and others
 #   that the paper does not use.
 #
-# Model set per marker:
-#   main      full cohort, adjusted (age spline, sex, race) and unadjusted
-#   hetero    plateau-measured subset, adds baseline specific elastance
-#             (Ers x PFVC) x previous-day strain; adjusted only
-# Each marker's model excludes its OWN lag (the SF model drops lagged SF, the
-# NE-equivalent model drops the lagged pressor flag). Random-effects structure is
+# Model set per marker: the main model on the full cohort, adjusted (age spline,
+# sex, race) and unadjusted. Each marker's model excludes its OWN lag (the SF
+# model drops lagged SF, the NE-equivalent model drops the lagged pressor flag).
+# Random-effects structure is
 # fixed per marker in advance; a fit that fails is reported as failed, never
 # refit with a smaller model.
 #
-# Inputs:  intermediate/jm_long_{H}d.parquet, jm_surv_{H}d.parquet (21_biotrauma_panel.R)
-# Outputs: final/jm_estimates_{H}d_{site}.csv   every coefficient of every fit (poolable)
-#          final/jm_manifest_{H}d_{site}.csv    fit status, counts, R-hat gate
-#          intermediate/jm_fit_{marker}_{model}_{adj}_{H}d.rds   fit bundles
-#          (patient-level rows inside, so never in final/)
+# Inputs:  jm_long_{H}d.parquet, jm_surv_{H}d.parquet (21_biotrauma_panel.R, in the
+#          site's row-level output folder)
+# Outputs: final/jm_estimates_{tag}.csv   every coefficient of every fit (poolable)
+#          final/jm_manifest_{tag}.csv    per fit: status, counts at each entry step
+#                                         (n_rows_after_*, n_patients_after_*), the
+#                                         fitted formulas, R-hat by block
+#          final/jm_severity_anchor_*, jm_severity_anchor_mean_*, jm_scale_*
+#          jm_fit_*.rds and jm_result_*.rds beside the inputs: fit bundles with
+#          patient-level rows inside, so never in final/
 #
-# Environment knobs: PBWPFVC_JM_MODIFIER (pfvc; the other forms are not in the paper),
-#   PBWPFVC_JM_GRID (daily | 6h) with PBWPFVC_JM_HORIZON_H (48) or
-#   PBWPFVC_JM_HORIZON (7 days), PBWPFVC_JM_MARKERS (comma list),
-#   PBWPFVC_JM_MODELS (main; hetero is not in the paper), PBWPFVC_JM_BASELINE (free | offset; offset
-#   fixes the baseline coefficient at 1 = the log percent-change outcome, written
-#   with an offset_ prefix), PBWPFVC_JM_ITER / _BURNIN / _CHAINS (3500 / 500 / 3;
-#   lower them only for plumbing runs), PBWPFVC_CORES, PBWPFVC_JM_PILOT (0 skips
-#   the timing pilot), PBWPFVC_JM_HEARTBEAT (seconds between progress lines; 0 off).
-#   PBWPFVC_JM_SHAPE_ONLY=1 (pfvc form, daily grid): no joint models; the size
-#   divergence as a line and as a day spline, longitudinal submodel only (section
-#   13f0) -> final/jm_shape_{tag}.csv and .pdf.
+# Environment knobs (default first):
+#   PBWPFVC_JM_MODIFIER     pfvc | channels | disc | saturated | none | disc_level |
+#                           vtpfvc | pfvc_dose   form of the size term; figure 4 is pfvc,
+#                           the others are not in the paper
+#   PBWPFVC_JM_GRID         daily | 6h; PBWPFVC_JM_HORIZON (7 days, daily grid) or
+#                           PBWPFVC_JM_HORIZON_H (48 hours, 6h grid) -- 20_biotrauma_grid.R
+#   PBWPFVC_JM_MARKERS      unset (all) | comma list of marker names (see 22e)
+#   PBWPFVC_JM_ASSOC        value | value_slope   association on the hazards
+#   PBWPFVC_JM_MALA         0 | 1   gradient-based (MALA) update for the fixed effects
+#   PBWPFVC_JM_CUM          none | mean | days   cumulative-strain term
+#   PBWPFVC_JM_BASELINE     free | offset   offset fixes the baseline coefficient at 1
+#                           (log percent change; files get an offset_ prefix)
+#   PBWPFVC_JM_HAZARD_AGE   linear | spline   age in the survival submodel
+#   PBWPFVC_JM_RRT_EVENT    0 | 1   renal replacement as a third cause (creatinine only)
+#   PBWPFVC_JM_SEV_CENTER   unset | "marker=value,..."   severity-standardised control
+#   PBWPFVC_JM_SF_BAND      unset | "lo,hi"   baseline SF band, lo <= SF < hi
+#   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
+#   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
+#                           (pfvc form, daily grid; section 22f0) -> final/jm_shape_{tag}
+#   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs)
+#   PBWPFVC_JM_THIN         5   thinning of the stored draws
+#   PBWPFVC_JM_PAR          1   joint-model fits run at once
+#   PBWPFVC_CORES           detected cores - 2
+#   PBWPFVC_JM_PILOT        1 | 0   timing pilot before each fit
+#   PBWPFVC_JM_HEARTBEAT    60   seconds between progress lines (0 off)
+#   PBWPFVC_JM_FRESH        0 | 1   ignore cached fits and existing tables
+#   PBWPFVC_JM_RESUME       0 | 1   reuse a cached fit whose chain settings differ
 #
 # Usage: uvr run code/22_biotrauma_fit.R
 # =============================================================================
@@ -88,19 +106,19 @@ N_CHAINS   <- as.integer(Sys.getenv("PBWPFVC_JM_CHAINS", "3"))
 N_CORES    <- suppressWarnings(as.integer(Sys.getenv("PBWPFVC_CORES", unset = NA)))
 if (is.na(N_CORES)) N_CORES <- max(1L, detectCores() - 2L)
 JM_CORES   <- min(N_CHAINS, N_CORES)
-# How the day-0 baseline enters the longitudinal submodel.
+# How the baseline (the marker's first observed value in the window) enters the
+# longitudinal submodel.
 #   free   (primary): log y_t ~ ... + b * log y_0, b estimated. Nests the ratio model
 #          and lets a noisy single-day baseline regress to the mean instead of
 #          putting that noise into the outcome.
 #   offset (sensitivity): b fixed at 1, so the outcome is log(y_t / y_0), the
-#          log percent change from baseline exactly (the archive's outcome).
+#          log percent change from baseline exactly.
 BASELINE_FORM <- Sys.getenv("PBWPFVC_JM_BASELINE", "free")
 stopifnot(BASELINE_FORM %in% c("free", "offset"))
 # Association structure and sampler. ASSOC = "value" (current value on each
-# cause-specific hazard; the default on every grid since 2026-09-24) or "value_slope"
-# (adds the current slope). Over 7 days a control patient's marker barely moves, so
-# its slope carries almost no information: in the MIMIC no-support platelet arm the
-# slope associations reached R-hat 11.7 and 6.4. MALA = 1 uses
+# cause-specific hazard; the default) or "value_slope" (adds the current slope).
+# Over 7 days a control patient's marker barely moves, so its slope carries almost
+# no information and the slope associations do not converge. MALA = 1 uses
 # JMbayes2's gradient-based (MALA) update for the fixed effects, which mixes
 # better on the beta-random-effect ridge that random intercepts create.
 ASSOC_FORM <- Sys.getenv("PBWPFVC_JM_ASSOC", "value")
@@ -119,22 +137,23 @@ CUM_TERM <- switch(CUM_FORM, none = NULL, mean = "mean_prior_vtpfvc", days = "cu
 # model, with the age spline (the within-demographic adjudicator: discordance is 99%
 # demographics, so a discordance interaction only means something if it survives
 # an age interaction). "saturated" interacts the dose change with log PBW and log
-# PFVC separately (mirrors 4k). "none" fits the dose change alone.
-# "pfvc" (the PFVC-level question, 2026-09-14): is a lower PFVC, at a given
+# PFVC separately (as the saturated model of 04_analysis.R, section 4k). "none"
+# fits the dose change alone.
+# "pfvc" (the PFVC-level question): is a lower PFVC, at a given
 # VT/PBW, associated with a worse marker at the horizon? log PFVC (per SD) enters
 # as a between-patient level term and as a divergence over time, beside the
 # clinician's dose (patient mean and within-patient change); the read is the
 # marker difference per SD of log PFVC at H from the joint posterior, which the
 # shared random effects correct for death before H. "disc_level" is its
 # companion with log PBW/PFVC. Log PBW and log PFVC are never entered together.
-# "channels" (2026-09-15): the pfvc form with log PFVC replaced by its four GLI
+# "channels": the pfvc form with log PFVC replaced by its four GLI
 # pieces (height, age, sex, race; 20_biotrauma_grid.R), each with a level and a
 # divergence term, in BOTH submodels, in place of the demographic covariates.
 # One arm only (the pieces are the demographics). The report tests whether the
 # four horizon contrasts are equal: if lung size is the operative quantity they
 # are, and the form collapses to the pfvc form unadjusted.
 MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-# "vtpfvc" (2026-09-17): the pfvc form told the reader's way round. VT/PFVC in
+# "vtpfvc": the pfvc form told the reader's way round. VT/PFVC in
 # percent of predicted FVC (the patient's mean over the window, centred, per point)
 # enters beside the clinician's dose, so the contrast is "patients at the same
 # VT/PBW with a different VT/PFVC"; at a given VT/PBW it is the PBW/PFVC
@@ -149,7 +168,7 @@ HAS_DOSE <- config$cohort == "imv"
 if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "disc_level", "vtpfvc", "pfvc_dose"))
   stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc or channels for the ", config$cohort, " cohort")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
-# The survival submodel (2026-09-24). Its job is the correction for who leaves the
+# The survival submodel. Its job is the correction for who leaves the
 # panel (death, extubation, escalation), not the size effect, which the mortality
 # analyses estimate. It carries the severity covariates (non-respiratory SOFA,
 # baseline log SF, BMI) and age, sex and race, standardised, in every fit, adjusted
@@ -157,11 +176,9 @@ adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (
 # model is the same nuisance model throughout. Log PFVC and VT/PBW are left out. Log
 # PFVC is a fixed function of height, age, sex and race, so beside the demographics
 # it is identified only by height and the curvature of GLI's age term, and its
-# hazard coefficients never converged (R-hat 1.8 to 2.3 at MIMIC and UCSF, at every
-# chain length tried). HAZARD_SPEC is stored with each fit, so a fit made under an
-# earlier hazard is refitted rather than reused.
-if (nzchar(Sys.getenv("PBWPFVC_JM_HAZARD_INT", "")))
-  stop("PBWPFVC_JM_HAZARD_INT is retired: the hazard no longer carries VT/PBW or log PFVC (2026-09-24)")
+# hazard coefficients do not converge at any practical chain length. HAZARD_SPEC is
+# stored with each fit, so a fit made under another hazard is refitted rather than
+# reused.
 HAZARD_SPEC <- paste0("severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
 # Renal replacement as a third competing cause, for creatinine only. Off by
 # default because it redefines the other two: with RRT in, the death hazard is
@@ -169,8 +186,8 @@ HAZARD_SPEC <- paste0("severity + demographics, standardised, no size or dose te
 RRT_EVENT  <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
 # Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
 # in the hazard, log PFVC is nearly a linear combination of a spline in age, so
-# the two sit on a posterior ridge the sampler crawls along (MIMIC: log PFVC x
-# death R-hat 3.2 with 472 deaths). The longitudinal submodel keeps the spline.
+# the two sit on a posterior ridge the sampler crawls along. The longitudinal
+# submodel keeps the spline.
 HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
 stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Every finished fit leaves a small result file (jm_result_*.rds) and a slim
@@ -182,7 +199,7 @@ stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 USE_RESUME <- identical(Sys.getenv("PBWPFVC_JM_RESUME", "0"), "1")
 USE_FRESH  <- identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1")
 # Memory: each fit runs its chains as separate processes, and a 7,000-patient
-# joint model is large, so fits at a time is capped (PBWPFVC_JM_PAR, default 2)
+# joint model is large, so fits at a time is capped (PBWPFVC_JM_PAR, default 1)
 # below the core budget, and the stored draws are thinned (PBWPFVC_JM_THIN).
 N_FITS_MAX <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_PAR", "1")))
 N_THIN     <- max(1L, as.integer(Sys.getenv("PBWPFVC_JM_THIN", "5")))
@@ -218,9 +235,21 @@ stop_heartbeat <- function(hb) {
   unlink(hb$pidfile)
   invisible(NULL)
 }
-RHAT_GATE  <- 1.1
-MIN_PATIENTS <- 20L; MIN_DEATHS <- 5L
-# Shape check (section 13f0): PBWPFVC_JM_SHAPE_ONLY=1 fits the longitudinal submodel
+RHAT_GATE  <- 1.1   # the standard convergence threshold: every term's R-hat at or below it
+# Minimum counts for a fit, and for a marker's severity-anchor tables: the CLIF
+# minimum-count standard
+MIN_PATIENTS        <- 20L
+MIN_DEATHS          <- 5L
+MIN_ANCHOR_PATIENTS <- 10L
+# A logistic mixed-model coefficient beyond this (log-odds) is flagged as near separation
+SEPARATION_COEF <- 15
+# per-fit result file (aggregates only; beside the bundles, with the row-level inputs)
+result_file <- function(marker, model, adj_lab)
+  file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
+                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                               if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
+                               restrict_sfx_for(marker), "_", h_suffix, ".rds"))
+# Shape check (section 22f0): PBWPFVC_JM_SHAPE_ONLY=1 fits the longitudinal submodel
 # alone, with the size effect as a line and as a spline in time, and no joint model.
 SHAPE_ONLY <- identical(Sys.getenv("PBWPFVC_JM_SHAPE_ONLY", "0"), "1")
 SHAPE_SPLIT_DAY <- 3   # early and late divergence meet here: creatinine lags, platelets bottom out about now
@@ -236,9 +265,10 @@ meta     <- readRDS(file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
 message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients")
 
 # =============================================================================
-# 13e. Marker specification
+# 22e. Marker specification
 # =============================================================================
-# y      : the daily column;  y0 : its index-day baseline (surv table)
+# y      : the daily column;  y0 : its baseline in the surv table, the marker's first
+#          observed value within the window (21_biotrauma_panel.R)
 # own_lag: the lagged confounder that IS this marker's own lag, dropped from its model
 # random : pdDiag for the sparse plateau-measured mechanics marker, unstructured otherwise.
 #          On the 6h grid the labs (creatinine, platelets, bilirubin) carry one or
@@ -257,8 +287,8 @@ markers <- list(
   # The oxygenation indices, 100 x mean airway pressure / ratio (SF for OSI, P/F
   # for OI), rising with worse oxygenation. SF is a component of both, so the
   # lagged SF covariate is dropped for them as it is for SF itself (own_lag).
-  # Read them with injury_oi_diagnostics.R beside them: at MIMIC the whole index
-  # effect was its numerator, which is the support the patient needed and not
+  # Read them beside their numerator, the daily mean airway pressure (map_aw in
+  # the panel): an index effect can be the support the patient needed rather than
   # the lung.
   osi           = list(y = "osi",           y0 = "osi_0",        own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "Oxygen saturation index"),
   oi            = list(y = "oi",            y0 = "oi_0",         own_lag = "l_log_sf", random = "unstructured", offset = 0,    label = "Oxygenation index"),
@@ -290,11 +320,9 @@ if (nzchar(want_markers)) {
 # which entry rule a marker's fit uses (see the entry filter in fit_one); stored with
 # each result so a cached fit made under the other rule is refitted
 entry_rule_for <- function(mk) if (mk$name == "creatinine" && RRT_EVENT) "rrt_one_value" else "two_values"
-want_models <- trimws(strsplit(Sys.getenv("PBWPFVC_JM_MODELS", "main"), ",")[[1]])   # figure 4: main; "hetero" is not in the paper
-stopifnot(all(want_models %in% c("main", "hetero")))
 
 # =============================================================================
-# 13e2. Cohort restrictions: per-marker severity anchor and the baseline SF band
+# 22e2. Cohort restrictions: per-marker severity anchor and the baseline SF band
 # =============================================================================
 # (20_biotrauma_grid.R defines the anchors and the knobs.) The anchor distribution
 # of every marker in this run is written on every run, among patients with that
@@ -312,7 +340,7 @@ anchor_distribution <- function(anchor_values) {
 }
 severity_anchor <- map_dfr(markers, function(mk) {
   with_baseline <- surv_all %>% filter(!is.na(.data[[mk$y0]]))
-  if (nrow(with_baseline) < 10L) return(NULL)
+  if (nrow(with_baseline) < MIN_ANCHOR_PATIENTS) return(NULL)
   anchor_distribution(anchor_of(with_baseline, mk$name)) %>%
     mutate(marker = mk$name, anchor = anchor_label(mk$name), .before = 1)
 }) %>% mutate(cohort = config$cohort, site = site_name)
@@ -320,12 +348,12 @@ if (nrow(severity_anchor)) {
   anchor_path <- file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv"))
   if (file.exists(anchor_path)) {   # merge on write: keep other markers' rows from earlier runs
     anchor_on_disk <- read_csv(anchor_path, show_col_types = FALSE)
-    # a file without a marker column is the retired single-anchor layout: replace it
+    # a file without a marker column has the single-anchor layout: replace it
     if ("marker" %in% names(anchor_on_disk))
       severity_anchor <- bind_rows(anchor_on_disk %>% filter(!marker %in% severity_anchor$marker), severity_anchor)
   }
   write_csv(severity_anchor, anchor_path)
-  message("Severity anchor by marker (SOFA components over the 24 h from the index, own component left out; bands of 10 or more):")
+  message("Severity anchor by marker (SOFA components over the 24 h from the index, own component left out):")
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
                         select(marker, anchor, sev_anchor, n_patients, pct, pct_at_or_above)), row.names = FALSE)
 }
@@ -336,7 +364,7 @@ if (config$cohort == "imv") {
   anchor_mean <- map_dfr(markers, function(mk) {
     anchor_values <- anchor_of(surv_all %>% filter(!is.na(.data[[mk$y0]])), mk$name)
     anchor_values <- anchor_values[!is.na(anchor_values)]
-    if (length(anchor_values) < 10L) return(NULL)
+    if (length(anchor_values) < MIN_ANCHOR_PATIENTS) return(NULL)
     tibble(marker = mk$name, anchor_mean = mean(anchor_values), anchor_sd = sd(anchor_values),
            n_patients = length(anchor_values), anchor = anchor_label(mk$name))
   }) %>% mutate(cohort = config$cohort, site = site_name)
@@ -362,12 +390,10 @@ if (identical(Sys.getenv("PBWPFVC_JM_ANCHOR_ONLY", "0"), "1")) {
   message("PBWPFVC_JM_ANCHOR_ONLY=1: anchor distributions written, no fits run")
   quit(save = "no", status = 0)
 }
-# The patients a marker's fit may use, after the severity floor and the SF band.
+# The patients a marker's fit may use, after the baseline SF band.
 # log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the unrestricted fit.
 restricted_patients <- function(mk) {
   kept <- surv_all
-  floor_value <- sev_floor_for(mk$name)
-  if (!is.na(floor_value)) kept <- kept[which(anchor_of(kept, mk$name) >= floor_value), ]
   if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_0), sf_0 >= sf_band_limits[1], sf_0 < sf_band_limits[2])
   kept
 }
@@ -386,7 +412,7 @@ PRESSURE_MARKERS <- c("dp")
 base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi") else BASE_RHS
 
 # =============================================================================
-# 13f0. Shape check of the divergence (PBWPFVC_JM_SHAPE_ONLY=1)
+# 22f0. Shape check of the divergence (PBWPFVC_JM_SHAPE_ONLY=1)
 # =============================================================================
 # The pfvc form draws the size effect as a straight line in time, level + rate x
 # day, while the average trajectory gets a 3-df spline. A straight line fits
@@ -404,8 +430,8 @@ base_rhs_for <- function(y) if (y %in% PRESSURE_MARKERS) paste(BASE_RHS, "+ bmi"
 #           split at SHAPE_SPLIT_DAY: a lag shows as early < late, a plateau or
 #           recovery as early > late
 # with the likelihood-ratio test of the spline against the line (2 df). Death and
-# extubation are not modelled here, as in 26_quick_lme.R: the check reads the
-# shape, and the joint model stays the estimate.
+# extubation are not modelled here: the check reads the shape, and the joint model
+# stays the estimate.
 shape_check <- function(ld, rhs, random_spec, mk, adj_lab, counts, stamp) {
   rate_term <- "log_pfvc_sd:vent_day"
   stopifnot(rate_term %in% rhs)
@@ -460,9 +486,9 @@ shape_check <- function(ld, rhs, random_spec, mk, adj_lab, counts, stamp) {
 }
 
 # =============================================================================
-# 13f. One fit
+# 22f. One fit
 # =============================================================================
-fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
+fit_one <- function(mk, model = "main", adjusted = TRUE) {
   model <- match.arg(model)
   adj_lab <- adj_label(adjusted)
   tag <- paste(mk$name, model, adj_lab, sep = "_")
@@ -494,31 +520,46 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
       return(r)
     } else stamp("result on disk has other chain settings (", r$n_iter, "/", r$n_burnin, "); refitting")
   }
-  # --- cohort restrictions (severity floor on this marker's anchor, baseline SF band)
+  # --- cohort restriction (baseline SF band)
   if (nzchar(restrict_tag)) {
     n_cohort <- nrow(surv_all)
     surv_all <- restricted_patients(mk)
     long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
     stamp("restricted to ", nrow(surv_all), " of ", n_cohort, " patients",
-          if (!is.na(sev_floor_for(mk$name))) paste0("; anchor (", anchor_label(mk$name), ") >= ", sev_floor_for(mk$name)) else "",
           if (nzchar(SF_BAND)) paste0("; baseline SF in [", sf_band_limits[1], ", ", sf_band_limits[2], ")") else "")
   }
-  # --- longitudinal rows: day >= 1 (day 0 is the baseline covariate), marker and lag observed
-  ld <- long_all %>%
-    filter(period >= 1L, !is.na(.data[[mk$y]]), if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE,
-           !is.na(l_sf), !is.na(l_pressor),
+  # --- longitudinal rows. Each entry step is stamped (rows, patients) and goes to
+  #     the manifest as n_rows_after_<step> and n_patients_after_<step>.
+  entry_steps <- tibble(.rows = 1L)
+  note_step <- function(d, step, what) {
+    entry_steps[[paste0("n_rows_after_", step)]]     <<- nrow(d)
+    entry_steps[[paste0("n_patients_after_", step)]] <<- n_distinct(d$hospitalization_id)
+    stamp(sprintf("entry, %s: %d rows, %d patients", what, nrow(d), n_distinct(d$hospitalization_id)))
+    d
+  }
+  ld <- long_all %>% note_step("start", "panel rows in the horizon") %>%
+    filter(period >= 1L) %>%                                  # day 0 is never a trajectory row (21 starts each trajectory after its baseline)
+    note_step("day1", "days 1 on")
+  ld <- ld %>%
+    filter(!is.na(.data[[mk$y]]),
            if (isTRUE(mk$positive)) .data[[mk$y]] > 0 else TRUE) %>%   # the dose part: pressor days only
+    note_step("marker", "marker observed")
+  ld <- ld %>%
+    filter(if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
+    note_step("lags", "previous-day covariates observed")
+  ld <- ld %>%
     mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
-                                   race_category, ers_pfvc_0, vtpfvc_pt_mean, vtpbw_pt_mean,
+                                   race_category, vtpfvc_pt_mean, vtpbw_pt_mean,
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
                                    all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa),
            if (HAS_DOSE) !is.na(vtpbw_pt_mean) else TRUE,
            if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE,
-           if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE)
+           if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE) %>%
+    note_step("covariates", "SOFA, dose terms and (pressure markers) BMI observed")
   # severity standardisation (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R): the marker's
   # own anchor, centred at the ventilated cohort's mean, so log_pfvc_sd:vent_day is
   # the rate at the ventilated severity
@@ -528,7 +569,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     ld <- ld %>%
       inner_join(tibble(hospitalization_id = surv_all$hospitalization_id,
                         sev_anchor_c = anchor_of(surv_all, mk$name) - sev_center), by = "hospitalization_id") %>%
-      filter(!is.na(sev_anchor_c))
+      filter(!is.na(sev_anchor_c)) %>%
+      note_step("anchor", "severity anchor observed")
   }
   # centred age for the dose x age interaction: uncentred, the interaction and the
   # dose main effect are collinear (age10 has a large mean relative to its spread)
@@ -537,7 +579,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else
                     if (isTRUE(mk$positive)) if_else(.data[[mk$y0]] > 0, log(pmax(.data[[mk$y0]], 1e-12)), 0) else
-                    log(.data[[mk$y0]] + mk$offset))
+                    log(.data[[mk$y0]] + mk$offset)) %>%
+    note_step("baseline", "baseline value observed")
   if (isTRUE(mk$positive)) {
     if (BASELINE_FORM == "offset") stop("marker ", mk$name, ": the offset baseline form needs a positive day-0 value, ",
                                         "and the dose part's baseline is zero for patients who start later; use PBWPFVC_JM_BASELINE=free")
@@ -546,20 +589,19 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # offset form: JMbayes2 rejects offset() terms, so the fixed unit coefficient is
   # applied by hand -- the response becomes log(y_t / y_0), the log percent change.
   if (!is.null(mk$y0) && BASELINE_FORM == "offset") ld <- ld %>% mutate(log_y = log_y - log_y0)
-  if (model == "hetero") ld <- ld %>% filter(!is.na(ers_pfvc_0))
   # Entry: two or more post-baseline values, except that a patient who starts renal
-  # replacement in the window enters the creatinine model with one (user, 2026-09-21).
-  # RRT is started because creatinine is rising, so a two-value rule dropped most of
-  # the patients whose competing event the model is meant to see (182 of 1,216 first-
-  # week starters entered at MIMIC). ESRD patients are unaffected: they have no day-0
-  # creatinine, so no trajectory at all.
+  # replacement in the window enters the creatinine model with one (PBWPFVC_JM_RRT_EVENT=1).
+  # RRT is started because creatinine is rising, so a two-value rule would drop most
+  # of the patients whose competing event the model is meant to see. ESRD patients
+  # are unaffected: they have no baseline creatinine, so no trajectory at all.
   one_value_ids <- if (entry_rule_for(mk) == "rrt_one_value")
     surv_all$hospitalization_id[!is.na(surv_all$rrt_day) & surv_all$rrt_day >= 0 & surv_all$rrt_day <= JM_HORIZON] else character(0)
   n_per <- ld %>% count(hospitalization_id) %>%
     filter(n >= 2L | (n >= 1L & hospitalization_id %in% one_value_ids))
   if (length(one_value_ids))
     stamp(sum(n_per$n == 1L), " patients enter with one creatinine value because RRT starts in the window")
-  ld <- ld %>% filter(hospitalization_id %in% n_per$hospitalization_id)
+  ld <- ld %>% filter(hospitalization_id %in% n_per$hospitalization_id) %>%
+    note_step("min_values", "two or more values (one if RRT starts in the window)")
 
   # --- survival rows for those patients (the hazard's covariates: see HAZARD_SPEC)
   sd_ <- surv_all %>%
@@ -568,7 +610,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
            if (MOD_FORM == "vtpfvc") is.finite(vtpfvc_idx) else TRUE) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
   if (HAS_DOSE) ld <- ld %>% mutate(vtpbw_c = vtpbw_pt_mean - median(vtpbw_pt_mean, na.rm = TRUE))
-  ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id)
+  ld <- ld %>% filter(hospitalization_id %in% sd_$hospitalization_id) %>%
+    note_step("hazard", "complete hazard covariates")
   lv <- sort(unique(ld$hospitalization_id))
   ld$id  <- factor(ld$hospitalization_id,  levels = lv)
   sd_$id <- factor(sd_$hospitalization_id, levels = lv)
@@ -594,17 +637,13 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   n_rrt <- if (use_rrt) sum(sd_$event == 3L) else NA_integer_
   stamp(nrow(ld), " rows, ", n_pts, " patients, ", n_deaths, " deaths, ", n_extub, " extubations",
         if (use_rrt) paste0(", ", n_rrt, " RRT starts (third competing cause; death here means death before dialysis)") else "")
-  # within-patient spread of the dose: a null dose slope on an exposure that
-  # barely moves is a power statement, not a finding
-  within_sd  <- if (HAS_DOSE) sd(ld$l_vtpbw_within) else NA_real_
-  frac_moved <- if (HAS_DOSE) mean(abs(ld$l_vtpbw_within) > 0.5) else NA_real_
   counts <- tibble(marker = mk$name, model = model, adjustment = adj_lab,
                    n_obs = nrow(ld), n_patients = n_pts, n_deaths = n_deaths, n_extubations = n_extub,
-                   n_rrt = n_rrt, rrt_competing = use_rrt,
-                   dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved)
+                   n_rrt = n_rrt, rrt_competing = use_rrt)
   if (n_pts < MIN_PATIENTS || n_deaths < MIN_DEATHS) {
     stamp("skipped: too few patients or deaths")
-    return(list(status = "skipped", reason = "too few patients or deaths", counts = counts))
+    return(list(status = "skipped", reason = "too few patients or deaths", counts = counts,
+                entry_steps = entry_steps))
   }
 
   # --- every modelled column must be finite; name the offender instead of letting
@@ -613,8 +652,7 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
                           "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", "sev_anchor_c", if (mk$y %in% PRESSURE_MARKERS) "bmi",
-                          "age10", "ers_pfvc_0"), names(ld))
-  if (model != "hetero") num_cols <- setdiff(num_cols, "ers_pfvc_0")
+                          "age10"), names(ld))
   n_bad <- vapply(num_cols, function(v) sum(!is.finite(ld[[v]])), integer(1))
   if (any(n_bad > 0))
     stop("non-finite values in the longitudinal design: ",
@@ -632,11 +670,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # disc form: PFVC as an effect modifier of the clinician's dose. l_vtpbw_within =
   # yesterday's VT/PBW minus the patient's mean over the course (the dose change,
   # identified within patient); its slope is modified by centred log PBW/PFVC
-  # discordance (and, adjusted, by the age spline). The ratio of the interaction
-  # to the main effect is the scaling exponent gamma: 0 = injury per mL/kg PBW
-  # does not depend on true lung size (PBW normalizer), 1 = it scales in
-  # proportion to PBW/PFVC (PFVC normalizer, the VT/PFVC model as a special case).
-  # vtpbw_pt_mean = the between-patient dose level.
+  # discordance (and, adjusted, by linear age). vtpbw_pt_mean = the between-patient
+  # dose level.
   mod_terms <- switch(MOD_FORM,
     # the age modification of the dose slope is LINEAR in age: a 4-df spline
     # interaction is four weakly identified parameters that fail the R-hat gate
@@ -657,8 +692,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
     channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
-  # time: linear over the 48-hour grid (the plausible shape there); a 3-df
-  # natural spline over the 7-day daily grid
+  # time: a 3-df natural spline in day on the daily grid (figure 4); linear on the
+  # 6h grid, whose 48 hours are too short for a spline
   time_term <- if (JM_GRID == "6h") "vent_day" else "ns(vent_day, 3)"
   # the severity terms: the anchor's own level and trend, and its modification of the
   # size level and of the divergence (the three-way term is the test)
@@ -670,9 +705,9 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_pt_mean", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
-           if (model == "hetero") "ers_pfvc_0 * l_vtpbw_within",
            lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
+  stamp("longitudinal: ", deparse1(lme_formula))
   random_spec <- switch(mk$random,
     pddiag       = list(id = nlme::pdDiag(~ vent_day)),
     intercept    = ~ 1 | id,
@@ -681,10 +716,12 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     stop("marker ", mk$y, " has a random intercept only on this grid; the slope association needs a random slope. ",
          "Use PBWPFVC_JM_ASSOC=value.")
   if (SHAPE_ONLY) {
-    if (isTRUE(mk$binary)) return(list(status = "skipped", reason = "the shape check is for continuous markers", counts = counts))
+    if (isTRUE(mk$binary)) return(list(status = "skipped", reason = "the shape check is for continuous markers",
+                                       counts = counts, entry_steps = entry_steps))
     shape <- shape_check(ld, rhs, random_spec, mk, adj_lab, counts, stamp)
     stamp("shape check done")
-    return(list(status = "shape", reason = NA_character_, counts = counts, shape = shape))
+    return(list(status = "shape", reason = NA_character_, counts = counts, entry_steps = entry_steps,
+                lme_formula = deparse1(lme_formula), shape = shape))
   }
   if (isTRUE(mk$binary)) {
     # logistic mixed model, independent intercept and slope variances (the || form)
@@ -697,8 +734,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     lme_fit <- GLMMadaptive::mixed_model(fixed = lme_formula, random = ~ vent_day || id, data = ld,
                                          family = binomial(), penalized = TRUE,
                                          control = list(max_coef_value = 100))
-    big <- GLMMadaptive::fixef(lme_fit)[abs(GLMMadaptive::fixef(lme_fit)) > 15]
-    if (length(big)) stamp("WARNING: logistic coefficients beyond 15 (near separation): ",
+    big <- GLMMadaptive::fixef(lme_fit)[abs(GLMMadaptive::fixef(lme_fit)) > SEPARATION_COEF]
+    if (length(big)) stamp("WARNING: logistic coefficients beyond ", SEPARATION_COEF, " (near separation): ",
                            paste(sprintf("%s %.1f", names(big), big), collapse = ", "))
     stamp("logistic mixed model converged")
   } else {
@@ -720,10 +757,11 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   # own-lag rule as the longitudinal submodel).
   cox_rhs <- paste(c("np_sofa_z", if (mk$y != "sf") "log_sf_0_z", "bmi_z", DEMO_RHS_HAZARD()), collapse = " + ")
   cox_formula <- as.formula(paste0("Surv(event_time, status2) ~ (", cox_rhs, "):strata(strata)"))
+  stamp("hazard: ", deparse1(cox_formula))
   cox_cr <- coxph(cox_formula, data = surv_cr, x = TRUE)
   stamp("Cox converged")
 
-  # --- joint model: value + slope association on each cause-specific hazard
+  # --- joint model: the current value (value_slope adds the slope) on each cause-specific hazard
   ff <- if (ASSOC_FORM == "value_slope") list(log_y = ~ value(log_y):strata + slope(log_y):strata)
         else list(log_y = ~ value(log_y):strata)
   # JMbayes2 runs the chains in C++ with no per-iteration hook, so progress has
@@ -772,22 +810,6 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
     mutate(block = if_else(block == "survival" & grepl("value\\(|slope\\(", term), "association", block)) %>%
     bind_cols(counts[rep(1L, nrow(.)), ]) %>%
     mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON, site = site_name)
-  # --- scaling exponent gamma = (dose x discordance) / dose, from the joint posterior
-  bd <- do.call(rbind, jm_fit$mcmc$betas1)
-  if (is.null(colnames(bd))) colnames(bd) <- names(fixef(lme_fit))
-  scaling <- if (MOD_FORM == "disc" && all(c("l_vtpbw_within", "l_vtpbw_within:ldisc_c") %in% colnames(bd))) {
-    g <- bd[, "l_vtpbw_within:ldisc_c"] / bd[, "l_vtpbw_within"]
-    tibble(marker = mk$name, model = model, adjustment = adj_lab,
-           dose_slope = mean(bd[, "l_vtpbw_within"]),
-           dose_slope_lo = quantile(bd[, "l_vtpbw_within"], 0.025), dose_slope_hi = quantile(bd[, "l_vtpbw_within"], 0.975),
-           p_dose_slope_gt0 = mean(bd[, "l_vtpbw_within"] > 0),
-           interaction = mean(bd[, "l_vtpbw_within:ldisc_c"]),
-           interaction_lo = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.025), interaction_hi = quantile(bd[, "l_vtpbw_within:ldisc_c"], 0.975),
-           gamma_median = median(g), gamma_lo = quantile(g, 0.025), gamma_hi = quantile(g, 0.975),
-           p_gamma_gt0 = mean(g > 0), p_gamma_gt_half = mean(g > 0.5), p_gamma_lt1 = mean(g < 1),
-           dose_within_sd = within_sd, frac_days_dose_moved_gt_0.5 = frac_moved,
-           n_patients = n_pts, horizon_days = JM_HORIZON, site = site_name)
-  } else NULL
   max_rhat <- max(est$rhat, na.rm = TRUE)
   gate <- is.finite(max_rhat) && max_rhat <= RHAT_GATE
   worst <- est %>% slice_max(rhat, n = 3, with_ties = FALSE)
@@ -822,7 +844,8 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
           bundle_file)
   rm(jm_fit, surv_cr, cox_cr); invisible(gc())
   result <- list(status = if (gate) "converged" else "rhat_fail", reason = NA_character_,
-                 counts = counts, estimates = est, scaling = scaling,
+                 counts = counts, entry_steps = entry_steps, estimates = est,
+                 lme_formula = deparse1(lme_formula), cox_formula = deparse1(cox_formula),
                  max_rhat = max_rhat, key_rhat = key_rhat,
                  longitudinal_rhat = longitudinal_rhat, association_rhat = association_rhat, hazard_rhat = hazard_rhat,
                  worst_terms = paste(sprintf("%s %.2f", worst$term, worst$rhat), collapse = "; "),
@@ -833,21 +856,13 @@ fit_one <- function(mk, model = c("main", "hetero"), adjusted = TRUE) {
   saveRDS(result, result_file(mk$name, model, adj_lab))
   result
 }
-# per-fit result file (aggregates only; beside the bundles in intermediate/)
-result_file <- function(marker, model, adj_lab)
-  file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
-                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
-                               if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
-                               restrict_sfx_for(marker), "_", h_suffix, ".rds"))
 RUN_START <- Sys.time()
 
 # =============================================================================
-# 13g. Run the model set
+# 22g. Run the model set
 # =============================================================================
-jobs <- expand_grid(marker = names(markers), model = want_models, adjusted = c(TRUE, FALSE)) %>%
-  filter(!(model == "hetero" & !adjusted)) %>%          # heterogeneity: adjusted only
-  filter(!(MOD_FORM == "channels" & adjusted)) %>%      # channels: one arm, the pieces are the demographics
-  filter(!(SHAPE_ONLY & model == "hetero"))             # the shape check reads the main model
+jobs <- expand_grid(marker = names(markers), model = "main", adjusted = c(TRUE, FALSE)) %>%
+  filter(!(MOD_FORM == "channels" & adjusted))          # channels: one arm, the pieces are the demographics
 run_job <- function(marker, model, adjusted) {
   tryCatch(fit_one(markers[[marker]], model, adjusted),
            error = function(e) {
@@ -887,25 +902,26 @@ if (N_FITS_PAR > 1L) {
 }
 
 manifest <- map_dfr(results, function(r)
-  r$counts %>% mutate(status = r$status, reason = r$reason,
-                      max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
-                      key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
-                      longitudinal_rhat = if (is.null(r$longitudinal_rhat)) NA_real_ else r$longitudinal_rhat,
-                      association_rhat  = if (is.null(r$association_rhat))  NA_real_ else r$association_rhat,
-                      hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
-                      worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
-                      acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
+  (if (is.null(r$entry_steps)) r$counts else bind_cols(r$counts, r$entry_steps)) %>%
+    mutate(status = r$status, reason = r$reason,
+           lme_formula = if (is.null(r$lme_formula)) NA_character_ else r$lme_formula,
+           cox_formula = if (is.null(r$cox_formula)) NA_character_ else r$cox_formula,
+           max_rhat = if (is.null(r$max_rhat)) NA_real_ else r$max_rhat,
+           key_terms_rhat = if (is.null(r$key_rhat)) NA_real_ else r$key_rhat,
+           longitudinal_rhat = if (is.null(r$longitudinal_rhat)) NA_real_ else r$longitudinal_rhat,
+           association_rhat  = if (is.null(r$association_rhat))  NA_real_ else r$association_rhat,
+           hazard_rhat       = if (is.null(r$hazard_rhat))       NA_real_ else r$hazard_rhat,
+           worst_terms = if (is.null(r$worst_terms)) NA_character_ else r$worst_terms,
+           acc_random_effects = if (is.null(r$acc_b)) NA_real_ else r$acc_b)) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM, hazard_spec = HAZARD_SPEC, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_iter = N_ITER, n_burnin = N_BURNIN, n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,
-         sev_floor = vapply(marker, sev_floor_for, numeric(1)),
          sev_center = vapply(marker, sev_center_for, numeric(1)),
-         sev_anchor = if_else(is.na(sev_floor) & is.na(sev_center), NA_character_, vapply(marker, anchor_label, character(1))),
+         sev_anchor = if_else(is.na(sev_center), NA_character_, vapply(marker, anchor_label, character(1))),
          # "115 to 235", not "115,235": a CSV reader takes the comma for a thousands separator
          sf_band = if (nzchar(SF_BAND)) paste(sf_band_limits, collapse = " to ") else NA_character_, site = site_name)
 estimates  <- map_dfr(results, "estimates")
-scaling    <- map_dfr(results, "scaling")
 
 # Output tag: non-default forms (baseline offset, saturated or no modifier) get
 # their own files so a sensitivity run never overwrites the primary's rows.
@@ -957,7 +973,7 @@ if (SHAPE_ONLY) {
 # the full set can be assembled from several runs (a lab-only rerun, a longer-
 # chain rerun of one marker). PBWPFVC_JM_FRESH=1 discards the existing tables.
 if (identical(Sys.getenv("PBWPFVC_JM_FRESH", "0"), "1"))
-  for (nm in c("manifest", "estimates", "scaling"))
+  for (nm in c("manifest", "estimates"))
     unlink(file.path(final_dir, paste0("jm_", nm, "_", out_tag, ".csv")))
 merge_write <- function(new, name) {
   path <- file.path(final_dir, paste0("jm_", name, "_", out_tag, ".csv"))
@@ -979,7 +995,6 @@ merge_write <- function(new, name) {
 }
 merge_write(manifest,   "manifest")
 merge_write(estimates,  "estimates")
-merge_write(scaling,    "scaling")
 
 message("\n========== 22_biotrauma_fit SUMMARY (", h_suffix, ") ==========")
 print(as.data.frame(manifest %>% select(any_of(c("marker", "model", "adjustment", "status", "reason",

@@ -1,12 +1,13 @@
 # =============================================================================
 # Pooled displays: figures 1C, 2 and 3C, and the ratio's height channel
 # =============================================================================
-# Run centrally, like pooled_estimates.R and pooled_biotrauma.R. Two of the displays
+# Run centrally by the coordinator, like pooled_biotrauma.R. Two of the displays
 # need no patient data at all; the other two pool tables every site returns.
 #
 #   Figure 1C  the counterfactual dosing grid (formulas only): the tidal volume
 #              6 mL/kg PBW prescribes against the volume that delivers 11% of
-#              predicted FVC, by age, sex, race and height
+#              predicted FVC (about the 75th percentile of VT/PFVC in the ARMA low
+#              tidal volume arm), by age, sex, race and height
 #   Claim 2    the ratio's height channel (formulas only): log PBW/PFVC across height
 #              by sex at a fixed age. GLI FVC is a power law in height and Devine PBW a
 #              line with an intercept, so the log ratio is an inverted U whose peak
@@ -40,16 +41,22 @@ print_site_alias_key(site_aliases)
 
 OKABE_ITO <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
 SEX_COLOURS  <- c(Male = "#0072B2", Female = "#D55E00")
-VTPFVC_TARGET <- 11   # % of predicted FVC: ARMA's low-VT arm near its 75th percentile
+VTPFVC_TARGET <- 11   # % of predicted FVC: about the 75th percentile of VT/PFVC in the ARMA low tidal volume arm
 theme_set(theme_minimal(base_size = 10))
 
-# every table a site returns, whichever block subfolder it sits in
+# One table per site, whichever block subfolder it sits in. Each family read here is
+# one file per site ({prefix}{site}.csv), so a second match is a stale or duplicated
+# copy (a flat return beside the block-sorted one, say): reading both would count the
+# site twice, and reading either would be a guess, so the script stops and names them.
 read_sites <- function(prefix) {
   map_dfr(sites, function(s) {
     files <- unlist(map(c("", "final", "cross_sectional", "supplement", "final/cross_sectional", "final/supplement"),
                         ~ Sys.glob(file.path(root, s, .x, paste0(prefix, "*.csv")))))
     if (!length(files)) return(NULL)
-    read_csv(files[1], show_col_types = FALSE) %>% mutate(site = anonymize_site(s, site_aliases$aliases))
+    if (length(files) > 1)
+      stop("site folder ", s, " holds ", length(files), " ", prefix, "*.csv tables; expected one. Remove the stale copy:\n  ",
+           paste(files, collapse = "\n  "))
+    read_csv(files, show_col_types = FALSE) %>% mutate(site = anonymize_site(s, site_aliases$aliases))
   })
 }
 devine_pbw <- function(height_cm, sex) if_else(sex == "Male", 50, 45.5) + 2.3 * (height_cm / 2.54 - 60)

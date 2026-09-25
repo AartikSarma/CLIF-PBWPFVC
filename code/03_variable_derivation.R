@@ -2,6 +2,44 @@
 # Script 03: Variable Derivation
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
+# Derives every analysis variable, applies the analytic inclusion gates, and picks
+# one index timepoint per patient: the cross-sectional cohort of figures 1-3 and the
+# baseline of figure 4.
+#
+# Population (PBWPFVC_COHORT, environment variable only; the cohort script 01 built):
+#   imv (default; the paper's cohort)  patients with height 150-210 cm, known sex, and
+#       at least one ventilator timepoint that has VT/PBW, VT/PFVC and an SF ratio,
+#       is lung-protective (VT/PBW 6-8 mL/kg) AND hypoxemic (SF < 315, the Rice 2007
+#       equivalent of PF 300). A patient qualifies if ANY such timepoint exists. The
+#       index is the first qualifying timepoint with a driving pressure within
+#       INDEX_WINDOW_HOURS of the first IMV row, else the first qualifying timepoint.
+#   nosupport (the negative control)   the first room-air or nasal-cannula row with an
+#       SF ratio within CONTROL_ICU_WINDOW_H of an ICU admission, with no advanced
+#       support before it; patients escalated to any support within
+#       ESCALATION_LANDMARK_H of that index are removed.
+#   niv (built on request only)        the first HFNC / NIPPV / CPAP row with SF < 315.
+# SOFA is scored once per patient by clifR's compute_sofa(), from the worst value of
+# each input over the SOFA_WINDOW_H hours from the index (section 3e2).
+#
+# Sections: 3a PBW and PFVC (Devine; race-specific GLI-2012), 3b SF and PF ratios,
+# 3d per-timepoint dose, mechanics, vasopressor and lab variables, 3e the index,
+# 3e2 SOFA, 3f ventilator-free days, 3h-3i saved tables and the attrition log,
+# 3k the non-hypoxemic negative-control cohorts, 3l federated PBW/PFVC distributions.
+#
+# Inputs (config$output_dir): the _clean tables of script 02, and cohort_demographics,
+#   cohort_weights, cohort_meds, cohort_assessments, nc_cohort, cohort_icu_stays and
+#   attrition_log_partial.csv from script 01.
+# Outputs, patient-level (config$output_dir, never shared):
+#   analysis_cross_sectional    one row per patient at the index -> 04, 05, 10, 29, supplement/
+#   analysis_all_timepoints     every ventilator timepoint of those patients -> 04
+#   analysis_all_eligible_timepoints  every timepoint before the VT/PBW gate -> 10
+#   analysis_broad_pfvc         everyone with PBW and PFVC, before ventilation gates -> 04
+#   analysis_negative_control   the non-hypoxemic cohorts -> 04 (4j)
+#   ne_equiv_admin              norepinephrine-equivalent dose per administration -> 10, 21
+# Outputs, aggregate (final/cross_sectional/, returned by the site):
+#   attrition_log_{site}.csv    the 7-step cohort funnel -> 04 (CONSORT), pooling
+#   dist_histograms_{site}.csv, dist_quantiles_{site}.csv  PBW/PFVC by demographic group
+# =============================================================================
 
 library(tidyverse)
 library(arrow)
@@ -28,7 +66,20 @@ HEIGHT_BIN_EDGES  <- c(150, 155, 160, 165, 170, 175, 180, 185, 190, 210)
 # External (ARMA) constants for the DIFFERENCE parameterization of PBW vs PFVC (3d).
 # Fixed, not cohort-derived, so vt_excess_ml means the same thing at every site.
 VT_PER_KG_ARMA   <- 6    # mL/kg PBW, the low-VT arm's prescribed dose
-VT_PCT_PFVC_ARMA <- 11   # % of predicted FVC, that arm's delivered VT/PFVC (p75)
+VT_PCT_PFVC_ARMA <- 11   # % of predicted FVC: about the 75th percentile of VT/PFVC in the ARMA low-VT arm
+
+# Time windows, in hours, chosen to capture early ventilation.
+# FIO2_LOOKBACK_H (4 h; utils/config.R): an SpO2 or PaO2 takes the most recent FiO2
+#   recorded up to this long before it.
+MEASUREMENT_CARRY_H   <- 4   # an SF/PF ratio, lab value or vasopressor rate is carried
+                             # forward to a ventilator timepoint for up to this long
+INDEX_WINDOW_HOURS    <- 6   # ventilated index: prefer a timepoint with driving pressure
+                             # within this long of the first IMV row
+CONTROL_ICU_WINDOW_H  <- 6   # no-support index: first qualifying row within this long
+                             # of an ICU admission
+ESCALATION_LANDMARK_H <- 24  # no-support control: escalation to any support within this
+                             # long of the index removes the patient
+SOFA_WINDOW_H         <- 24  # SOFA from the worst values over this long from the index
 
 # =============================================================================
 # Load cleaned intermediate data
@@ -94,7 +145,7 @@ pbw_pfvc_data <- cohort_demographics %>%
     # VT/FVC_age25 vs VT/PFVC isolates whether PFVC's age slope earns its keep; the
     # triple is read as a BRACKET, not a truth -- the strain denominator's age behaviour
     # in the old/critically ill is unidentified (statistically, physiologically,
-    # mechanically), so the analyses sweep the correction rather than pick one. See xsec_age_correction_bracket.
+    # mechanically), so the analyses sweep the correction rather than pick one.
     pfvc_age25 = pred_GLI(
       age       = rep(25, n()),
       height    = height_cm / 100,
@@ -123,7 +174,7 @@ write_parquet(pbw_pfvc_data, file.path(output_dir, "analysis_broad_pfvc.parquet"
 # 3b. Compute SF and PF ratios at measurement time using concurrent FiO2
 # =============================================================================
 # Ratios are computed at the time SpO2/PaO2 were measured, using the FiO2
-# that was active at that moment (most recent prior FiO2 within 4h).
+# that was active at that moment (most recent prior FiO2 within FIO2_LOOKBACK_H).
 # These pre-computed ratios are then carried forward to IMV timepoints.
 
 # --- FiO2 from waterfall (for matching to SpO2/PaO2 measurement times) ---
@@ -138,12 +189,10 @@ setkey(fio2_dt, hospitalization_id, fio2_dttm)
 # --- SF ratio: SpO2 / FiO2 at time of SpO2 measurement ---
 spo2_data <- cohort_vitals %>%
   filter(vital_category == "spo2", !is.na(vital_value)) %>%
-  # SpO2 inclusion range from the original analysis (PBWvsFVC): 80-97. The SF
-  # ratio is only valid within the (near-)linear part of the oxyhemoglobin
-  # dissociation curve; SpO2 >= 98 saturates and SpO2 < 80 falls off the curve.
-  # Restricting the SpO2 that defines the SF ratio enforces the original's
-  # `o2sat <= 97 & o2sat >= 80` hypoxemia criterion (the <= 97 bound was already
-  # applied in script 01; this adds the missing >= 80 floor).
+  # The SF ratio uses SpO2 80-97 only, the original analysis's (PBWvsFVC) range.
+  # Above 97 the SpO2-PaO2 relation is too flat (the curve saturates) and below 80
+  # too steep for SF to track PF. Both bounds are applied here: this is the only
+  # place the analytic cohort's SF is bounded, and script 01 keeps every SpO2.
   filter(vital_value >= 80, vital_value <= 97) %>%
   select(hospitalization_id, recorded_dttm, vital_value) %>%
   rename(spo2_value = vital_value, spo2_dttm = recorded_dttm) %>%
@@ -152,9 +201,11 @@ spo2_data <- cohort_vitals %>%
 spo2_dt <- as.data.table(spo2_data)
 setkey(spo2_dt, hospitalization_id, spo2_dttm_num)
 
-# Rolling join: for each SpO2, find most recent prior FiO2 within 4h
+# Rolling join: for each SpO2, find most recent prior FiO2 within FIO2_LOOKBACK_H.
+# The joined frame's fio2_dttm column holds the SpO2 time (a rolling join keeps the
+# i-side key), so sf_dttm is when the SpO2 was measured, not when FiO2 was set.
 sf_joined <- fio2_dt[spo2_dt,
-                      roll = 4 * 3600,
+                      roll = FIO2_LOOKBACK_H * 3600,
                       on = .(hospitalization_id, fio2_dttm = spo2_dttm_num)]
 
 sf_joined <- as_tibble(sf_joined) %>%
@@ -175,7 +226,7 @@ pao2_dt <- as.data.table(pao2_data)
 setkey(pao2_dt, hospitalization_id, pao2_dttm_num)
 
 pf_joined <- fio2_dt[pao2_dt,
-                      roll = 4 * 3600,
+                      roll = FIO2_LOOKBACK_H * 3600,
                       on = .(hospitalization_id, fio2_dttm = pao2_dttm_num)]
 
 pf_joined <- as_tibble(pf_joined) %>%
@@ -197,8 +248,8 @@ message("PF ratio computed at ", nrow(pf_joined), " PaO2 measurement times")
 
 
 # Build per-timepoint dataset from the waterfall output (IMV rows only; for the
-# never-intubated control, the HFNC / NIPPV / CPAP rows, with every ventilator
-# setting blanked so no dose or pressure variable is derived)
+# nosupport and niv cohorts, their own device rows, with every ventilator setting
+# blanked so no dose or pressure variable is derived)
 spine_devices <- switch(config$cohort, imv = "imv", niv = NIV_DEVICES, nosupport = NOSUPPORT_DEVICES)
 imv_timepoints <- resp_waterfall %>%
   filter(tolower(device_category) %in% spine_devices) %>%
@@ -233,12 +284,9 @@ analysis_data <- imv_timepoints %>%
     # ratio's difference-scale twin, but weighted differently: the ratio treats a 10%
     # mis-sizing the same in a 40 kg and a 90 kg patient, the difference does not, and
     # the difference is the quantity a clinician can act on (mL on the ventilator).
-    # pfvc_deficit_l is the same thing in litres of predicted lung (exactly proportional,
-    # ΔVT = -110 x deficit), kept because the units are the paper's size units.
     vt_excess_ml   = VT_PER_KG_ARMA * pbw - (VT_PCT_PFVC_ARMA / 100) * pfvc * 1000,
-    pfvc_deficit_l = pfvc - (VT_PER_KG_ARMA / (VT_PCT_PFVC_ARMA * 10)) * pbw,
-    vtpbw = tidal_volume_set / pbw,
-    vtpfvc = tidal_volume_set / pfvc * 0.1,
+    vtpbw = tidal_volume_set / pbw,                # mL/kg PBW
+    vtpfvc = tidal_volume_set / pfvc * 0.1,        # % of predicted FVC: VT (mL) / PFVC (L) x 0.1
     vtpfvc_age25 = tidal_volume_set / pfvc_age25 * 0.1,   # structural-only normalizer (age stripped)
     # QC AT SOURCE: plateau <= PEEP is non-physiologic (a ventilated patient
     # receiving a tidal volume cannot have zero/negative driving pressure) and
@@ -303,7 +351,8 @@ analysis_data <- imv_timepoints %>%
     #   mp_pbw   the conventional (Gattinoni) normalization, the biased comparator
     #   mp_crs   power per unit MEASURED compliance = MP x Ers (cmH2O/mL): energy per
     #            aerated lung, the functional-lung comparator; ~ DP^2, the most
-    #            recoil-laden of the three (scripts 08/09 use it as such)
+    #            recoil-laden of the three (04 and supplement/xsec_mortality_prediction.R
+    #            use it as such)
     mp_pbw  = mechanical_power / pbw,
     mp_pfvc = mechanical_power / pfvc,
     mp_pfvc_age25 = mechanical_power / pfvc_age25,
@@ -311,8 +360,8 @@ analysis_data <- imv_timepoints %>%
     # Elastic TIDAL component of power (J/min): the triangle 1/2 * VT * dP per breath,
     # the energy stored in the lung by the tidal breath, independent of flow pattern
     # (the mode split above concerns only the resistive/PEEP components of the total).
-    # This is the "specific elastic power" of the TTE plan when divided by PFVC; kept
-    # as a sensitivity to the total peak-pressure power. Defined wherever dP is.
+    # Divided by PFVC it is the specific elastic power, a sensitivity analysis for the
+    # total peak-pressure power. Defined wherever dP is.
     mp_elastic      = if_else(!is.na(dp) & dp > 0 & !is.na(resp_rate_set) & !is.na(tidal_volume_set),
                               0.098 * resp_rate_set * (tidal_volume_set / 1000) * 0.5 * dp,
                               NA_real_),
@@ -339,6 +388,8 @@ if (n_dp_bad > 0) {
 # --- NE equivalents: compute from cohort_meds and rolling-join to IMV timepoints ---
 # All catecholamine doses are first standardized to mcg/kg/min; vasopressin is
 # handled separately because it is dosed in units/min (units/hr), not mcg-based.
+# The conversion factors below (and vasopressin's 2.5 per unit/min) are published
+# norepinephrine-equivalence factors (citation in the Methods).
 catecholamines <- c("norepinephrine", "epinephrine", "dopamine",
                     "phenylephrine", "dobutamine")
 
@@ -400,7 +451,7 @@ analysis_ne_dt[, join_dttm := as.numeric(recorded_dttm)]
 setkey(analysis_ne_dt, hospitalization_id, join_dttm)
 
 analysis_ne_joined <- ne_dt[, .(hospitalization_id, join_dttm, ne_equiv_total)][
-  analysis_ne_dt, roll = 4 * 3600, on = .(hospitalization_id, join_dttm)
+  analysis_ne_dt, roll = MEASUREMENT_CARRY_H * 3600, on = .(hospitalization_id, join_dttm)
 ]
 analysis_ne_joined[, join_dttm := NULL]
 
@@ -410,72 +461,7 @@ analysis_data <- as_tibble(analysis_ne_joined) %>%
 message("NE equivalents joined: ", sum(analysis_data$ne_equiv_total > 0),
         " timepoints with vasopressors")
 
-# --- Ventilatory ratio: computed at PaCO2 measurement time ---
-# VR = (minute_vent_obs * PaCO2) / (PBW * 100 * 37.5)
-# Join minute_vent_obs from waterfall to PaCO2 timestamps, compute VR there,
-# then forward-join to IMV timepoints.
-pco2_data <- cohort_labs %>%
-  filter(lab_category == "pco2_arterial", !is.na(lab_value_numeric)) %>%
-  select(hospitalization_id, lab_result_dttm, lab_value_numeric) %>%
-  rename(paco2 = lab_value_numeric, pco2_dttm = lab_result_dttm) %>%
-  mutate(pco2_dttm_num = as.numeric(pco2_dttm))
-
-if (nrow(pco2_data) > 0) {
-  # Get minute_vent_obs from waterfall (with timestamps)
-  ve_data <- resp_waterfall %>%
-    filter(!is.na(minute_vent_obs)) %>%
-    select(hospitalization_id, recorded_dttm, minute_vent_obs) %>%
-    mutate(ve_dttm_num = as.numeric(recorded_dttm))
-
-  ve_dt <- as.data.table(ve_data)
-  setkey(ve_dt, hospitalization_id, ve_dttm_num)
-
-  pco2_dt_vr <- as.data.table(pco2_data)
-  setkey(pco2_dt_vr, hospitalization_id, pco2_dttm_num)
-
-  # Join nearest prior minute_vent_obs to each PaCO2 measurement (within 4h)
-  vr_at_pco2 <- ve_dt[, .(hospitalization_id, ve_dttm_num, minute_vent_obs)][
-    pco2_dt_vr, roll = 4 * 3600, on = .(hospitalization_id, ve_dttm_num = pco2_dttm_num)
-  ]
-
-  # Join PBW for each patient
-  vr_at_pco2 <- as_tibble(vr_at_pco2) %>%
-    left_join(pbw_pfvc_data %>% select(hospitalization_id, pbw), by = "hospitalization_id") %>%
-    mutate(
-      vent_ratio = if_else(
-        !is.na(minute_vent_obs) & !is.na(paco2) & !is.na(pbw) & pbw > 0,
-        (minute_vent_obs * paco2) / (pbw * 0.1 * 37.5),
-        NA_real_
-      ),
-      vr_dttm = ve_dttm_num  # timestamp = when PaCO2 was measured
-    ) %>%
-    rename(vr_minute_vent = minute_vent_obs, vr_paco2 = paco2) %>%
-    filter(!is.na(vent_ratio)) %>%
-    select(hospitalization_id, vr_dttm, vent_ratio, vr_minute_vent, vr_paco2)
-
-  # Join VR to nearest IMV timepoint within 1h (no long-range forward fill)
-  vr_for_join <- as.data.table(vr_at_pco2)
-  setkey(vr_for_join, hospitalization_id, vr_dttm)
-
-  analysis_vr_dt <- as.data.table(analysis_data)
-  analysis_vr_dt[, recorded_dttm_num := as.numeric(recorded_dttm)]
-  setkey(analysis_vr_dt, hospitalization_id, recorded_dttm_num)
-
-  analysis_vr <- vr_for_join[analysis_vr_dt,
-                               roll = 1 * 3600,
-                               on = .(hospitalization_id, vr_dttm = recorded_dttm_num)]
-  analysis_vr[, vr_dttm := NULL]
-
-  analysis_data <- as_tibble(analysis_vr)
-
-  message("Ventilatory ratio available at ", sum(!is.na(analysis_data$vent_ratio)),
-          " / ", nrow(analysis_data), " timepoints")
-} else {
-  analysis_data$vent_ratio <- NA_real_
-  message("No PaCO2 data available — ventilatory ratio set to NA")
-}
-
-# --- Join pre-computed SF ratio to IMV timepoints (most recent prior within 4h) ---
+# --- Join pre-computed SF ratio to IMV timepoints (most recent prior within MEASUREMENT_CARRY_H) ---
 sf_for_join <- as.data.table(sf_joined %>% select(hospitalization_id, sf_dttm, sf_ratio))
 setkey(sf_for_join, hospitalization_id, sf_dttm)
 
@@ -484,11 +470,11 @@ analysis_dt[, recorded_dttm_num := as.numeric(recorded_dttm)]
 setkey(analysis_dt, hospitalization_id, recorded_dttm_num)
 
 analysis_with_sf <- sf_for_join[analysis_dt,
-                                 roll = 4 * 3600,
+                                 roll = MEASUREMENT_CARRY_H * 3600,
                                  on = .(hospitalization_id, sf_dttm = recorded_dttm_num)]
 analysis_with_sf[, sf_dttm := NULL]
 
-# --- Join pre-computed PF ratio to IMV timepoints (most recent prior within 4h) ---
+# --- Join pre-computed PF ratio to IMV timepoints (most recent prior within MEASUREMENT_CARRY_H) ---
 pf_for_join <- as.data.table(pf_joined %>% select(hospitalization_id, pf_dttm, pf_ratio))
 setkey(pf_for_join, hospitalization_id, pf_dttm)
 
@@ -497,7 +483,7 @@ analysis_with_sf[, recorded_dttm_num := as.numeric(recorded_dttm)]
 setkey(analysis_with_sf, hospitalization_id, recorded_dttm_num)
 
 analysis_with_sf_pf <- pf_for_join[analysis_with_sf,
-                                     roll = 4 * 3600,
+                                     roll = MEASUREMENT_CARRY_H * 3600,
                                      on = .(hospitalization_id, pf_dttm = recorded_dttm_num)]
 analysis_with_sf_pf[, pf_dttm := NULL]
 
@@ -508,7 +494,7 @@ message("SF ratio available at ", sum(!is.na(analysis_with_sf$sf_ratio)),
 message("PF ratio available at ", sum(!is.na(analysis_with_sf$pf_ratio)),
         " / ", nrow(analysis_with_sf), " timepoints")
 
-# --- Join creatinine to IMV timepoints (most recent within 4h) ---
+# --- Join creatinine to IMV timepoints (most recent within MEASUREMENT_CARRY_H) ---
 creat_labs <- cohort_labs %>%
   filter(lab_category == "creatinine", !is.na(lab_value_numeric)) %>%
   select(hospitalization_id, creat_dttm = lab_result_dttm,
@@ -522,7 +508,7 @@ analysis_creat_dt[, recorded_dttm_num := as.numeric(recorded_dttm)]
 setkey(analysis_creat_dt, hospitalization_id, recorded_dttm_num)
 
 analysis_with_creat <- creat_for_join[analysis_creat_dt,
-                                       roll = 4 * 3600,
+                                       roll = MEASUREMENT_CARRY_H * 3600,
                                        on = .(hospitalization_id, creat_dttm = recorded_dttm_num)]
 analysis_with_creat[, creat_dttm := NULL]
 
@@ -538,7 +524,7 @@ message("Creatinine available at ", sum(!is.na(analysis_with_sf$creatinine)),
 message("Delta creatinine available at ", sum(!is.na(analysis_with_sf$delta_creatinine)),
         " / ", nrow(analysis_with_sf), " timepoints")
 
-# --- Join platelet count to IMV timepoints (most recent within 4h) ---
+# --- Join platelet count to IMV timepoints (most recent within MEASUREMENT_CARRY_H) ---
 platelet_labs <- cohort_labs %>%
   filter(lab_category == "platelet_count", !is.na(lab_value_numeric)) %>%
   select(hospitalization_id, platelet_dttm = lab_result_dttm,
@@ -552,7 +538,7 @@ analysis_platelet_dt[, recorded_dttm_num := as.numeric(recorded_dttm)]
 setkey(analysis_platelet_dt, hospitalization_id, recorded_dttm_num)
 
 analysis_with_platelet <- platelet_for_join[analysis_platelet_dt,
-                                             roll = 4 * 3600,
+                                             roll = MEASUREMENT_CARRY_H * 3600,
                                              on = .(hospitalization_id,
                                                     platelet_dttm = recorded_dttm_num)]
 analysis_with_platelet[, platelet_dttm := NULL]
@@ -585,8 +571,8 @@ analysis_with_sf <- analysis_with_sf %>%
     # Time from admission to death (any cause), using the patient-level death_dttm,
     # which captures out-of-hospital (post-discharge) deaths as well as in-hospital
     # deaths. discharge_dttm is deliberately NOT used as the survival endpoint:
-    # censoring survivors at hospital discharge discards known post-discharge vital
-    # status and is what caused the KM curves to censor most patients.
+    # censoring survivors at hospital discharge would discard known post-discharge
+    # vital status.
     death_day = as.numeric(difftime(death_dttm, admission_dttm, units = "days")),
     # All-cause mortality within the 60-day horizon. Patients with no recorded death
     # (or a death after day 60) are alive at the horizon and censored at day 60.
@@ -601,14 +587,12 @@ analysis_with_sf <- analysis_with_sf %>%
 # =============================================================================
 # 3e. Cross-sectional cohort selection
 # =============================================================================
-# Cross-sectional design: for each patient, take the FIRST IMV timepoint at
-# which all core analysis variables are observed ("first timepoint with all
-# available data"). A patient is included only if, AT that index timepoint,
-# they were receiving lung-protective tidal volumes (VT/PBW 6-8 mL/kg) AND
-# were hypoxemic (SF ratio < 315). Longitudinal / repeated-measures analyses
-# are deferred to a future project.
+# Cross-sectional design: one index timepoint per patient. A patient is included
+# if ANY IMV timepoint with all core variables observed is lung-protective
+# (VT/PBW 6-8 mL/kg) AND hypoxemic (SF ratio < 315); the index is then chosen
+# among those qualifying timepoints (two-tier rule below).
 
-# SF 315 is the Rice-equivalent of PF 300 (mild ARDS / hypoxemia threshold).
+# SF 315 is the Rice 2007 equivalent of PF 300 (mild ARDS / hypoxemia threshold).
 SF_HYPOXEMIA_THRESHOLD <- 315
 
 # A timepoint has "all available data" when the core analysis variables used in
@@ -636,48 +620,24 @@ write_parquet(analysis_with_completeness,
 # A patient is included if ANY complete-data IMV timepoint is simultaneously
 # lung-protective (VT/PBW 6-8) and hypoxemic (SF < threshold); the index timepoint
 # for that patient is then chosen by the two-tier rule below (preferring a
-# pressure-complete timepoint early in ventilation). The previous behaviour
-# required each patient's *first* complete-data timepoint to itself meet the
-# criteria, which discarded patients whose later timepoints qualified and shrank
-# the cohort relative to the original.
-# the control keeps the hypoxemia gate (acute hypoxemic respiratory failure on
-# HFNC/NIV) and has no lung-protective band to apply
-# the no-support control has no hypoxemia gate either (its patients are, by and
+# pressure-complete timepoint early in ventilation).
+# The niv cohort keeps the hypoxemia gate and has no lung-protective band to apply.
+# The no-support control has no hypoxemia gate either (its patients are, by and
 # large, not hypoxemic): a qualifying row is a room-air / nasal-cannula row with SF
-# observed, and the index is set at ICU admission (below)
+# observed, and the index is set at ICU admission (below).
 qualifying_timepoints <- analysis_with_completeness %>%
   filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8),
          config$cohort == "nosupport" | sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 
-# ---- the no-support control is indexed at ICU ADMISSION (2026-09-21)
-# The ventilated cohort's clock starts at intubation (the index is a median 4 h after
-# the first IMV record at MIMIC). The control's used to start at the stay's first
-# qualifying row, which can be the ED or the ward on arrival, days before the ICU stay
-# that qualified the hospitalization: a week from intubation was compared with a week
-# from hospital arrival. The index is now the first qualifying row within
-# CONTROL_ICU_WINDOW_H hours after an ICU admission, with no advanced support (HFNC,
-# NIV, IMV) before it: ICU entry is the event, as intubation is, and "no support" is
-# defined where it matters. The 24-hour escalation landmark below then runs from this
-# index. control_index_timing_{site}.csv (final/controls/) reports where the previous
-# rule's index fell relative to the ICU, and how many patients each rule keeps.
+# ---- the no-support control is indexed at ICU ADMISSION
+# The ventilated cohort's clock starts at intubation. The control's starts at ICU
+# entry: its index is the first qualifying row within CONTROL_ICU_WINDOW_H hours
+# after an ICU admission, with no advanced support (HFNC, NIV, IMV) before it. A
+# qualifying row earlier in the stay (the ED or the ward on arrival) is not used, so
+# a week of follow-up means a week from the same kind of event in both arms. The
+# escalation landmark below then runs from this index.
 if (config$cohort == "nosupport") {
-  CONTROL_ICU_WINDOW_H <- 6
   icu_stays <- read_parquet(file.path(output_dir, "cohort_icu_stays.parquet"))
-  inside_icu <- function(ids, times) {   # does each (patient, time) fall inside one of that stay's ICU episodes?
-    tibble(hospitalization_id = ids, t = times, row_id = seq_along(ids)) %>%
-      left_join(icu_stays, by = "hospitalization_id", relationship = "many-to-many") %>%
-      group_by(row_id) %>%
-      summarise(inside = any(!is.na(in_dttm) & t >= in_dttm & (is.na(out_dttm) | t <= out_dttm)), .groups = "drop") %>%
-      arrange(row_id) %>% pull(inside)
-  }
-  first_icu <- icu_stays %>% group_by(hospitalization_id) %>% summarise(first_icu_in = min(in_dttm), .groups = "drop")
-  # the previous rule's index, for the timing table
-  previous_index <- qualifying_timepoints %>%
-    group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
-    select(hospitalization_id, t_index = recorded_dttm) %>%
-    left_join(first_icu, by = "hospitalization_id") %>%
-    mutate(in_icu = inside_icu(hospitalization_id, t_index),
-           hours_to_first_icu = as.numeric(difftime(first_icu_in, t_index, units = "hours")))
   first_advanced <- resp_waterfall %>%
     filter(tolower(device_category) %in% SUPPORT_DEVICES | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
     group_by(hospitalization_id) %>% summarise(first_adv = min(recorded_dttm), .groups = "drop")
@@ -689,28 +649,12 @@ if (config$cohort == "nosupport") {
     filter(is.na(first_adv) | first_adv > recorded_dttm) %>%      # no advanced support before the index
     group_by(hospitalization_id) %>% slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
     select(-icu_in, -first_adv)
-  pct <- function(k, n) if (n > 0) round(100 * k / n, 1) else NA_real_
-  n_icu_inside <- sum(inside_icu(icu_index$hospitalization_id, icu_index$recorded_dttm))
-  timing <- tibble(
-    rule = c("previous: first qualifying row of the stay",
-             paste0("current: first qualifying row within ", CONTROL_ICU_WINDOW_H, " h of an ICU admission, no advanced support before it")),
-    n_patients = c(nrow(previous_index), nrow(icu_index)),
-    n_patients_index_in_icu = c(sum(previous_index$in_icu), n_icu_inside),
-    pct_index_in_icu = c(pct(sum(previous_index$in_icu), nrow(previous_index)), pct(n_icu_inside, nrow(icu_index))),
-    n_patients_index_gt24h_before_icu = c(sum(previous_index$hours_to_first_icu > 24, na.rm = TRUE), 0L),
-    hours_index_to_first_icu_q25 = c(quantile(previous_index$hours_to_first_icu, 0.25, na.rm = TRUE), NA),
-    hours_index_to_first_icu_median = c(median(previous_index$hours_to_first_icu, na.rm = TRUE), NA),
-    hours_index_to_first_icu_q75 = c(quantile(previous_index$hours_to_first_icu, 0.75, na.rm = TRUE), NA),
-    note = "counts before the 24-hour escalation landmark; negative hours = index after the first ICU admission",
-    site = site_name)
-  write_csv(timing, file.path(final_dir, paste0("control_index_timing_", site_name, ".csv")))
-  message("No-support index: previous rule ", nrow(previous_index), " patients, ", pct(sum(previous_index$in_icu), nrow(previous_index)),
-          "% of indices inside the ICU (median ", round(median(previous_index$hours_to_first_icu, na.rm = TRUE), 1),
-          " h to the first ICU admission); ICU-admission rule keeps ", nrow(icu_index), " patients")
+  message("No-support index: ", nrow(icu_index), " patients have a qualifying row within ",
+          CONTROL_ICU_WINDOW_H, " h of an ICU admission with no advanced support before it")
   qualifying_timepoints <- icu_index
 }
 
-message("Patients with >=1 complete-data IMV timepoint: ",
+message("Patients with >=1 complete-data timepoint: ",
         n_distinct(analysis_with_completeness$hospitalization_id[analysis_with_completeness$has_all_data]))
 
 # Index timepoint selection (two-tier, to reduce missing pressures in the
@@ -720,14 +664,13 @@ message("Patients with >=1 complete-data IMV timepoint: ",
 #      INDEX_WINDOW_HOURS of ventilation -- so dp/crs/ers (and MP, when peak
 #      pressure is also present) are observed at the index.
 #   2. FALLBACK: if no qualifying timepoint within that window has pressures, use
-#      the patient's first qualifying timepoint (the previous behaviour).
+#      the patient's first qualifying timepoint.
 # The cohort (set of included patients) is unchanged -- every patient with >= 1
 # qualifying timepoint is still included; only which timepoint represents them
 # changes, and the chosen index always satisfies the lung-protective + hypoxemic
 # eligibility criteria.
-INDEX_WINDOW_HOURS <- 6
 
-# t0 = each patient's first IMV timepoint ("first 6 hours on the ventilator").
+# imv_start_dttm = each patient's first IMV timepoint; the index window runs from it.
 imv_start <- analysis_with_completeness %>%
   group_by(hospitalization_id) %>%
   summarise(imv_start_dttm = min(recorded_dttm), .groups = "drop")
@@ -760,8 +703,9 @@ cross_sectional <- bind_rows(index_tier1, index_tier2) %>%
 eligible_patients <- cross_sectional$hospitalization_id
 if (config$cohort != "imv") {
   # escalation: the first row of the next level of support at or after the index
-  # (invasive ventilation for the NIV arm; any advanced support for the no-support
-  # control), the biotrauma suite's competing event for the control arms
+  # (invasive ventilation for the niv cohort; any advanced support for the no-support
+  # control), the biotrauma suite's competing event. Here t0 is the index time (not
+  # the first IMV row).
   esc_devices <- if (config$cohort == "niv") "imv" else SUPPORT_DEVICES
   esc <- resp_waterfall %>%
     filter(tolower(device_category) %in% esc_devices | (!is.na(tidal_volume_set) & tidal_volume_set > 0)) %>%
@@ -770,11 +714,12 @@ if (config$cohort != "imv") {
     group_by(hospitalization_id) %>% summarise(escalation_dttm = min(recorded_dttm), .groups = "drop")
   cross_sectional <- cross_sectional %>% left_join(esc, by = "hospitalization_id")
   if (config$cohort == "nosupport") {
-    # 24-hour landmark: a patient escalated within a day of the index is the
-    # pre-support stub of a supported course, not an unsupported patient
+    # escalation landmark: a patient escalated within ESCALATION_LANDMARK_H of the
+    # index is the pre-support stub of a supported course, not an unsupported patient
     early <- !is.na(cross_sectional$escalation_dttm) &
-      cross_sectional$escalation_dttm < cross_sectional$recorded_dttm + lubridate::hours(24)
-    message("No-support control: ", sum(early), " patients escalated within 24 h of the index removed")
+      cross_sectional$escalation_dttm < cross_sectional$recorded_dttm + lubridate::hours(ESCALATION_LANDMARK_H)
+    message("No-support control: ", sum(early), " patients escalated within ", ESCALATION_LANDMARK_H,
+            " h of the index removed")
     cross_sectional <- cross_sectional[!early, ]
     eligible_patients <- cross_sectional$hospitalization_id
   }
@@ -782,21 +727,23 @@ if (config$cohort != "imv") {
           sum(!is.na(cross_sectional$escalation_dttm)), " later escalated (recorded as a competing event)")
 }
 
-message("Index timepoint: ", nrow(index_tier1), " patients used a pressure-complete ",
-        "qualifying timepoint within ", INDEX_WINDOW_HOURS, " h of ventilation; ",
-        nrow(index_tier2), " fell back to the first qualifying timepoint.")
-message("Index timepoints with driving pressure observed: ",
-        sum(!is.na(cross_sectional$dp)), " of ", nrow(cross_sectional))
-
-message("Included patients (VT/PBW 6-8 AND SF<", SF_HYPOXEMIA_THRESHOLD,
-        " at any complete-data timepoint): ", length(eligible_patients))
+if (config$cohort == "imv") {
+  message("Index timepoint: ", nrow(index_tier1), " patients used a pressure-complete ",
+          "qualifying timepoint within ", INDEX_WINDOW_HOURS, " h of ventilation; ",
+          nrow(index_tier2), " fell back to the first qualifying timepoint.")
+  message("Index timepoints with driving pressure observed: ",
+          sum(!is.na(cross_sectional$dp)), " of ", nrow(cross_sectional))
+  message("Included patients (VT/PBW 6-8 AND SF<", SF_HYPOXEMIA_THRESHOLD,
+          " at any complete-data timepoint): ", length(eligible_patients))
+}
 
 # =============================================================================
 # 3e2. SOFA: the worst values over the 24 hours from the index
 # =============================================================================
 # One SOFA score per patient, from the worst value of each input between the index
-# timepoint and SOFA_WINDOW_H hours after it: the first qualifying ventilator row
-# for the ventilated cohort, ICU admission for the no-support control. The scoring
+# timepoint and SOFA_WINDOW_H hours after it: the ventilator row chosen in 3e for
+# the ventilated cohort, the first qualifying row after ICU admission for the
+# no-support control. The scoring
 # is clifR's compute_sofa() (github.com/AartikSarma/clifR, the commit pinned in
 # uvr.toml), a port of clifpy's, so the definition is the consortium's:
 #   cardiovascular  dopamine > 15, or epinephrine or norepinephrine > 0.1 mcg/kg/min: 4;
@@ -808,7 +755,6 @@ message("Included patients (VT/PBW 6-8 AND SF<", SF_HYPOXEMIA_THRESHOLD,
 #                   standard SOFA cut points
 #   A component with no data in the window scores 0.
 # Vasoactive doses are converted to mcg/kg/min first (utils/standardize_pressor_dose.R).
-SOFA_WINDOW_H <- 24
 SOFA_COMPONENTS <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_resp", "sofa_cns", "sofa_renal")
 sofa_window <- cross_sectional %>%
   transmute(hospitalization_id, start_time = recorded_dttm,
@@ -872,8 +818,7 @@ message("SOFA over the 24 h from the index (clifR): median ", median(cross_secti
               collapse = ", "))
 
 # All IMV timepoints for the included patients, retained for descriptive
-# summaries. Repeated-measures / longitudinal modeling is deferred to a
-# future project, so no per-timepoint eligibility flags are computed here.
+# summaries; no per-timepoint eligibility flags are computed here.
 analysis_all <- analysis_with_sf %>%
   filter(hospitalization_id %in% eligible_patients)
 
@@ -897,9 +842,9 @@ imv_hours_28d <- resp_waterfall %>%
 
 # VFD-28: 28 minus ventilator days, deaths within 28 days get 0.
 # Death is all-cause (in- or out-of-hospital) within 28 days, from the patient-level
-# death_dttm — consistent with the 60-day survival endpoint. The previous in-hospital
-# -only condition (deceased == 1) wrongly credited ventilator-free days to patients
-# who died out of hospital within 28 days.
+# death_dttm — consistent with the 60-day survival endpoint. An in-hospital-only
+# condition (deceased == 1) would credit ventilator-free days to patients who died out
+# of hospital within 28 days.
 vfd_data <- cohort_demographics %>%
   filter(hospitalization_id %in% eligible_patients) %>%
   select(hospitalization_id, deceased, death_dttm, admission_dttm) %>%
@@ -943,16 +888,6 @@ message("28-day VFDs computed. Median VFD-28: ",
         round(median(vfd_data$vfd_28, na.rm = TRUE), 1))
 
 # =============================================================================
-# 3g. VFR terciles
-# =============================================================================
-
-cross_sectional <- cross_sectional %>%
-  mutate(
-    vfr_tercile = if (all(is.na(vtpfvc))) factor(rep(NA_character_, n()), levels = c("T1 (Low)", "T2 (Mid)", "T3 (High)")) else
-      factor(ntile(vtpfvc, 3), labels = c("T1 (Low)", "T2 (Mid)", "T3 (High)"))
-  )
-
-# =============================================================================
 # 3h. Save outputs
 # =============================================================================
 
@@ -976,17 +911,22 @@ partial_path <- file.path(output_dir, "attrition_log_partial.csv")
 if (!file.exists(partial_path)) {
   stop("Missing attrition_log_partial.csv from script 01: ", partial_path)
 }
+# Step 4 also loses patients with missing or unknown sex (PBW is undefined) and
+# those whose PFVC cannot be computed, so its reason names them.
+attrition_steps <- attrition_steps_for(config$cohort)   # step labels (utils/attrition_log.R)
 attrition <- read_csv(partial_path, show_col_types = FALSE) %>%
-  attrition_add(ATTRITION_STEPS[4], n_step4,
-                exclusion_reason = "Height outside 150-210 cm or PBW/PFVC missing") %>%
-  attrition_add(ATTRITION_STEPS[5], n_step5,
+  attrition_add(attrition_steps[4], n_step4,
+                exclusion_reason = "Height missing or outside 150-210 cm, or sex, PBW or PFVC missing") %>%
+  attrition_add(attrition_steps[5], n_step5,
                 exclusion_reason = if (config$cohort != "imv") "Incomplete index data (SF)" else
                   "Incomplete index data (VT/PBW, VT/PFVC, SF)") %>%
-  attrition_add(ATTRITION_STEPS[6], n_step6,
-                exclusion_reason = if (config$cohort != "imv") "(no lung-protective band for the control arms)" else
+  attrition_add(attrition_steps[6], n_step6,
+                exclusion_reason = if (config$cohort != "imv") "(no tidal-volume band applies)" else
                   "Not lung-protective (VT/PBW outside 6-8)") %>%
-  attrition_add(ATTRITION_STEPS[7], n_step7,
-                exclusion_reason = if (config$cohort == "nosupport") "Escalated within 24 h of the index" else "Not hypoxemic (SF ratio >= 315)") %>%
+  attrition_add(attrition_steps[7], n_step7,
+                exclusion_reason = if (config$cohort == "nosupport")
+                  paste0("No qualifying row within ", CONTROL_ICU_WINDOW_H, " h of ICU admission, or escalated within ",
+                         ESCALATION_LANDMARK_H, " h of the index") else "Not hypoxemic (SF ratio >= 315)") %>%
   mutate(site = site_name, .before = 1)
 
 write_csv(attrition, file.path(final_dir, paste0("attrition_log_", site_name, ".csv")))
@@ -1043,7 +983,7 @@ write_parquet(nc_cohort, file.path(output_dir, "analysis_negative_control.parque
 message("Negative-control cohorts: ", paste(capture.output(print(table(nc_cohort$nc_cohort))), collapse = " | "))
 
 # =============================================================================
-# 3j. Federated PBW:PFVC distribution exports (site-specific; poolable)
+# 3l. Federated PBW:PFVC distribution exports (site-specific; poolable)
 # =============================================================================
 # Aggregated summaries of the PBW:PFVC ratio by demographic group only -- no
 # row-level data leaves the site. (a) histograms on fixed bins (summable across

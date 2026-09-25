@@ -2,6 +2,27 @@
 # Script 02: Quality Checks
 # PBW vs PFVC Replication Using CLIF Data
 # =============================================================================
+# Sets physiologically implausible values to NA before any variable is derived, so
+# that script 03 onward reads one cleaned copy of each table. Nothing is excluded
+# here: a patient loses a value, not a place in the cohort.
+#
+# Population: the cohort script 01 built, selected by PBWPFVC_COHORT (imv, the
+# default and the paper's cohort; nosupport, the negative control; niv, on request).
+#
+# Rules, all from outlier-thresholds/:
+#   labs, SpO2 and MAP     outlier_thresholds_labs.csv, outlier_thresholds_adults_vitals.csv
+#   height                 120-230 cm, a plausibility screen only; the 150-210 cm
+#                          eligibility window is applied in script 03
+#   ventilator settings    outlier_thresholds_respiratory_support.csv, per column
+#   driving pressure and   derived per row; a value out of range removes that row's
+#   compliance             plateau pressure (see the end of the script)
+#
+# Inputs (the cohort's intermediate folder, from script 01): cohort_hospitalization_ids.rds,
+#   resp_support_waterfall, cohort_vitals, cohort_labs and cohort_heights (.parquet).
+# Outputs (same folder): those four tables with the suffix _clean, read by script 03,
+#   10_panel_common.R and 21_biotrauma_panel.R; summary_stats/ holds lab and vital
+#   summaries for the site's own review and is not returned.
+# =============================================================================
 
 library(tidyverse)
 library(arrow)
@@ -91,8 +112,10 @@ message("Vital summary stats:")
 print(vital_summary)
 
 # =============================================================================
-# Heights: apply manual thresholds (120-230 cm)
+# Heights: plausibility screen (120-230 cm)
 # =============================================================================
+# Implausible heights are set to NA. This is not the eligibility window: the
+# 150-210 cm range of the GLI-2012 equations is applied in script 03 (3a).
 
 cohort_heights_clean <- cohort_heights %>%
   mutate(height_cm = if_else(

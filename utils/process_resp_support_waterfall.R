@@ -1,8 +1,14 @@
 #' Clean + waterfall-fill the CLIF resp_support table
 #'
-#' R port of the Python reference pipeline. Builds an hourly scaffold,
+#' R port of clifpy's respiratory-support waterfall. Builds an hourly scaffold,
 #' applies device/mode heuristics, creates hierarchical episode IDs,
 #' and performs numeric waterfall fill inside each mode_name_id block.
+#'
+#' Only the SET parameters (and resp_rate_obs) are filled. The observed pressures
+#' (plateau_pressure_obs, peak_inspiratory_pressure_obs, mean_airway_pressure_obs)
+#' and minute_vent_obs are deliberately never filled: a measured pressure is valid
+#' only at the moment it was recorded, so downstream driving pressure, compliance
+#' and mechanical power are computed only where a pressure was actually charted.
 #'
 #' @param resp_support A data.frame / tibble of the raw CLIF respiratory-support
 #'   table (timestamps assumed UTC).
@@ -34,18 +40,9 @@ process_resp_support_waterfall <- function(resp_support,
     out
   }
 
-  # Helper: change-ID — cumulative sum of transitions within groups
+  # Helper: change-ID -- a block number that increments each time the value
+  # changes, counted separately within each encounter
   change_id <- function(col, id) {
-    filled <- replace_na(col, "missing")
-    tibble(.id = id, .val = filled) |>
-      mutate(.changed = .val != lag(.val, default = ""),
-             .changed = replace_na(.changed, TRUE),
-             .block = cumsum(.changed),
-             .data.table.aware = NULL,
-             .id_change = .val != lag(.val, default = ""),
-             .id_change = replace_na(.id_change, TRUE)) |>
-      pull(.block) -> blocks
-    # Redo properly: per-group cumsum
     dt <- data.table(.id = id, .val = replace_na(col, "missing"))
     dt[, .result := cumsum(c(TRUE, .val[-1] != .val[-.N])), by = .id]
     as.integer(dt$.result)

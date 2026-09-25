@@ -8,7 +8,8 @@
 # fraction of the time while code is still changing. Point the pipeline at the
 # subset without editing config.json:
 #
-#   uvr run code/tools/subset_synthetic.R -- --frac 0.3 --seed 1
+#   uvr run code/tools/subset_synthetic.R -- --frac 0.3 --seed 1 [--out <folder>]
+#     (--out defaults to the source folder's name with _sub<percent> appended)
 #   PBWPFVC_TABLES_PATH=~/Research/synthetic_clif/synth_clif_10k_sub30 \
 #     uvr run code/01_cohort_identification.R      # and so on for 02, 03
 #

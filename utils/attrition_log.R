@@ -7,14 +7,15 @@
 # 03 applies the analytic filters), script 01 writes a partial log and script 03
 # reads it back and appends the remaining steps.
 #
-# The step ordering and labels are hard-coded constants: pooling across sites
-# (script 05) sums n by step_order, which is only exact if every site emits the
-# identical, ordered set of steps.
+# The step ordering and labels are hard-coded constants, so every site emits the
+# identical, ordered set of steps and the logs can be compared or summed across
+# sites step by step. utils/site_anonymization.R ranks sites by the last step's n.
 
 library(tidyverse)
 
-# Canonical inclusion steps, in order. Steps 1-3 are logged in script 01,
-# steps 4-7 in script 03.
+# Canonical inclusion steps of the ventilated (imv) cohort, in order. Steps 1-3 are
+# logged in script 01, steps 4-7 in script 03. These labels are pooled across sites:
+# do not reword them.
 ATTRITION_STEPS <- c(
   "Adults (age >= 18)",
   "ICU admission",
@@ -24,6 +25,32 @@ ATTRITION_STEPS <- c(
   "Lung-protective VT/PBW 6-8 mL/kg",
   "Hypoxemic (SF ratio < 315)"
 )
+
+# The nosupport and niv cohorts follow the same seven steps, but steps 3, 5, 6 and 7 mean
+# something else there: entry is by first respiratory support, the index needs only an
+# SF ratio, no tidal-volume band applies (step 6 excludes no one), and the no-support
+# control's last step is its ICU-admission index and 24-hour escalation landmark.
+ATTRITION_STEPS_CONTROL <- list(
+  nosupport = c(
+    ATTRITION_STEPS[1:2],
+    "Room air or nasal cannula before any advanced support",
+    ATTRITION_STEPS[4],
+    "Complete index data (SF ratio)",
+    "No tidal-volume band (no set tidal volume)",
+    "Indexed at ICU admission, not escalated within 24 h"
+  ),
+  niv = c(
+    ATTRITION_STEPS[1:2],
+    "High-flow nasal cannula or non-invasive ventilation as first advanced support",
+    ATTRITION_STEPS[4],
+    "Complete index data (SF ratio)",
+    "No tidal-volume band (no set tidal volume)",
+    ATTRITION_STEPS[7]
+  )
+)
+attrition_steps_for <- function(cohort) {
+  if (cohort == "imv") ATTRITION_STEPS else ATTRITION_STEPS_CONTROL[[cohort]]
+}
 
 # Empty log with the correct column schema/types.
 attrition_init <- function() {

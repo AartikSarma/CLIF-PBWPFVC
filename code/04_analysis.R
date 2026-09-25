@@ -1,6 +1,57 @@
 # =============================================================================
-# Script 04: Analysis
+# Script 04: Cross-sectional analysis -- demographic bias, mechanics, mortality
 # PBW vs PFVC Replication Using CLIF Data
+# =============================================================================
+# Pipeline script (run after 03). Written for the ventilated analytic cohort:
+# run it with PBWPFVC_COHORT unset (imv). The control cohorts reach the paper
+# through scripts 21-29, not through this script.
+#
+# Question (figures 1-3, Tables 1-2): predicted body weight (PBW) sets the tidal
+# volume, but predicted FVC (PFVC, race-specific GLI-2012) is the better estimate of
+# lung size. Does PBW mis-size the lung differently by age, sex and race, and, at a
+# fixed delivered dose (VT/PBW), do the mis-sizing ratio PBW/PFVC and predicted lung
+# size itself go with lung mechanics, ventilator liberation and death?
+#
+# Populations
+#   analysis_cross_sectional  hypoxemic, ventilated adults at VT/PBW 6-8 mL/kg, one
+#                             row per patient (script 03); every section except:
+#   analysis_broad_pfvc       every eligible patient with height, age, sex, race and
+#                             PFVC, ventilated or not (4f3)
+#   analysis_negative_control ventilated non-hypoxemic and non-ventilated cohorts (4j)
+#
+# Model families (section)
+#   4c  logistic, in-hospital death              4d  linear, lung mechanics (Ers, Crs,
+#   4d2 Fine-Gray, liberation by day 28              DP, Ers x PBW/PFVC, MP and MP/size)
+#   4f  Cox, 60-day all-cause death              4f2 demographic bias of each metric
+#   4f3 PFVC on PBW + demographics               4g2 E-values, spline-age sensitivity
+#   4j  negative-control cohorts                 4k  saturated log model (VT, PBW, PFVC)
+#   4l  delivered strain inside the band (figure 2)
+# Covariates in 4c-4f: unadjusted = SOFA + SF ratio; adjusted = unadjusted + age10 +
+# sex + race; either + BMI when the outcome or exposure is driving-pressure derived
+# (DP_DERIVED). Every 4c, 4d, 4d2 and 4f model is reported both ways (adjustment
+# column). Sections 4f2, 4f3, 4j and 4k state their own covariate sets.
+# Exposure specs (4c, 4d, 4d2): VT/PFVC; VT/PBW; VT/PFVC + VT/PBW; VT/PBW + PFVC;
+# VT/PBW + log PFVC; VT/PBW + PBW/PFVC; VT/PBW + VT excess (mL). The Cox models (4f)
+# carry three: VT/PBW with PBW/PFVC, with PFVC, and with log PFVC.
+#
+# Environment: PBWPFVC_NC_MIN_EVENTS (default 10) is the minimum number of deaths
+# for a 4j or 4k model; lower it only to test the plumbing on a small site.
+#
+# Inputs : analysis_cross_sectional, analysis_broad_pfvc, analysis_negative_control
+#          (.parquet, script 03); final/cross_sectional/attrition_log_<site>.csv (03)
+# Outputs: final/cross_sectional/, each file suffixed _<site>, pooled across sites
+#          by the coordinator's pooling script (not distributed with this code):
+#   table1_                          Table 1 (4a)
+#   regression_results_long_         every model's coefficients, adjusted and
+#                                    unadjusted (Table 2 and the forest plots)
+#   aic_comparison_all_              evidence ratios vs VT/PBW alone (4e)
+#   evalues_                         E-values and spline-age estimates (4g2)
+#   consort_diagram_ (pdf)           inclusion flow (4i, site QC)
+#   negative_control_, negative_control_{counts, identifying_variation,
+#     interaction}_                  the negative-control cohorts (4j)
+#   size_saturated_log_model_, size_functional_form_   (4k)
+#   dose_vtpfvc_histograms_, dose_variance_decomposition_   figure 2 (4l;
+#                                    code/pooling/pooled_displays.R)
 # =============================================================================
 
 library(tidyverse)
@@ -12,23 +63,35 @@ library(broom)
 library(EValue)
 
 source("utils/config.R")
-source("utils/consort_diagram.R")
+source("utils/consort_diagram.R")   # supplies render_consort() (section 4i)
 site_name <- config$site_name
 
 output_dir <- config$output_dir
 final_dir <- final_dir_for("cross_sectional")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
+# Minimum counts per model (the CLIF consortium minimum-count standard)
+MIN_DP_OBS             <- 30   # driving-pressure observations, Static DP demographic-bias model (4f2)
+NC_MIN_PATIENTS        <- 50   # patients per cohort, negative-control models (4j)
+NC_MIN_EVENTS          <- as.integer(Sys.getenv("PBWPFVC_NC_MIN_EVENTS", "10"))   # deaths per model (4j, 4k)
+SATURATED_MIN_PATIENTS <- 100  # complete patients, saturated log model (4k)
+
+# Dose thresholds summarised for each negative-control cohort (4j)
+VTPBW_BAND_MAX  <- 8    # mL/kg, upper edge of the 6-8 mL/kg lung-protective band
+VTPFVC_ARMA_P75 <- 11   # % of predicted FVC, about the 75th percentile of VT/PFVC in the ARMA low tidal volume arm
+
+# Age and height strata of figure 2 (4l), left-closed. Reason for these cut
+# points: author to supply.
+DOSE_AGE_BREAKS    <- c(18, 40, 50, 60, 70, 80, Inf)
+DOSE_HEIGHT_BREAKS <- c(150, 160, 170, 180, 190, 210)
 
 # =============================================================================
 # Load data
 # =============================================================================
 
 cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
-analysis_all <- read_parquet(file.path(output_dir, "analysis_all_timepoints.parquet"))
 
 message("Cross-sectional: ", nrow(cross_sectional), " observations")
-message("All timepoints: ", nrow(analysis_all), " observations")
 
 # Reference categories: Male and White. Set in script 03, but re-applied here so
 # the reference is explicit and robust to the parquet round-trip; all regressions
@@ -94,10 +157,12 @@ message("Table 1 written (", n_cohort, " patients)")
 covariates       <- "race_category + age10 + sex_category + sofa_total + sf10"
 covariates_unadj <- "sofa_total + sf10"
 
-# Per the original paper, any model whose outcome OR exposure is derived from
-# driving pressure (static DP, elastance, compliance, and the elastance-normalized
-# Ers x PBW / Ers x PFVC) is additionally adjusted for BMI. Models without a
-# driving-pressure component use the standard covariate set.
+# As in the original paper (PMC12313249), any model whose outcome OR exposure is
+# derived from driving pressure (static DP, elastance, compliance, the
+# elastance-normalized Ers x PBW / Ers x PFVC, and mechanical power with its
+# PBW-, PFVC- and Crs-normalized and elastic-component variants) is additionally
+# adjusted for BMI. Models without a driving-pressure component use the standard
+# covariate set.
 DP_DERIVED <- c("dp", "ers", "crs", "ers_pbw", "ers_pfvc",
                 "mechanical_power", "mp_pbw", "mp_pfvc", "mp_crs",
                 "mp_elastic", "mp_elastic_pbw", "mp_elastic_pfvc")
@@ -160,12 +225,10 @@ if (has_mortality_variation) {
 }
 
 # =============================================================================
-# 4d. Linear regression — continuous outcomes (elastance, compliance, VFD-28, DP)
+# 4d. Linear regression — elastance, compliance, driving pressure, and the
+#     PBW- and PFVC-normalized Ers and mechanical power
 # =============================================================================
 
-# NOTE: 28-day VFDs are NOT modeled here as a continuous outcome. Per Yehya &
-# Harhay (AJRCCM 2019), VFDs are analyzed as a competing-risks outcome (extubation
-# vs death) in section 4d2 below; mortality (section 4c) is the other component.
 continuous_outcomes <- list(
   ers      = list(var = "ers",              label = "Elastance"),
   crs      = list(var = "crs",              label = "Compliance"),
@@ -302,7 +365,8 @@ aic_all <- bind_rows(aic_results, .id = "outcome") %>%
     ),
     # Sample-size-standardized: delta_AIC per 1000 patients and its evidence ratio,
     # so the figure separates models the raw ratio saturates at 1000 and cohorts of
-    # different size are comparable (pooled_estimates.R uses the same scale).
+    # different size are comparable (the coordinator's pooling script, not
+    # distributed with this code, uses the same scale).
     delta_AIC_per_1k = delta_AIC / n_obs * 1000,
     er_per_1k        = exp(-0.5 * delta_AIC_per_1k),
     er_per_1k_trunc  = pmin(pmax(er_per_1k, ER_FLOOR), ER_CEIL),
@@ -336,7 +400,8 @@ aic_all <- aic_all %>% mutate(exposure = factor(exposure, levels = exposure_orde
 message("AIC comparison (evidence ratios vs VT/PBW-alone within each outcome):")
 print(aic_all)
 
-# pooled_estimates.R draws the evidence-ratio heatmap across sites from this table
+# The evidence-ratio heatmap across sites is drawn from this table by the
+# coordinator's pooling script (not distributed with this code).
 write_csv(aic_all, file.path(final_dir, paste0("aic_comparison_all_", site_name, ".csv")))
 
 # =============================================================================
@@ -389,10 +454,16 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
 }
 
 # =============================================================================
-# 4f2. Demographic-bias models (outcome ~ demographics only)
+# 4f2. Demographic-bias models (outcome ~ age + sex + race + height + SF + SOFA)
 # =============================================================================
 # How each dosing / driving-pressure / elastance metric varies by demographics
-# (the algorithmic-bias view). Predictors are scaled per 10 units (age, height,
+# (the algorithmic-bias view). Every model adjusts for age, sex, race, height, SF
+# ratio and SOFA; driving-pressure-derived outcomes add BMI. These models are
+# descriptive, not causal: the coefficients of interest are age, sex and race, and
+# height is held fixed so that they compare patients of the same height rather than
+# proxy for height differences between groups. (4g2's over-adjustment argument
+# concerns the exposure-mortality models, where height is part of the exposure's
+# identifying variation.) Predictors are scaled per 10 units (age, height,
 # SF ratio). Outcomes for the dosing and elastance-normalized metrics are
 # z-scored WITHIN SITE (so standardized betas are comparable across cohorts in SD
 # units, and no row-level data is needed to pool). Static DP is on the raw cmH2O
@@ -412,7 +483,7 @@ demo_models <- list()
 
 # z-scored linear outcomes. The elastance- and power-normalized outcomes are
 # driving-pressure derivatives, so they are adjusted for BMI (matching the
-# original paper); VT/PBW and VT/PFVC are not. MP/PBW vs MP/PFVC is the
+# original paper, PMC12313249); VT/PBW and VT/PFVC are not. MP/PBW vs MP/PFVC is the
 # mechanical-power parallel of the Ers x PBW vs Ers x PFVC pair: the sign of the
 # demographic term should flip with the denominator in the same way.
 demo_z_outcomes <- c(vtpbw = "VT/PBW", vtpfvc = "VT/PFVC (%)",
@@ -423,7 +494,8 @@ for (v in names(demo_z_outcomes)) {
   fstr <- paste0("scale(", v, ") ~ ", cov_v)
   demo_models[[demo_z_outcomes[[v]]]] <- list(
     model = lm(as.formula(fstr), data = demo_data),
-    type = "Beta", family = "linear", formula = fstr
+    type = "Beta", family = "linear", formula = fstr,
+    outcome_scale = "z-scored within site (SD units)"
   )
 }
 
@@ -432,19 +504,21 @@ if (has_mortality_variation) {
   fstr <- paste("deceased ~", demo_covars)
   demo_models[["Mortality"]] <- list(
     model = glm(as.formula(fstr), data = demo_data, family = binomial),
-    type = "OR", family = "logistic", formula = fstr
+    type = "OR", family = "logistic", formula = fstr,
+    outcome_scale = "natural units"
   )
 }
 
 # Static DP raw linear + BMI (guard on minimum driving-pressure N)
-if (sum(!is.na(demo_data$dp)) >= 30) {
+if (sum(!is.na(demo_data$dp)) >= MIN_DP_OBS) {
   fstr <- paste("dp ~", demo_covars_bmi)
   demo_models[["Static DP"]] <- list(
     model = lm(as.formula(fstr), data = demo_data),
-    type = "Beta", family = "linear", formula = fstr
+    type = "Beta", family = "linear", formula = fstr,
+    outcome_scale = "natural units"
   )
 } else {
-  message("Skipping Static DP demographic-bias model: < 30 driving-pressure observations")
+  message("Skipping Static DP demographic-bias model: < ", MIN_DP_OBS, " driving-pressure observations")
 }
 
 message("Demographic-bias models fitted (", length(demo_models), " outcomes); rows in regression_results_long")
@@ -473,18 +547,20 @@ message("PFVC-vs-PBW model fitted (N = ", nrow(broad_pfvc), "); rows in regressi
 # One row per (model, term). Every estimate is reported on its natural scale —
 # OR for logistic regression, HR for the Cox model, Beta for linear regression —
 # alongside its 95% CI, p-value, estimate type, variable name, and the full model
-# specification. This is the per-cohort artifact that script 05 stacks across
-# cohorts to build cross-cohort forest plots, so the column schema must stay
-# stable across sites.
+# specification. The coordinator's pooling script (not distributed with this code)
+# stacks this table across sites for the cross-site forest plots, so the column
+# schema must stay stable across sites. outcome_scale marks the rows whose outcome
+# was z-scored within site (4f2): their Betas are in SD units of the outcome.
 
 extract_model_results <- function(model, estimate_type, analysis,
                                   model_spec, model_family, formula_str,
-                                  adjustment = "adjusted") {
+                                  adjustment = "adjusted",
+                                  outcome_scale = "natural units") {
   # OR / HR are reported on the exponentiated (ratio) scale; Beta is the raw
   # linear coefficient. broom::tidy applies the matching transform to estimate
   # and CI together so they stay internally consistent. `adjustment` flags whether
   # the model is demographic-adjusted (age/sex/race) or unadjusted; both are
-  # reported and script 06 plots the adjusted as primary plus a comparison.
+  # reported, the adjusted as primary.
   exponentiate <- estimate_type %in% c("OR", "HR")
   broom::tidy(model, conf.int = TRUE, exponentiate = exponentiate) %>%
     transmute(
@@ -501,7 +577,8 @@ extract_model_results <- function(model, estimate_type, analysis,
       model_family  = model_family,
       adjustment    = adjustment,
       formula       = formula_str,
-      n_obs         = stats::nobs(model)
+      n_obs         = stats::nobs(model),
+      outcome_scale = outcome_scale
     )
 }
 
@@ -539,8 +616,8 @@ results_long <- c(results_long, imap(vfd_cr_models, ~ {
                         exposure_labels[[.y]], "finegray", formula_str)
 }))
 
-# 60-day death hazard (Cox proportional hazards -> hazard ratios). Two exposure
-# specs, mirroring the mortality models; HR > 1 = higher death hazard (worse), the
+# 60-day death hazard (Cox proportional hazards -> hazard ratios). Three exposure
+# specs (PBW/PFVC, PFVC, log PFVC, each with VT/PBW), mirroring the mortality models; HR > 1 = higher death hazard (worse), the
 # same direction as the mortality OR.
 if (exists("cox_model")) {
   cox_covars  <- "vtpbw + age10 + sex_category + race_category + sf10 + sofa_total"
@@ -558,8 +635,8 @@ if (exists("cox_model")) {
 
 # --- Demographic-UNADJUSTED variants of the exposure->outcome models -----------
 # Drop age/sex/race; keep illness severity (SOFA + SF) and BMI for DP-derived.
-# Reported alongside the adjusted estimates (adjustment = "unadjusted"); script 06
-# plots the adjusted as primary and adds an adjusted-vs-unadjusted comparison. The
+# Reported alongside the adjusted estimates (adjustment = "unadjusted"); the
+# adjusted are primary, and the pair shows what the demographics change. The
 # rendered tables, E-values, and evidence ratios above use the adjusted models.
 make_formula_unadj <- function(lhs, exposure, determinant) {
   cov <- model_covariates(determinant, adjusted = FALSE)
@@ -635,7 +712,8 @@ if (exists("cox_model")) {
 results_long <- c(results_long, imap(demo_models, ~ {
   extract_model_results(.x$model, if (.x$type == "OR") "OR" else "Beta",
                         paste0("Demo bias: ", .y), "Demographics",
-                        .x$family, .x$formula)
+                        .x$family, .x$formula,
+                        outcome_scale = .x$outcome_scale)
 }))
 
 # Predicted FVC vs PBW (broad cohort)
@@ -644,8 +722,8 @@ results_long <- c(results_long, list(
                         "PFVC ~ PBW", "linear", pfvc_vs_pbw_formula)
 ))
 
-# Drop intercepts (not a reportable effect) and stamp the cohort name so the
-# table is self-describing once aggregated across sites in script 05.
+# Drop intercepts (not a reportable effect) and stamp the site name so the
+# table is self-describing once pooled across sites.
 regression_results_long <- bind_rows(results_long) %>%
   filter(term != "(Intercept)") %>%
   mutate(site = site_name, .before = 1)
@@ -674,8 +752,8 @@ message("Unified regression results table: ", nrow(regression_results_long),
 # to be a truly unmeasured common cause acting outside this deterministic structure
 # — exactly what the E-value bounds.
 #
-# This section reports, for every ratio-scale exposure estimate (mortality OR,
-# 60-day survival HR, 28-day liberation Fine-Gray SHR):
+# This section reports, for each exposure term in EXPOSURE_TERMS in the mortality
+# OR, 60-day survival HR and 28-day liberation Fine-Gray SHR models:
 #   1. the per-1-SD estimate under LINEAR age (the main-model specification),
 #   2. the per-1-SD estimate under SPLINE age (race + ns(age, 4) + sex + SOFA + SF):
 #      the direct bound on nonlinear-age confounding — an estimate unchanged under
@@ -691,6 +769,10 @@ message("Unified regression results table: ", nrow(regression_results_long),
 # the E-value (rare = FALSE; VanderWeele & Ding, Ann Intern Med 2017); the
 # Fine-Gray subdistribution HR uses the same common-outcome HR conversion.
 
+# vt_excess_ml is left out: it is the difference parameterization of the same
+# PBW-vs-PFVC disagreement that pbwpfvc carries (see exposure_specs), so the
+# "VT/PBW + VT excess (mL)" models are refitted with spline age but contribute only
+# their VT/PBW row to this table.
 EXPOSURE_TERMS <- c("vtpfvc", "vtpbw", "pfvc", "log_pfvc", "pbwpfvc")
 exposure_term_labels_ev <- c(vtpfvc = "VT/PFVC", vtpbw = "VT/PBW",
                              pfvc = "PFVC", log_pfvc = "log PFVC", pbwpfvc = "PBW/PFVC")
@@ -820,7 +902,7 @@ if (!is.null(mortality_models)) {
                          "Mortality (in-hospital)", "OR", cross_sectional)))
 }
 
-# 60-day death hazard (Cox, HR) — PBW/PFVC and PFVC exposure specs.
+# 60-day death hazard (Cox, HR) — PBW/PFVC, PFVC and log PFVC exposure specs.
 if (!is.null(cox_model_spline)) {
   residual_list <- c(residual_list, list(
     residual_conf_rows(cox_model, cox_model_spline, "VT/PBW + PBW/PFVC",
@@ -847,8 +929,8 @@ residual_confounding <- bind_rows(residual_list) %>%
   mutate(analysis = as.character(analysis)) %>%
   mutate(site = site_name, .before = 1)
 
-# Filename kept as `evalues_<site>` for continuity; the table now also carries the
-# linear- vs spline-age estimates alongside the E-values.
+# evalues_<site>: per-SD estimates under linear and spline age, with E-values for
+# the linear-age estimate.
 write_csv(residual_confounding, file.path(final_dir, paste0("evalues_", site_name, ".csv")))
 message("Residual-confounding table written (", nrow(residual_confounding),
         " ratio-scale exposure estimates across ",
@@ -872,11 +954,11 @@ message("CONSORT diagram saved")
 # The analytic cohort is hypoxemic AND ventilated with PBW-dosed tidal volumes. Two
 # non-hypoxemic cohorts (script 01 / 03k) separate the pathways:
 #   * Ventilated, non-hypoxemic (dosed, uninjured lung): still receives PBW-dosed
-#     tidal volumes (at MIMIC the median VT/PBW is the same as the analytic cohort's,
-#     with 12% above 8 mL/kg). A NEGATIVE control for hypoxemia-specific mechanisms
-#     and a POSITIVE control for the dosing pathway: PBW/PFVC harm should persist here.
-#     The strict definition (never hypoxemic during ventilation) leaves few patients
-#     at a single site (240 at MIMIC), so it reads only when pooled.
+#     tidal volumes (negative_control_counts reports its delivered VT/PBW). A
+#     NEGATIVE control for hypoxemia-specific mechanisms and a POSITIVE control for
+#     the dosing pathway: PBW/PFVC harm should persist here. The strict definition
+#     (never hypoxemic during ventilation) leaves few patients per site, so this
+#     cohort is read only when pooled.
 #   * Not ventilated (no tidal volume): the true no-dose control. A ventilatory
 #     pathway predicts attenuation of PBW/PFVC, PFVC and height here.
 # The three cohorts share ONE adjustment set (age, sex, race) because SOFA and the
@@ -911,7 +993,6 @@ nc_sd <- cross_sectional %>%
 nc_exposures <- c(pbwpfvc = "PBW/PFVC", pfvc = "PFVC", height_cm = "Height",
                   vt_excess_ml = "VT excess (mL)", vtpbw = "VT/PBW", vtpfvc = "VT/PFVC")
 nc_age_forms <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
-NC_MIN_EVENTS <- as.integer(Sys.getenv("PBWPFVC_NC_MIN_EVENTS", "10"))   # min deaths per cell (lower only to test plumbing)
 
 nc_fit_one <- function(df, expo, cohort_lab) {
   d <- df %>% filter(nc_cohort == cohort_lab) %>%
@@ -921,7 +1002,7 @@ nc_fit_one <- function(df, expo, cohort_lab) {
   out <- tibble()
   for (af in names(nc_age_forms)) {
     rhs <- paste("z +", nc_age_forms[[af]], "+ sex_category + race_category")
-    if (nrow(d) >= 50 && n_death >= NC_MIN_EVENTS) {
+    if (nrow(d) >= NC_MIN_PATIENTS && n_death >= NC_MIN_EVENTS) {
       m <- glm(as.formula(paste("deceased ~", rhs)), data = d, family = binomial)
       cf <- summary(m)$coefficients["z", ]
       out <- bind_rows(out, tibble(age_form = af, outcome = "In-hospital mortality", estimate_type = "OR",
@@ -929,7 +1010,7 @@ nc_fit_one <- function(df, expo, cohort_lab) {
         conf_high = exp(cf["Estimate"] + 1.96 * cf["Std. Error"]), std_error = cf["Std. Error"],
         p_value = cf["Pr(>|z|)"], n = nrow(d), events = n_death))
     }
-    if (nrow(d) >= 50 && n_death60 >= NC_MIN_EVENTS) {
+    if (nrow(d) >= NC_MIN_PATIENTS && n_death60 >= NC_MIN_EVENTS) {
       d60 <- d %>% filter(!is.na(surv_time), surv_time > 0)
       m <- survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)), data = d60)
       cf <- summary(m)$coefficients["z", ]
@@ -953,15 +1034,18 @@ nc_counts <- nc_frames %>% group_by(cohort = nc_cohort) %>%
             # delivered dose (ventilated cohorts only): the dosing-pathway read
             n_with_vt = sum(!is.na(vtpbw)),
             median_vtpbw = median(vtpbw, na.rm = TRUE), q25_vtpbw = quantile(vtpbw, .25, na.rm = TRUE),
-            q75_vtpbw = quantile(vtpbw, .75, na.rm = TRUE), pct_vtpbw_over_8 = mean(vtpbw > 8, na.rm = TRUE),
-            median_vtpfvc = median(vtpfvc, na.rm = TRUE), pct_vtpfvc_over_11 = mean(vtpfvc > 11, na.rm = TRUE),
+            q75_vtpbw = quantile(vtpbw, .75, na.rm = TRUE),
+            pct_vtpbw_over_8 = mean(vtpbw > VTPBW_BAND_MAX, na.rm = TRUE),
+            median_vtpfvc = median(vtpfvc, na.rm = TRUE),
+            pct_vtpfvc_over_11 = mean(vtpfvc > VTPFVC_ARMA_P75, na.rm = TRUE),
             .groups = "drop") %>%
   mutate(cohort = factor(cohort, nc_cohort_levels)) %>% arrange(cohort)
 write_csv(nc_results, file.path(final_dir, paste0("negative_control_", site_name, ".csv")))
 write_csv(nc_counts,  file.path(final_dir, paste0("negative_control_counts_", site_name, ".csv")))
 
 # --- Identifying variation: what is left of each exposure after the adjusters -------
-# The ratio is ~99% demographics, so after age, sex and race its coefficient is
+# The ratio is almost entirely a function of the demographics (the share is reported
+# in residual_variance_share), so after age, sex and race its coefficient is
 # estimated from a sliver of residual variation; PFVC keeps far more. The share of
 # each exposure's variance that survives the adjustment set explains the CI widths
 # in one number, and the share of THAT residual explained by height says what the
@@ -975,14 +1059,14 @@ nc_idvar <- map_dfr(nc_cohort_levels, function(cl) {
   d <- nc_frames %>% filter(nc_cohort == cl)
   map_dfr(names(nc_exposures), function(e) {
     z <- d[[e]]; ok <- is.finite(z)
-    if (sum(ok) < 50) return(tibble())
+    if (sum(ok) < NC_MIN_PATIENTS) return(tibble())
     map_dfr(names(nc_age_forms), function(af) {
       map_dfr(c("demographics", "demographics + VT/PBW"), function(adj) {
         if (adj == "demographics + VT/PBW" && (e == "vtpbw" || all(is.na(d$vtpbw)))) return(tibble())
         rhs <- paste(nc_age_forms[[af]], "+ sex_category + race_category",
                      if (adj == "demographics + VT/PBW") "+ vtpbw" else "")
         dd <- d[ok, ]; if (adj == "demographics + VT/PBW") dd <- dd %>% filter(is.finite(vtpbw))
-        if (nrow(dd) < 50) return(tibble())
+        if (nrow(dd) < NC_MIN_PATIENTS) return(tibble())
         fit <- lm(as.formula(paste(e, "~", rhs)), data = dd)
         tibble(cohort = cl, exposure = nc_exposures[[e]], age_form = af, adjustment = adj,
                n = nrow(dd), r2_on_adjusters = summary(fit)$r.squared,
@@ -1010,7 +1094,7 @@ print(as.data.frame(nc_idvar %>% filter(age_form == "linear") %>%
 # across sites (random effects on the log difference); the p-values by Fisher.
 nc_interaction <- map_dfr(names(nc_exposures), function(e) {
   d <- nc_frames %>% mutate(z = .data[[e]] / nc_sd[[e]]) %>% filter(is.finite(z))
-  keep <- d %>% count(nc_cohort) %>% filter(n >= 50) %>% pull(nc_cohort)
+  keep <- d %>% count(nc_cohort) %>% filter(n >= NC_MIN_PATIENTS) %>% pull(nc_cohort)
   d <- d %>% filter(nc_cohort %in% keep) %>%
     mutate(cohort = factor(nc_cohort, levels = intersect(nc_cohort_levels, keep)))
   if (n_distinct(d$cohort) < 2) return(tibble())
@@ -1080,8 +1164,8 @@ if (nrow(nc_results)) print(as.data.frame(nc_results %>% filter(age_form == "lin
 # the span of three columns, log VT, log PBW and log PFVC. The saturated model with all
 # three is the reference; each two-term model is that model plus one linear constraint,
 # and each "parameterization" is a change of basis with the same likelihood. So the
-# honest table is the saturated fit, spline age PRIMARY (the ratio's linear-age
-# association was the convex part of the age curve), linear age as the sensitivity:
+# honest table is the saturated fit, spline age PRIMARY (at fixed sex and race the
+# ratio varies mainly through the curvature of age), linear age as the sensitivity:
 #   log PFVC at fixed VT and PBW: same breath, same PBW label, larger predicted lung --
 #       lower strain and lower ratio together (the strain-error effect; wide, because
 #       within demographics PFVC at fixed PBW varies only through age curvature)
@@ -1092,14 +1176,16 @@ if (nrow(nc_results)) print(as.data.frame(nc_results %>% filter(age_form == "lin
 # model "VT/PBW + PBW/PFVC" imposes b_VT + b_PBW + b_PFVC = 0, which is SCALE INVARIANCE
 # (scale breath, body and lung together and nothing changes -- only dimensionless ratios
 # carry information), a physiologic hypothesis tested as a one-df Wald test, plus the
-# LRT of each constraint. Coefficients per log unit (x1.1 = a 10% increase). (C) keeps
+# LRT of each constraint. Coefficients per log unit (x1.1 = a 10% increase). (B) is
 # the functional-form ladder for the size term (PFVC linear / log / 1/x; ratio linear /
 # log). In-hospital (logistic) and 60-day (Cox) death; each outcome only where it has
-# >= 10 events.
+# at least NC_MIN_EVENTS deaths, and only with SATURATED_MIN_PATIENTS complete patients.
 sz <- cross_sectional %>%
   filter(vtpbw > 0, pbwpfvc > 0, pbw > 0, pfvc > 0, !is.na(sofa_total), !is.na(sf10)) %>%
   mutate(l_vt = log(tidal_volume_set), l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_pbw = log(pbw),
          l_pfvc = log(pfvc), l_vtpfvc = log(vtpfvc), inv_pfvc = 1 / pfvc)
+message("4k frame (positive VT/PBW, PBW/PFVC, PBW and PFVC; SOFA and SF recorded): ",
+        nrow(cross_sectional), " -> ", nrow(sz), " patients")
 sz_age <- c(linear = "age10", spline = "splines::ns(age_at_admission, 4)")
 sz_base <- "sex_category + race_category + sofa_total + sf10"
 sz_fit <- function(rhs, outcome) {
@@ -1108,11 +1194,11 @@ sz_fit <- function(rhs, outcome) {
   else survival::coxph(as.formula(paste("survival::Surv(surv_time, mortality_event_60) ~", rhs)),
                        data = sz %>% filter(!is.na(surv_time), surv_time > 0))
 }
-# each outcome runs only where it has >= 10 events (the synthetic site has none in-hospital)
+# each outcome runs only where it has at least NC_MIN_EVENTS deaths
 sz_events <- c("In-hospital mortality" = sum(sz$deceased == 1, na.rm = TRUE),
                "60-day mortality" = sum(sz$mortality_event_60 == 1, na.rm = TRUE))
-sz_outcomes <- names(sz_events)[sz_events >= 10]
-sz_ok <- length(sz_outcomes) >= 1 && nrow(sz) >= 100
+sz_outcomes <- names(sz_events)[sz_events >= NC_MIN_EVENTS]
+sz_ok <- length(sz_outcomes) >= 1 && nrow(sz) >= SATURATED_MIN_PATIENTS
 
 if (sz_ok) {
   # --- (A) the saturated log model + constraint tests ---------------------------------
@@ -1124,7 +1210,7 @@ if (sz_ok) {
     f_ratio <- sz_fit(paste("l_vtpbw + l_ratio +", cov), oc)         # b_VT + b_PBW + b_PFVC = 0 (scale invariance)
     f_strain<- sz_fit(paste("l_vtpfvc +", cov), oc)                  # b_VT + b_PFVC = 0 and b_PBW = 0
     terms <- c("l_vt", "l_pbw", "l_pfvc"); b <- coef(f_sat)[terms]; V <- vcov(f_sat)[terms, terms]
-    cf <- if (inherits(f_sat, "coxph")) summary(f_sat)$coefficients[terms, ] else summary(f_sat)$coefficients[terms, ]
+    cf <- summary(f_sat)$coefficients[terms, ]
     est <- if (inherits(f_sat, "coxph")) cf[, "coef"] else cf[, "Estimate"]
     se  <- if (inherits(f_sat, "coxph")) cf[, "se(coef)"] else cf[, "Std. Error"]
     lrt <- function(f0) { x <- 2 * (as.numeric(logLik(f_sat)) - as.numeric(logLik(f0))); c(x, attr(logLik(f_sat), "df") - attr(logLik(f0), "df")) }
@@ -1151,7 +1237,7 @@ if (sz_ok) {
   })) %>% mutate(scale = "per log unit (x1.1 = +10%); constraint rows: exp(sum of coefficients), 1 = constraint holds", site = site_name)
   write_csv(size_saturated, file.path(final_dir, paste0("size_saturated_log_model_", site_name, ".csv")))
 
-  # --- (C) functional-form ladder for the size term -------------------------------------
+  # --- (B) functional-form ladder for the size term -------------------------------------
   sz_forms <- c("PFVC (linear)" = "pfvc", "log PFVC" = "l_pfvc", "1/PFVC" = "inv_pfvc",
                 "PBW/PFVC (linear)" = "pbwpfvc", "log PBW/PFVC" = "l_ratio",
                 "log PBW/PFVC + log PBW" = "l_ratio + l_pbw")
@@ -1171,11 +1257,12 @@ if (sz_ok) {
           transmute(outcome, age_form, term_label,
                     exp_sum = ifelse(is.na(estimate), NA, sprintf("%.2f [%.2f, %.2f]", estimate, conf_low, conf_high)),
                     wald_p = signif(p_value, 2), lrt_p = signif(lrt_p, 2))), row.names = FALSE)
-  cat("--- 4k(C) functional form of the size term (delta AIC vs linear PFVC; negative = better) ---\n")
+  cat("--- 4k(B) functional form of the size term (delta AIC vs linear PFVC; negative = better) ---\n")
   print(as.data.frame(size_form %>% transmute(outcome, age_form, size_term, dAIC = round(delta_AIC_vs_linear_pfvc, 1))),
         row.names = FALSE)
 } else {
-  message("4k skipped: no outcome with >= 10 events, or fewer than 100 complete rows in the analytic cohort")
+  message("4k skipped: no outcome with >= ", NC_MIN_EVENTS, " deaths, or fewer than ",
+          SATURATED_MIN_PATIENTS, " complete patients in the analytic cohort")
 }
 
 # =============================================================================
@@ -1193,19 +1280,23 @@ if (sz_ok) {
 #     covariance) so the pooled decomposition is exact: pooled variance is the
 #     within-site variance plus the spread of the site means.
 VTPFVC_BIN_EDGES <- seq(4, 25, by = 0.5)
+# The 6-8 mL/kg band itself is applied in script 03 (the analytic cohort's
+# inclusion); this filter only drops rows whose logs are undefined.
 dose_band <- cross_sectional %>%
   filter(vtpbw > 0, pbwpfvc > 0, vtpfvc > 0) %>%
   mutate(l_vtpbw = log(vtpbw), l_ratio = log(pbwpfvc), l_vtpfvc = log(vtpfvc))
+message("4l frame (positive VT/PBW, PBW/PFVC and VT/PFVC): ",
+        nrow(cross_sectional), " -> ", nrow(dose_band), " patients")
 stopifnot(max(abs(dose_band$l_vtpfvc - (dose_band$l_vtpbw + dose_band$l_ratio - log(10)))) < 1e-6)
 dose_groups <- bind_rows(
   dose_band %>% transmute(group_type = "overall", group_value = "all", value = vtpfvc),
   dose_band %>% transmute(group_type = "sex", group_value = as.character(sex_category), value = vtpfvc),
   dose_band %>% transmute(group_type = "race", group_value = as.character(race_category), value = vtpfvc),
   dose_band %>% transmute(group_type = "age_bin",
-                          group_value = as.character(cut(age_at_admission, c(18, 40, 50, 60, 70, 80, Inf), right = FALSE)),
+                          group_value = as.character(cut(age_at_admission, DOSE_AGE_BREAKS, right = FALSE)),
                           value = vtpfvc),
   dose_band %>% transmute(group_type = "height_bin",
-                          group_value = as.character(cut(height_cm, c(150, 160, 170, 180, 190, 210), right = FALSE)),
+                          group_value = as.character(cut(height_cm, DOSE_HEIGHT_BREAKS, right = FALSE)),
                           value = vtpfvc)) %>%
   filter(!is.na(group_value))
 dose_histograms <- dose_groups %>%

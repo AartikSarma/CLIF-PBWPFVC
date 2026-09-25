@@ -6,8 +6,10 @@
 #
 #   biotrauma_fig_main_{tag}.pdf   THE figure, for a window with three or more
 #       horizons (the 7-day run): one row per marker, the contrast toward injury
-#       from hour 0 to the end of the window, the rate per day adjusted beside
-#       unadjusted, and the posterior probability of harm by day
+#       from hour 0 to the end of the window; the rate per day in every arm (the
+#       two no-support controls at the ventilated severity, any ventilated SF
+#       classes, and ventilated all), adjusted beside unadjusted; and the
+#       posterior probability of harm by day
 #   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: every
 #       outcome against each control (every no-support patient, and the no-support
 #       patients hypoxemic on the index day): the markers' difference-in-differences,
@@ -15,10 +17,10 @@
 #   biotrauma_fig_channels_{tag}.pdf   the channels form only: the contrast per
 #       GLI piece
 #
-# The level-contrast, divergence, trajectory, estimator and pressor figures were
-# cut on 2026-09-24 (docs/output_manifest.md): the main figure carries the same
-# estimates, and the estimator and pressor figures needed the 48-hour runner's
-# tables.
+# Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
+#
+# Both differences-in-differences are drawn in the checks figure and pooled: the
+# hypoxemic one (SF < 315) isolates ventilation, the all-patients one is the larger sample.
 #
 # A lower PFVC is the negative of every log-marker estimate; the figures label
 # the injury direction per marker so the eye does not have to flip signs.
@@ -33,7 +35,7 @@ source("utils/config.R")
 site_name <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-SIZE_EX   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column (pfvc_dose: at the median dose)
+size_exposure_term   <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")   # the form's size exposure column (pfvc_dose: at the median dose)
 SIZE_LAB  <- switch(MOD_FORM, disc_level = "per SD of log PBW/PFVC (VT/PFVC at a given VT/PBW)",
                     vtpfvc = "per point of VT/PFVC (% of predicted FVC) at a given VT/PBW", "per SD of log PFVC")
 FLIP_INJ  <- MOD_FORM %in% c("disc_level", "vtpfvc")   # a HIGHER value of these is the smaller lung
@@ -41,25 +43,26 @@ fig_dir   <- Sys.getenv("PBWPFVC_FIG_DIR", final_dir_for("injury"))
 tag       <- paste0(restrict_tag, if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "", h_suffix, "_", site_name)
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9")
 theme_set(theme_minimal(base_size = 11))
-worse <- c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
-           ne_equiv_peak = "higher", pressor_dose = "higher", ne_equiv = "higher", any_pressor = "higher",
+# every marker 22_biotrauma_fit.R can fit; figure 4's runner fits all but dp,
+# ne_equiv_peak, oi and any_pressor, which are drawn only if a run supplies them
+worse <-c(creatinine = "higher", platelets = "lower", bilirubin = "higher", sf = "lower", dp = "higher",
+           ne_equiv_peak = "higher", pressor_dose = "higher", any_pressor = "higher",
            osi = "higher", oi = "higher")
 lab <- c(creatinine = "Creatinine", platelets = "Platelets", bilirubin = "Bilirubin", sf = "SF ratio\n(positive control:\nrecruitment, not injury)",
          dp = "Driving pressure", ne_equiv_peak = "Vasopressor dose\n(NE-equivalents per kg,\nzero days included)",
-         pressor_dose = "Vasopressor dose\n(NE-equivalents per kg,\ndays on a pressor)", ne_equiv = "NE-equivalents",
+         pressor_dose = "Vasopressor dose\n(NE-equivalents per kg,\ndays on a pressor)",
          any_pressor = "Any vasopressor (log-odds)",
          osi = "Oxygen saturation index\n(numerator-driven, flagged)", oi = "Oxygenation index\n(numerator-driven, flagged)")
 read_if <- function(f) if (file.exists(f)) read_csv(f, show_col_types = FALSE) else NULL
-# Vasopressor dose is per kg, the clinician's dosing scale (heavier patients need
-# more drug in absolute terms, which is why it is dosed per kg), so, like VT/PBW,
-# it is read on that scale without a size caveat (user, 2026-09-21).
+# Vasopressor dose is per kg, the clinical dosing scale, and is read like VT/PBW
+# without a size caveat.
 RRT_MARKERS <- character(0)   # markers taken from the dialysis-as-third-cause run
 marker_label <- function(m) paste0(lab[m], "\n(worse = ", worse[m], ")",
                                    if_else(m %in% RRT_MARKERS, "\ndialysis modelled as a third cause", ""))
 
 # ---- inputs
-lc <- read_if(file.path(fig_dir, paste0("jm_level_contrast_", tag, ".csv")))
-es <- read_if(file.path(fig_dir, paste0("jm_estimates_", tag, ".csv")))
+level_contrasts <- read_if(file.path(fig_dir, paste0("jm_level_contrast_", tag, ".csv")))
+joint_estimates <- read_if(file.path(fig_dir, paste0("jm_estimates_", tag, ".csv")))
 # PBWPFVC_JM_WITH_RRT=1 folds the dialysis-as-third-cause run (creatinine) into
 # these figures. That fit lives in its own `rrtcause_` tables so a sensitivity
 # never overwrites the primary, which also means it is invisible on the shared
@@ -78,15 +81,15 @@ if (identical(Sys.getenv("PBWPFVC_JM_WITH_RRT", "0"), "1")) {
     message("folding in the dialysis-as-third-cause fit for: ", paste(RRT_MARKERS, collapse = ", "))
     as_text <- function(d) d %>% mutate(across(everything(), as.character))
     retype  <- function(d) d %>% type_convert(guess_integer = TRUE, na = c("", "NA"))
-    lc <- if (is.null(lc)) rlc else retype(bind_rows(as_text(lc %>% filter(!marker %in% RRT_MARKERS)), as_text(rlc)))
-    es <- if (is.null(es)) res else retype(bind_rows(as_text(es %>% filter(!marker %in% RRT_MARKERS)), as_text(res)))
+    level_contrasts <- if (is.null(level_contrasts)) rlc else retype(bind_rows(as_text(level_contrasts %>% filter(!marker %in% RRT_MARKERS)), as_text(rlc)))
+    joint_estimates <- if (is.null(joint_estimates)) res else retype(bind_rows(as_text(joint_estimates %>% filter(!marker %in% RRT_MARKERS)), as_text(res)))
   }
 }
-if (is.null(lc) || is.null(es)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
+if (is.null(level_contrasts) || is.null(joint_estimates)) stop("no joint-model tables for tag ", tag, " in ", fig_dir)
 
 # ---- channels form: the size effect identified through each GLI input, from the joint model
 if (MOD_FORM == "channels") {
-  chd <- lc %>% filter(exposure %in% CHANNELS, model == "main", marker %in% names(lab)) %>%
+  chd <- level_contrasts %>% filter(exposure %in% CHANNELS, model == "main", marker %in% names(lab)) %>%
     mutate(channel = factor(sub("^ch_", "", exposure), c("height", "age", "sex", "race")),
            inj = if_else(worse[marker] == "higher", -estimate, estimate),
            inj_lo = if_else(worse[marker] == "higher", -hi, lo), inj_hi = if_else(worse[marker] == "higher", -lo, hi),
@@ -108,13 +111,12 @@ if (MOD_FORM == "channels") {
   quit(save = "no")
 }
 
-# ---- 0. the level contrasts: the scientific question, one figure
-#         Joint-model marker difference at 24/48/72 h per SD LOWER log PFVC at a
-#         given VT/PBW, oriented so that right of zero is MORE injury for every
-#         marker (sign flipped for markers whose worse direction is lower), in log
-#         units; any vasopressor as an odds ratio. Each point is
-#         labelled with the posterior probability of harm.
-lc0 <- lc %>% filter(exposure == SIZE_EX, model == "main", marker %in% names(lab)) %>%
+# ---- 1. the level contrasts: the joint-model marker difference at every horizon from
+#         day 0 to the end of the window, per SD LOWER log PFVC at a given VT/PBW,
+#         oriented so that above zero is MORE injury for every marker (sign flipped
+#         for markers whose worse direction is lower), on the log scale (log-odds for
+#         any vasopressor), with the posterior probability of harm.
+level_contrast_ventilated <- level_contrasts %>% filter(exposure == size_exposure_term, model == "main", marker %in% names(lab)) %>%
   mutate(binary = marker == "any_pressor",
          # log-scale contrast per unit LOWER PFVC, in the injury direction
          inj = if_else(worse[marker] == "higher", -estimate, estimate),
@@ -127,12 +129,12 @@ lc0 <- lc %>% filter(exposure == SIZE_EX, model == "main", marker %in% names(lab
          p_lab = sprintf("P(harm) %.2f", p_harm))
 unit_lower <- switch(MOD_FORM, disc_level = "per SD HIGHER log PBW/PFVC (a lung smaller than PBW predicts)",
                      vtpfvc = "per point HIGHER VT/PFVC (% of predicted FVC) at the same VT/PBW", "per SD lower log PFVC")
-# for the discordance form a HIGHER discordance is the smaller lung: the injury direction flips
-if (FLIP_INJ) lc0 <- lc0 %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
+# for the disc_level and vtpfvc forms a higher value is the smaller lung: the injury direction flips
+if (FLIP_INJ) level_contrast_ventilated <- level_contrast_ventilated %>% mutate(inj = -inj, i_lo = -inj_hi, inj_hi = -inj_lo, inj_lo = i_lo, p_harm = 1 - p_harm,
                                                     p_lab = sprintf("P(harm) %.2f", p_harm)) %>% select(-i_lo)
-if (!nrow(lc0)) stop("no level contrasts for exposure ", SIZE_EX, " in tag ", tag)
+if (!nrow(level_contrast_ventilated)) stop("no level contrasts for exposure ", size_exposure_term, " in tag ", tag)
 
-# ---- 0b. THE figure: one row per marker, three panels (three or more horizons only)
+# ---- 2. THE figure: one row per marker, three panels (three or more horizons only)
 #      A  the contrast as it accumulates: the joint model's marker difference toward
 #         injury per unit lower PFVC at each horizon, hour 0 through the end of the
 #         window, with its exact posterior interval. On a long window this is a line
@@ -143,22 +145,21 @@ if (!nrow(lc0)) stop("no level contrasts for exposure ", SIZE_EX, " in tag ", ta
 #      C  the posterior probability that the contrast lies in the injury direction,
 #         by horizon: where the evidence starts and where it ends up.
 #      Rows carry the patient and death counts. A marker whose exposure terms did not
-#      converge is drawn hollow and dashed, placed last, and says so in its label:
-#      the any-vasopressor rate at MIMIC came back with an R-hat of 2.5 beside labs at
-#      1.01, and without the flag they looked the same.
-if (n_distinct(lc0$horizon_h) >= 3) {
-  RHAT_GATE <- 1.1
+#      converge is drawn hollow and dashed, placed last, and says so in its label, so an
+#      unconverged fit is never read as a result.
+if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
+  RHAT_GATE <- 1.1   # the standard convergence threshold
   inj_sign <- function(m) if_else(worse[m] == "higher", -1, 1) * if_else(FLIP_INJ, -1, 1)
-  rate <- es %>%
+  rate <- joint_estimates %>%
     filter(block == "longitudinal", model == "main", marker %in% names(lab),
-           term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
+           term %in% c(paste0(size_exposure_term, ":vent_day"), paste0("vent_day:", size_exposure_term))) %>%
     transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
               s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
               rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
   failed <- rate %>% filter(!ok) %>% group_by(marker) %>%
     summarise(note = paste0("\n", paste(sprintf("%s R-hat %.2f", adjustment, rhat), collapse = "; "), ": not converged"),
               .groups = "drop")
-  counts <- es %>% filter(model == "main") %>% distinct(marker, n_patients, n_deaths) %>%
+  counts <- joint_estimates %>% filter(model == "main") %>% distinct(marker, n_patients, n_deaths) %>%
     group_by(marker) %>% slice(1) %>% ungroup()
   show_count <- function(x) formatC(x, big.mark = ",", format = "d")
   row_label <- function(m) {
@@ -168,8 +169,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
            coalesce(failed$note[match(m, failed$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.
-  # "platelets,bilirubin,creatinine,ne_equiv_peak" to show the vasopressor as dose in
-  # place of the unconverged yes/no model. Without it, every marker in the tables:
+  # "platelets,bilirubin,creatinine,pressor_dose". Without it, every marker in the tables:
   # PBWPFVC_FIG_ORDER first (default: the markers where the rate carries the finding),
   # the rest in the order of `lab`. Unconverged markers go last either way.
   fig_markers <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_MARKERS", ""), ",")[[1]])
@@ -183,7 +183,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
   converged <- setdiff(present, failed$marker)
   row_order <- row_label(c(converged, setdiff(present, converged)))
   rate  <- rate %>% mutate(marker_lab = factor(row_label(marker), row_order))
-  trend <- lc0 %>% filter(marker %in% present) %>%
+  trend <- level_contrast_ventilated %>% filter(marker %in% present) %>%
     left_join(rate %>% select(marker, adjustment, ok), by = c("marker", "adjustment")) %>%
     mutate(day = horizon_h / 24, ok = coalesce(ok, FALSE),
            marker_lab = factor(row_label(marker), row_order))
@@ -226,7 +226,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
                          if (nzchar(Sys.getenv("PBWPFVC_FIG_DIR", ""))) "" else file.path(config$final_root, "controls"))
   rate_rows <- function(est) est %>%
     filter(block == "longitudinal", model == "main", marker %in% present,
-           term %in% c(paste0(SIZE_EX, ":vent_day"), paste0("vent_day:", SIZE_EX))) %>%
+           term %in% c(paste0(size_exposure_term, ":vent_day"), paste0("vent_day:", size_exposure_term))) %>%
     transmute(marker, adjustment = factor(adjustment, c("adjusted", "unadjusted")),
               s = inj_sign(marker), e = s * estimate, l = pmin(s * lo, s * hi), h = pmax(s * lo, s * hi),
               rhat, ok = is.finite(rhat) & rhat <= RHAT_GATE)
@@ -268,7 +268,7 @@ if (n_distinct(lc0$horizon_h) >= 3) {
     for (arm_name in names(control_arms)) {
       control_arm <- control_arms[[arm_name]]
       if (!control_arm$restriction %in% restrictions_in(ctrl_dir, ctrl_site)) next
-      if (is.null(scale_v) || is.null(scale_c) || SIZE_EX != "log_pfvc_sd") {
+      if (is.null(scale_v) || is.null(scale_c) || size_exposure_term != "log_pfvc_sd") {
         message("24_biotrauma_figures: ", arm_name, " arm not drawn: its unit cannot be put on the ventilated cohort's ",
                 "(jm_scale_* missing, or the form is not pfvc)")
         next
@@ -329,14 +329,13 @@ if (n_distinct(lc0$horizon_h) >= 3) {
                      " days of ventilation"),
       subtitle = paste0(site_name, ": joint model, death and extubation (in the controls, escalation of support) modelled; ", unit_lower,
                         ".\nA rate unmoved by adjustment for age, sex and race is not the age channel. ",
-                        "Row counts are the ventilated cohort's. Hollow points and dashed lines did not converge.",
-                        if (nzchar(sev_tag)) "\nSeverity-matched: each marker's floor is on its own anchor, so the rows are different patient subsets." else "")) &
+                        "Row counts are the ventilated cohort's. Hollow points and dashed lines did not converge.")) &
     theme(legend.position = "top")
   ggsave(file.path(fig_dir, paste0("biotrauma_fig_main_", tag, ".pdf")), pm,
          width = 12 + 0.8 * n_distinct(rate_arms$arm), height = 2 + 2.2 * length(present))
 }
 
-# ---- 5. the check behind figure 4's causal reading (pfvc form, unrestricted run):
+# ---- 3. the check behind figure 4's causal reading (pfvc form, unrestricted run):
 #      the ventilated rate, a control's rate read at the ventilated severity, and their
 #      difference (27_control_comparison.R), all on the ventilated cohort's unit (per SD
 #      of its log PFVC). One panel per control:
@@ -439,4 +438,4 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
     message("24_biotrauma_figures: checks figure (", paste(names(checks), collapse = ", "), ") -> biotrauma_fig_checks_", tag, ".pdf")
   } else message("24_biotrauma_figures: no DiD table for ", site_name, "; checks figure skipped")
 }
-message("24_biotrauma_figures: ", n_distinct(lc0$marker), " markers -> ", fig_dir)
+message("24_biotrauma_figures: ", n_distinct(level_contrast_ventilated$marker), " markers -> ", fig_dir)

@@ -7,9 +7,10 @@
 #
 #   markers   platelets, bilirubin, creatinine (dialysis, continuous or intermittent,
 #             as a third competing cause; ESRD censored at day 0), vasopressor dose on
-#             pressor days, oxygen saturation index, and the SF ratio (panel C, the
-#             positive control for mechanics: a larger VT/PFVC recruits lung, so SF
-#             should be better early in the smaller predicted lung, then reverse)
+#             pressor days, oxygen saturation index, and the SF ratio (a row of the
+#             figure; the positive control for mechanics: a larger VT/PFVC recruits
+#             lung, so SF should be better early in the smaller predicted lung, then
+#             reverse)
 #   arms      ventilated, all patients           (panels A, B and C)
 #             no respiratory support             (panel B, the negative control): every
 #                                                patient, the divergence read at the
@@ -20,7 +21,7 @@
 #                                                hypoxemia (27 writes its DiD separately;
 #                                                HYPOXEMIC_CONTROL_MARKERS, the control's markers by default)
 #             optional: ventilated by baseline SF class (SF_BANDS; off by default)
-#   The control is standardised, not matched (2026-09-21): severity cannot confound a
+#   The control is standardised, not matched: severity cannot confound a
 #   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
 #   control's divergence varies with its severity anchor and is read at the ventilated
 #   mean (20_biotrauma_grid.R, PBWPFVC_JM_SEV_CENTER). No control patient is discarded,
@@ -59,23 +60,18 @@
 #   uvr run code/29_run_figure4.R -- --dry-run
 # Site default: 28 figure-4 fits (5 markers and creatinine in the ventilated cohort; 3 markers
 # and creatinine in each control, the whole one and the hypoxemic one; each adjusted and
-# unadjusted) plus 1 channel fit, at
-# 2000 / 500 iterations, four at a time. At
-# MIMIC the divergence terms the figure rests on converged at 2000 iterations; the
-# hazard blocks did not converge at any length tried; the survival submodel was simplified
-# on 2026-09-24 for that reason (22_biotrauma_fit.R, HAZARD_SPEC), so every fit refits once.
+# unadjusted) plus 1 channel fit, at 2000 / 500 iterations, four at a time. The survival
+# submodel is deliberately small (22_biotrauma_fit.R, HAZARD_SPEC) so that its hazard
+# blocks converge alongside the divergence terms the figure rests on.
 # Knobs (environment): ITER BURNIN CHAINS THIN (2000 / 500 / 3 / 5), PAR (fits at a
-#   time, 4; an earlier estimate put a 7-day fit at a 7,000-patient site at 15-25 GB,
-#   so four at once can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
+#   time, 4; a 7-day fit at a 7,000-patient site needs about 15-25 GB, so four at once
+#   can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
 #   SF_BANDS (baseline SF classes of the ventilated cohort, off by default; the lead
 #   site runs SF_BANDS="235,315 115,235 0,115"), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, CONTROL_MARKERS by default, with creatinine as in the other arms; empty
 #   skips it),
 #   CHANNEL_MARKERS (step 7, platelets by default; empty skips it),
-#   FORCE_BUILD, FORCE_PANEL. The VT/PFVC companion (form vtpfvc) was dropped on
-#   2026-09-24: at a fixed VT/PBW, VT/PFVC moves only with PBW/PFVC, whose variance
-#   after age, sex and race is a few percent (Claim 5a), so the companion re-reads the
-#   pfvc form on a scale the data cannot identify. 22-24 still accept the form.
+#   FORCE_BUILD, FORCE_PANEL.
 #   Output: final/injury/biotrauma_fig_main_pfvc_7d_{site}.pdf.
 # =============================================================================
 
@@ -120,7 +116,6 @@ if (!DRY) dir.create(LOG_DIR, recursive = TRUE)
 Sys.unsetenv("PBWPFVC_COHORT")
 Sys.setenv(PBWPFVC_SITE_NAME = BASE_SITE,
            PBWPFVC_JM_GRID = "daily", PBWPFVC_JM_HORIZON = "7", PBWPFVC_JM_MODIFIER = "pfvc",
-           PBWPFVC_JM_MODELS = "main",
            PBWPFVC_JM_ITER = ITER, PBWPFVC_JM_BURNIN = BURNIN, PBWPFVC_JM_CHAINS = CHAINS,
            PBWPFVC_JM_THIN = THIN, PBWPFVC_JM_PAR = PAR)
 message("site ", BASE_SITE, "; markers ", MARKERS, if (CREATININE) ",creatinine", "; controls ", CONTROL_MARKERS,
@@ -188,9 +183,9 @@ fit_arm <- function(arm, cohort, markers, arm_env = character(0), with_creatinin
 
 # ---- 1 build
 build_cohort <- function(cohort, derived) {   # cohort, folder holding its derived tables
-  # a cohort built before dialysis and ESRD entered the RRT definition (2026-09-21) lacks
-  # rrt_sources_available.rds, and its panel cannot be built: rebuild it. A control built
-  # before it was indexed at ICU admission (same day) lacks cohort_icu_stays.parquet.
+  # a cohort lacking rrt_sources_available.rds (or, for the control,
+  # cohort_icu_stays.parquet) was built by an older 01-03, and its panel cannot be
+  # built: it is rebuilt.
   icu_ok <- cohort != "nosupport" || file.exists(file.path(derived, "cohort_icu_stays.parquet"))
   if (!FORCE_BUILD && icu_ok && file.exists(file.path(derived, "analysis_cross_sectional.parquet")) &&
       file.exists(file.path(derived, "rrt_sources_available.rds"))) {
@@ -224,6 +219,8 @@ build_panel("imv",       file.path(ROOT, "intermediate"))
 build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"))
 
 # ---- 3 anchors
+# creatinine is always anchored, even with CREATININE=0, so a missing creatinine centre
+# skips the whole control arm (step 4)
 ANCHOR_MARKERS <- paste0("creatinine,", CONTROL_MARKERS)
 anchor_env <- c(PBWPFVC_JM_ANCHOR_ONLY = "1", PBWPFVC_JM_MARKERS = ANCHOR_MARKERS)
 run_step("anchors_ventilated", "code/22_biotrauma_fit.R", "imv",       anchor_env)
@@ -263,6 +260,8 @@ if (nzchar(SEV_CENTER)) {
 }
 
 # ---- 6 comparison table and the figure
+# figure rows are fixed; changing MARKERS does not change them (a marker with no fit
+# on disk is left out of the figure)
 FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",pressor_dose,osi,sf")
 # death against each control: the PFVC association with death in the ventilated cohort
 # and in the no-support control, everyone and hypoxemic at the index (the checks
