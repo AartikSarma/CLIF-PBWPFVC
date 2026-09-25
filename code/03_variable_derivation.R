@@ -88,8 +88,6 @@ ICU_DAY0_WINDOW_H     <- 6   # icu_day0: first IMV record within this long of th
 SOFA_WINDOW_H         <- 24  # SOFA from the worst values over this long from the index
 SURVIVAL_HORIZON_D    <- 60  # all-cause death within this many days of the index
 VFD_HORIZON_D         <- 28  # ventilator-free days over this many days from the index
-DEATH_ON_VENT_TOL_H   <- 1   # a death within this long of the last IMV record is a
-                             # death on the ventilator, not after liberation
 
 # =============================================================================
 # Load cleaned intermediate data

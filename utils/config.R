@@ -90,6 +90,9 @@ SUPPORT_DEVICES   <- c("imv", NIV_DEVICES)
 # before it (scripts 01 and 03). The window is short so that the ratio reflects the
 # support in force early in ventilation, not a setting charted hours earlier.
 FIO2_LOOKBACK_H <- 4
+# A death within this many hours of the last IMV record is a death on the ventilator,
+# not a death after liberation (03's ventilator-free days, 10's event clock).
+DEATH_ON_VENT_TOL_H <- 1
 # FiO2 on room air and nasal cannula, for the no-support control only (the
 # analytic cohort's SF uses documented FiO2): 0.21 on room air, 0.21 + 0.03 per
 # L/min on a cannula capped at 0.60, the rule script 01 uses for its negative-control
