@@ -31,8 +31,10 @@
 # Both differences-in-differences are drawn in the checks figure and pooled: the
 # hypoxemic one (SF < 315) isolates ventilation, the all-patients one is the larger sample.
 #
-# Time is days from the index (the first qualifying ventilator row; ICU admission in
-# the control), the clock of every cause in the joint models.
+# Time is days from t0, the clock of every cause in the joint models: the index (the
+# first qualifying ventilator row) in the full ventilated arm and its SF classes, and
+# ICU admission in both arms of every comparison with a control, the ventilated arm on
+# IMV at ICU admission and the no-support control (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R).
 #
 # A lower PFVC is the negative of every log-marker estimate; the figures label
 # the injury direction per marker so the eye does not have to flip signs.
@@ -558,7 +560,9 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
            wrap_plots(checks, ncol = 1) +
              plot_annotation(tag_levels = "A",
                              title = paste0(site_name, ": is the lung-size divergence the ventilator's?"),
-                             subtitle = paste0("95% intervals; hollow = the lung-size terms did not converge (R-hat > 1.1); ",
+                             subtitle = paste0("Against each control, both arms' clocks start at ICU admission: days, the 7-day ",
+                                               "follow-up and the day-0 baseline count from it in both.\n",
+                                               "95% intervals; hollow = the lung-size terms did not converge (R-hat > 1.1); ",
                                                "the hazard links are reported in the manifest")) &
              theme(legend.position = "top", axis.text.x = element_text(size = 8)),
            width = max(8, 3 + 2.6 * length(check_order)), height = 1.5 + 3.6 * length(checks))

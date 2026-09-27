@@ -17,35 +17,43 @@
 #                          index SF (sf_index), status at ICU admission (icu_day0),
 #                          every baseline covariate, and the GLI channel pieces of
 #                          log PFVC
-#   jm_meta_{tag}.rds      horizon, cohort tag, counts
+#   jm_meta_{tag}.rds      horizon, cohort tag, clock, the whole cohort's log PFVC
+#                          scale, counts
 #
 # and one aggregate table for the deliverable:
 #
-#   final/jm_panel_summary_{tag}_{site}.csv  patients, patient-periods and events
-#                                       per marker; RRT censoring counts; the size
-#                                       of the plateau-measured subset
+#   final/jm_panel_summary_{clock}{tag}_{site}.csv  patients, patient-periods and
+#                                       events per marker; RRT censoring counts; the
+#                                       size of the plateau-measured subset
 # The tag is set by 20_biotrauma_grid.R (PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON_H);
-# panels for different horizons sit side by side.
+# panels for different horizons sit side by side. So do the two clocks
+# (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R): an icu-clock panel's files end in "_icu"
+# (jm_long_7d_icu.parquet) and its summary table is tagged "icu_".
 #
 # Design:
+#   * time zero t0 is the index (index_dttm, the "index" clock) or the first ICU
+#     admission of the stay (the "icu" clock of the comparisons with a control, on
+#     which the ventilated panel holds the patients on IMV at ICU admission only);
+#     "day" below is days from t0
 #   * every patient in the cohort (the ventilated cohort or a control) is in the
 #     tables from day 0; no survival-based restriction
 #   * one clock: death, the competing event (extubation = the last IMV record of
 #     the stay, so a reintubation counts as continuous ventilation; escalation in a
-#     control) and the horizon are continuous times in days from the index, and no
+#     control) and the horizon are continuous times in days from t0, and no
 #     measurement recorded after the patient's event time enters any daily
 #     aggregate or lag (10_panel_common.R drops them at the source). The trajectory
-#     keeps the daily grid: vent_day is whole days from the index
+#     keeps the daily grid: vent_day is whole days from t0
 #   * the size term is log PFVC (the survival table carries it, per SD and in its
 #     GLI channel pieces); the fit enters it as a level and as a divergence in day
 #   * in the ventilated cohort the clinician's dose is VT/PBW, split into the index
-#     value (vtpbw_idx, the day-0 median; between patients) and the PREVIOUS day's
+#     value (vtpbw_idx, the median over the first 24 h after index_dttm on either
+#     clock, 10_panel_common.R; between patients) and the PREVIOUS day's
 #     median minus the index value (within patient). Neither term uses a day after
 #     the one it explains. The lag is taken by joining on vent_day - 1, so a missing
 #     day gives a missing lag rather than a two-day-old one. VT/PFVC, its running
 #     mean and the count of days above STRAIN_CEILING are carried for the other
 #     model forms
-#   * each marker's baseline is its value on day 0, the first 24 h after the index; a patient with
+#   * each marker's baseline is its value on day 0, the first 24 h after t0; a patient with
 #     no day-0 value has no baseline and leaves that marker's fit
 #   * markers on the day of observation: creatinine (daily max), platelets (daily
 #     min), bilirubin (daily max), SF ratio (daily worst), driving pressure (daily
@@ -90,14 +98,14 @@ source(here("code", "20_biotrauma_grid.R"))   # JM_GRID, STEP_H, STEP, JM_HORIZO
 # follow-up ending at the joint-model horizon
 HORIZON        <- 28L
 MAX_VENT_DAY   <- 27L
-FOLLOWUP_END_D <- JM_HORIZON   # 7 days = 168 h after the index: day-7 values fall outside
+FOLLOWUP_END_D <- JM_HORIZON   # 7 days = 168 h after t0: day-7 values fall outside
 is_synthetic <- grepl("^synthetic_clif", site_name)   # any synthetic site (synthetic_clif, synthetic_clif_b, ...)
 source(here("code", "10_panel_common.R"))
 # VT/PFVC (% of predicted FVC) above which a period counts toward the cumulative-strain
 # exposure: 11% is about the 75th percentile of VT/PFVC in the ARMA low tidal volume arm
 STRAIN_CEILING <- 11
 message("=== 21_biotrauma_panel: grid ", JM_GRID, ", horizon ", JM_HORIZON, " days (",
-        N_PERIODS, " periods), site ", site_name, " ===")
+        N_PERIODS, " periods), clock ", JM_CLOCK, ", site ", site_name, " ===")
 
 # =============================================================================
 # The period panel: one row per patient-period, either the shared daily panel
@@ -394,18 +402,20 @@ surv <- base %>%
   left_join(first_trajectory_day, by = "hospitalization_id") %>%
   mutate(
     # hazard-model exposures on the paper's primary scale: the clinician's dose
-    # (VT/PBW at the index: the day-0 median, the between-patient dose term of the
-    # longitudinal submodel) and the size term (log PFVC); VT/PFVC at the index is
-    # kept for reference
-    vtpbw_idx  = vt_ml_0 / pbw,
+    # (VT/PBW at the index: the median over the first 24 h after index_dttm, the
+    # between-patient dose term of the longitudinal submodel, the same on both
+    # clocks) and the size term (log PFVC); VT/PFVC on day 0 is kept for reference
+    vtpbw_idx  = vt_index_ml / pbw,
     log_pfvc   = log(pfvc_gli),
     log_pbw    = log(pbw),
     # log PBW/PFVC discordance, centred at the cohort median: the effect modifier
     # of the dose slope in the primary longitudinal model
-    ldisc_c    = log(pbw / pfvc_gli) - median(log(pbw / pfvc_gli), na.rm = TRUE),
-    # per-SD versions for the PFVC-level question (the paper reports PFVC per SD)
-    log_pfvc_sd = as.numeric(scale(log_pfvc)),
-    ldisc_sd    = as.numeric(scale(log(pbw / pfvc_gli))),
+    ldisc_c    = log(pbw / pfvc_gli) - cohort_scale$ldisc_median,
+    # per-SD versions for the PFVC-level question (the paper reports PFVC per SD).
+    # The mean and SD are the whole cohort's (10_panel_common.R, cohort_scale), so the
+    # icu clock's ventilated panel, a subset, keeps the whole cohort's unit
+    log_pfvc_sd = (log_pfvc - cohort_scale$log_pfvc_mean) / cohort_scale$log_pfvc_sd,
+    ldisc_sd    = (log(pbw / pfvc_gli) - cohort_scale$ldisc_mean) / cohort_scale$ldisc_sd,
     # VT/PFVC as the reader meets it: the patient's mean VT/PFVC over the window in
     # percent of predicted FVC (the project's unit; the 11% ceiling), centred at the
     # cohort median, per point; the index value for the hazard on the same scale.
@@ -458,6 +468,11 @@ surv <- base %>%
          vtpfvc_0, vtpfvc_pt_mean, vtpfvc_pt_n,
          ers, ers_pfvc_0, creatinine_0, platelet_0, bilirubin_0, sf_0, dp_0, ne_equiv_0, oi_0, osi_0,
          ends_with("_0_day"))
+# on the index clock the index VT (10_panel_common.R) is the median VT of period 0
+if (JM_CLOCK == "index") {
+  index_vt_check <- day0 %>% inner_join(base %>% select(hospitalization_id, vt_index_ml), by = "hospitalization_id")
+  stopifnot(isTRUE(all.equal(index_vt_check$vt_ml_0, index_vt_check$vt_index_ml)))
+}
 # channel pieces of log PFVC (20_biotrauma_grid.R): the size term of the "channels" joint-model form
 surv <- bind_cols(surv, pfvc_channels(surv, "log_pfvc"))
 message("Survival table: ", nrow(surv), " patients; deaths ", sum(surv$event == 1L),
@@ -572,13 +587,17 @@ summary_tbl <- bind_rows(
          lag_missing_rows = sum(is.na(long$l_vtpfvc) & long$period > 0L),
          site = site_name)
 print(as.data.frame(summary_tbl), row.names = FALSE)
-write_csv(summary_tbl, file.path(final_dir, paste0("jm_panel_summary_", h_suffix, "_", site_name, ".csv")))
+write_csv(summary_tbl %>% mutate(clock = JM_CLOCK),
+          file.path(final_dir, paste0("jm_panel_summary_", clock_tag, h_suffix, "_", site_name, ".csv")))
+message("Rows by day since t0 (clock ", JM_CLOCK, "): ",
+        paste(sprintf("day %d %d", as.integer(names(table(long$vent_day))), as.integer(table(long$vent_day))), collapse = ", "))
 
-write_parquet(long, file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
-write_parquet(surv, file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
+write_parquet(long, panel_path("long"))
+write_parquet(surv, panel_path("surv"))
 saveRDS(list(grid = JM_GRID, step_hours = STEP_H, step = STEP, horizon = JM_HORIZON, n_periods = N_PERIODS,
-             h_suffix = h_suffix, strain_ceiling = STRAIN_CEILING, site_name = site_name,
+             h_suffix = h_suffix, clock = JM_CLOCK, cohort_scale = cohort_scale,
+             strain_ceiling = STRAIN_CEILING, site_name = site_name,
              n_patients = nrow(surv), n_days = nrow(long), built_at = as.character(Sys.time())),
-        file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
-message("21_biotrauma_panel complete (", h_suffix, "): tables in ", output_dir,
-        "; summary in ", final_dir)
+        panel_path("meta"))
+message("21_biotrauma_panel complete (", h_suffix, ", ", JM_CLOCK, " clock): ", basename(panel_path("long")), ", ",
+        basename(panel_path("surv")), " in ", output_dir, "; summary in ", final_dir)

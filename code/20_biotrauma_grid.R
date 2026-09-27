@@ -17,9 +17,33 @@
 #                         ventilated-vs-control comparison; file tag "day0_"
 #   PBWPFVC_JM_NO_LAGS    0 | 1   drop the previous-day SF and pressor terms from the
 #                         longitudinal submodel (sensitivity); file tag "nolag_"
+#   PBWPFVC_JM_CLOCK      "index" (default) | "icu"   the panel's time zero t0:
+#                         index   index_dttm, the first qualifying ventilator row
+#                                 (script 03): the full ventilated arm (figure 4
+#                                 panel A), the arm without the lags, the channels
+#                                 fit and the height fingerprint
+#                         icu     icu_admission_dttm, the first ICU admission of the
+#                                 stay (script 03): the clock of every ventilated-
+#                                 vs-control comparison, so the ventilated arm on IMV
+#                                 at ICU admission (PBWPFVC_JM_ICU_DAY0=1) and the
+#                                 no-support control run on it and nothing else does.
+#                                 The ventilated panel on this clock holds the
+#                                 icu_day0 patients only.
+#                         Every time the panel measures from t0 follows it: vent_day,
+#                         the daily grid, death, extubation and escalation times, the
+#                         end of follow-up (JM_HORIZON days after t0), the day-0
+#                         baseline (the first 24 h after t0) and the lags. The index
+#                         VT/PBW and the covariates of analysis_cross_sectional keep
+#                         their index-time values on both clocks. An icu-clock panel's
+#                         files carry "_icu" after the horizon (jm_long_7d_icu.parquet),
+#                         so the two clocks' panels sit side by side; panel_path()
+#                         names them. ICU_DAY0 = 1 requires the icu clock, and so does
+#                         a control cohort, so the two sides of a difference-in-
+#                         differences can never be on different clocks.
 #
 # Defines: JM_GRID, STEP_H (hours per period), STEP (days per period),
-# JM_HORIZON (days), N_PERIODS (last period index), h_suffix ("48h" / "7d"), and the
+# JM_HORIZON (days), N_PERIODS (last period index), h_suffix ("48h" / "7d"), JM_CLOCK,
+# panel_path(), clock_tag, and the
 # convergence gate every script applies (RHAT_GATE, size_terms_for(), fit_convergence()).
 # Time in every model is `vent_day` in days (period x STEP), so coefficients on
 # time and the random slope have the same units on both grids.
@@ -40,6 +64,23 @@ if (JM_GRID == "6h") {
 }
 STEP      <- STEP_H / 24
 N_PERIODS <- as.integer(round(JM_HORIZON / STEP))
+
+# The panel's time zero (PBWPFVC_JM_CLOCK, above). panel_path("long" | "surv" | "meta")
+# is the file of this clock's panel in a cohort's row-level folder; clock_tag marks the
+# aggregate tables that both ventilated panels write (the panel summary of 21 and the
+# anchor distribution of 22), so the icu run does not overwrite the index run's rows.
+JM_CLOCK <- Sys.getenv("PBWPFVC_JM_CLOCK", "index")
+if (!JM_CLOCK %in% c("index", "icu")) stop("PBWPFVC_JM_CLOCK must be index or icu; got '", JM_CLOCK, "'")
+panel_sfx <- if (JM_CLOCK == "icu") "_icu" else ""
+clock_tag <- if (JM_CLOCK == "icu") "icu_" else ""
+panel_path <- function(kind, dir = output_dir) {
+  stopifnot(kind %in% c("long", "surv", "meta"))
+  file.path(dir, paste0("jm_", kind, "_", h_suffix, panel_sfx, if (kind == "meta") ".rds" else ".parquet"))
+}
+# a control cohort has one clock, ICU admission (read from the environment, as
+# utils/config.R does, because the pooling sources this file without a config)
+if (Sys.getenv("PBWPFVC_COHORT", "imv") != "imv" && JM_CLOCK != "icu")
+  stop("a control cohort runs on the ICU-admission clock: set PBWPFVC_JM_CLOCK=icu")
 
 # =============================================================================
 # Channel decomposition of the size exposure (the channels form of 22 and 23)
@@ -232,6 +273,9 @@ sev_center_tag <- if (nzchar(SEV_CENTER_SPEC)) "sevstd_" else ""
 # the ventilated arm of every comparison with the no-support control (whose patients
 # are all indexed at ICU admission, so the filter keeps all of them).
 ICU_DAY0 <- identical(Sys.getenv("PBWPFVC_JM_ICU_DAY0", "0"), "1")
+if (ICU_DAY0 && JM_CLOCK != "icu")
+  stop("PBWPFVC_JM_ICU_DAY0=1 is the ventilated side of the comparisons with a control, which run on the ",
+       "ICU-admission clock: set PBWPFVC_JM_CLOCK=icu")
 icu_day0_tag <- if (ICU_DAY0) "day0_" else ""
 icu_day0_sfx <- if (ICU_DAY0) "_day0" else ""
 

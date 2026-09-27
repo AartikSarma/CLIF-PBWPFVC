@@ -25,6 +25,9 @@
 # icu_day0 marks a ventilated patient on invasive ventilation at ICU admission: first
 # IMV record no later than ICU_DAY0_WINDOW_H after the first ICU admission, and no
 # room-air or nasal-cannula row between them. It is TRUE for every no-support control.
+# icu_admission_dttm, the first ICU admission of the stay, is written for every cohort:
+# the time zero of the ventilated-vs-control comparisons' panels (20_biotrauma_grid.R,
+# PBWPFVC_JM_CLOCK=icu).
 # A deceased patient (deceased == 1) with no recorded death time is dated at discharge.
 #
 # Sections: 3a PBW and PFVC (Devine; race-specific GLI-2012), 3b SF and PF ratios,
@@ -811,6 +814,32 @@ if (config$cohort == "nosupport") {
   message("No-support control: ", sum(shared), " patient(s) in the ventilated ICU-day-0 arm dropped")
   cross_sectional <- cross_sectional[!shared, ]
   eligible_patients <- cross_sectional$hospitalization_id
+}
+
+# ---- icu_admission_dttm: the first ICU admission of the stay, in every cohort
+# The time zero of the ventilated-vs-control comparisons (PBWPFVC_JM_CLOCK=icu,
+# 20_biotrauma_grid.R): the panel of the ventilated arm on IMV at ICU admission and of
+# the no-support control starts here rather than at index_dttm. The log counts, for
+# the patients who run on that clock, where the admission is not at or before the
+# index. A ventilated icu_day0 patient intubated before ICU admission (in the ED) has
+# an index before it; a control is indexed within CONTROL_ICU_WINDOW_H of an ICU
+# admission, which need not be the first.
+cross_sectional <- cross_sectional %>%
+  left_join(read_parquet(file.path(output_dir, "cohort_icu_stays.parquet")) %>%
+              summarise(icu_admission_dttm = min(in_dttm), .by = hospitalization_id),
+            by = "hospitalization_id")
+icu_clock_patients <- if (config$cohort == "imv") cross_sectional %>% filter(icu_day0) else
+  if (config$cohort == "nosupport") cross_sectional else cross_sectional[0, ]
+if (nrow(icu_clock_patients)) {
+  index_after_admission_h <- as.numeric(difftime(icu_clock_patients$index_dttm, icu_clock_patients$icu_admission_dttm, units = "hours"))
+  message("ICU admission (first in_dttm of the stay) against the index, ",
+          if (config$cohort == "imv") "icu_day0 ventilated patients" else "control patients", " (", nrow(icu_clock_patients), "): ",
+          sum(is.na(index_after_admission_h)), " without an ICU admission, ",
+          sum(index_after_admission_h < 0, na.rm = TRUE), " with the admission after the index, ",
+          sum(index_after_admission_h > CONTROL_ICU_WINDOW_H, na.rm = TRUE), " indexed more than ",
+          CONTROL_ICU_WINDOW_H, " h after it; index minus admission, hours: ",
+          paste(sprintf("%s %.1f", c("min", "p25", "median", "p75", "max"),
+                        quantile(index_after_admission_h, c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)), collapse = ", "))
 }
 
 # ---- 60-day all-cause survival from the index

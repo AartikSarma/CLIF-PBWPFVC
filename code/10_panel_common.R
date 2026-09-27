@@ -10,25 +10,35 @@
 # 21_biotrauma_panel.R, which turns it into the joint-model tables; nothing else
 # sources it. It writes no files.
 #
-# One clock. Every time is in days from the index (index_dttm, script 03). Each
-# patient's follow-up ends at the first of death, the competing event (the last
-# invasive-ventilation record of the stay in the ventilated cohort, so a
+# One clock. Every time is in days from the time zero t0, which PBWPFVC_JM_CLOCK
+# sets (20_biotrauma_grid.R): the index (index_dttm, script 03) on the "index" clock,
+# the first ICU admission of the stay (icu_admission_dttm, script 03) on the "icu"
+# clock, the clock of the ventilated-vs-control comparisons. On the icu clock the
+# ventilated cohort's panel keeps the patients on IMV at ICU admission (icu_day0)
+# only. Each patient's follow-up ends at the first of death, the competing event (the
+# last invasive-ventilation record of the stay in the ventilated cohort, so a
 # reintubation counts as continuous ventilation; the first advanced-support record
-# after the index in a control) and FOLLOWUP_END_D. No measurement recorded after
-# that time enters any daily aggregate, so no marker value or lagged covariate
-# comes from after the patient's event.
+# after the index in a control) and FOLLOWUP_END_D days after t0. No measurement
+# recorded after that time enters any daily aggregate, so no marker value or lagged
+# covariate comes from after the patient's event. Measurements before t0 (an ED
+# intubation before ICU admission, on the icu clock) are outside the panel. The index
+# VT/PBW and every covariate read from analysis_cross_sectional keep their index-time
+# values on both clocks.
 #
 # Contract. The caller sources utils/config.R (config, estimate_fio2_nosupport,
-# NIV_DEVICES, NOSUPPORT_DEVICES) and defines, BEFORE sourcing:
+# NIV_DEVICES, NOSUPPORT_DEVICES) and 20_biotrauma_grid.R (JM_CLOCK, STEP_H), and
+# defines, BEFORE sourcing:
 #   output_dir      the site's folder of parquet inputs (config$output_dir)
 #   HORIZON         death window in days (death_day is NA past it)
-#   MAX_VENT_DAY    last day since the index carried in the panel
-#   FOLLOWUP_END_D  the administrative end of follow-up, days from the index
+#   MAX_VENT_DAY    last day since t0 carried in the panel
+#   FOLLOWUP_END_D  the administrative end of follow-up, days from t0
 #                   (the joint-model horizon)
 #   is_synthetic    TRUE at a synthetic site (simulated survival, plumbing only)
 #
 # After sourcing, the caller has in .GlobalEnv:
-#   base           one row per patient: t0 (the index time), pfvc and pfvc_gli
+#   base           one row per patient: t0 (the clock's time zero), index_dttm,
+#                  vt_index_ml (the median set VT over the index period, the first
+#                  STEP_H hours after index_dttm), pfvc and pfvc_gli
 #                  (both the GLI-2012 PFVC), pfvc_age25, pbw, death_day,
 #                  death_time_days, extub_time_days, escalation_time_days,
 #                  competing_time_days, followup_end_days, sf_index, icu_day0,
@@ -45,6 +55,9 @@
 #   fio2_dt, spo2_dt, maw_dt, pao2_dt   keyed data.tables for rolling joins
 #   before_followup_end(df, dttm_col)   drops rows recorded after follow-up ends
 #   age_breaks, rtrunc_lnorm
+#   cohort_scale   the mean, SD and median of log PFVC and log PBW/PFVC over the
+#                  whole cohort's baseline, before the icu clock's icu_day0
+#                  restriction, so a per-SD unit is the same on both clocks
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -54,23 +67,30 @@ suppressPackageStartupMessages({
   library(here)
 })
 
-for (.need in c("output_dir", "HORIZON", "MAX_VENT_DAY", "FOLLOWUP_END_D", "is_synthetic"))
+for (.need in c("output_dir", "HORIZON", "MAX_VENT_DAY", "FOLLOWUP_END_D", "is_synthetic", "JM_CLOCK", "STEP_H"))
   if (!exists(.need)) stop("10_panel_common.R: caller must define `", .need, "` before sourcing.")
 
 FIO2_PERCENT_THRESHOLD <- 1.5   # fio2_set values above are percent, below are fractions
 FIO2_LOOKBACK_H        <- 4     # hours an FiO2 is carried forward to an SpO2 (chosen to capture early ventilation)
 
 # =============================================================================
-# 10a. Baseline: one row per patient (PFVC, demographics, index time, death day)
+# 10a. Baseline: one row per patient (PFVC, demographics, time zero, death day)
 # =============================================================================
 cs <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
 if (!"pfvc_age25" %in% names(cs))
   stop("cross_sectional lacks pfvc_age25 -- re-run script 03.")
+if (JM_CLOCK == "icu" && !"icu_admission_dttm" %in% names(cs))
+  stop("cross_sectional lacks icu_admission_dttm, the icu clock's time zero -- re-run script 03.")
+cs <- cs %>% mutate(t0 = if (JM_CLOCK == "icu") icu_admission_dttm else index_dttm)
+message("Clock: ", JM_CLOCK, " (t0 = ", if (JM_CLOCK == "icu") "icu_admission_dttm, the first ICU admission" else
+          "index_dttm, the index", ")")
 
-# Death within HORIZON days of the index, all causes, in continuous days
-# (death_time_days) and whole days (death_day). Script 03's death_day is already days
-# from the index: an expired patient with no death time died at discharge, and a
-# stamp between admission and the index counts on the index day (03 logs how many).
+# Death within HORIZON days of t0, all causes, in continuous days (death_time_days)
+# and whole days (death_day). Script 03's death_day is days from the index: an expired
+# patient with no death time died at discharge (03 writes that time into death_dttm),
+# and a stamp between admission and the index counts on the index day, at
+# SAME_DAY_DEATH_D days (03 logs how many). On the icu clock the death time is taken
+# from death_dttm against t0 by the same rule: a stamp before t0 counts on the t0 day.
 # Synthetic CLIF mortality is unreliable, so the synthetic site draws a survival time
 # instead (35% die, log-normal time to death with median 9 days, truncated to the
 # horizon); it tests the plumbing only and never runs at a real site.
@@ -92,10 +112,18 @@ if (is_synthetic) {
   cs <- cs %>% mutate(death_day = if_else(died_h == 1L, floor(tte), NA_real_),
                       death_time_days = if_else(died_h == 1L, tte, NA_real_))
 } else {
+  if (JM_CLOCK == "icu") {
+    SAME_DAY_DEATH_D <- 0.5   # script 03's day for a death stamped before its origin
+    cs <- cs %>% mutate(death_day = as.numeric(difftime(death_dttm, t0, units = "days")))
+    message("Deaths stamped before ICU admission, counted on the ICU-admission day: ",
+            sum(cs$death_day < 0 & (config$cohort != "imv" | cs$icu_day0), na.rm = TRUE),
+            if (config$cohort == "imv") " (patients on IMV at ICU admission)" else "")
+    cs <- cs %>% mutate(death_day = if_else(!is.na(death_day) & death_day < 0, SAME_DAY_DEATH_D, death_day))
+  }
   cs <- cs %>% mutate(death_time_days = if_else(!is.na(death_day) & death_day <= HORIZON, death_day, NA_real_),
                       death_day = floor(death_time_days))
-  message("Deaths within ", HORIZON, " days of the index: ", sum(!is.na(cs$death_time_days)), ", ",
-          sum(cs$death_day == 0, na.rm = TRUE), " of them on the index day")
+  message("Deaths within ", HORIZON, " days of t0: ", sum(!is.na(cs$death_time_days)), ", ",
+          sum(cs$death_day == 0, na.rm = TRUE), " of them on day 0")
 }
 # escalation to the next level of support: script 03 writes it for the control
 # cohorts; the ventilated cohort has none
@@ -116,15 +144,15 @@ base <- cs %>%
          !is.na(age_at_admission), !is.na(sex_category),
          !is.na(race_category), !is.na(sofa_total), !is.na(height_cm), !is.na(pbw), pbw > 0) %>%
   group_by(sex_category) %>% mutate(height_z = as.numeric(scale(height_cm))) %>% ungroup() %>%
-  transmute(hospitalization_id, t0 = index_dttm,
+  transmute(hospitalization_id, t0, index_dttm,
             pfvc_gli = pfvc,           # the GLI-2012 PFVC, under the name 21 reads
             pfvc,                       # the same value, the denominator of the daily VT/PFVC
             pfvc_age25,                 # PFVC at age 25 (script 03), carried to the survival table
             pbw, death_day, death_time_days,
             # extubation: the last invasive-ventilation record of the stay (script 03;
             # a reintubation counts as continuous ventilation), ventilated cohort only
-            extub_time_days      = as.numeric(difftime(last_imv_dttm, index_dttm, units = "days")),
-            escalation_time_days = as.numeric(difftime(escalation_dttm, index_dttm, units = "days")),
+            extub_time_days      = as.numeric(difftime(last_imv_dttm, t0, units = "days")),
+            escalation_time_days = as.numeric(difftime(escalation_dttm, t0, units = "days")),
             # the SF ratio at the index timepoint (script 03), which gates every hypoxemic
             # arm, and the patient's status at ICU admission (the comparison arms)
             sf_index = sf_ratio, icu_day0,
@@ -152,8 +180,31 @@ base <- cs %>%
                            labels = c("Concordant", "Mid", "Discordant")))
 message("Baseline: ", nrow(base), " of ", nrow(cs), " patients; dropped for missing or non-positive ",
         paste(sprintf("%s %d", names(base_missing), base_missing), collapse = ", "))
+# The per-SD unit of log PFVC and log PBW/PFVC (21_biotrauma_panel.R) and the median
+# that centres log PBW/PFVC, from the whole cohort's baseline: the icu clock's
+# ventilated panel is a subset (below), and its unit stays the whole cohort's, the
+# unit of 22's jm_scale_* table and of every comparison that rescales by it.
+cohort_scale <- list(log_pfvc_mean = mean(log(base$pfvc_gli)), log_pfvc_sd = sd(log(base$pfvc_gli)),
+                     ldisc_mean = mean(log(base$pbw / base$pfvc_gli)), ldisc_sd = sd(log(base$pbw / base$pfvc_gli)),
+                     ldisc_median = median(log(base$pbw / base$pfvc_gli)), n_patients = nrow(base))
+# The icu clock serves the comparisons with a control, whose ventilated side is the
+# patients on IMV at ICU admission, so the ventilated panel keeps those only. Every
+# patient left has an ICU admission: icu_day0 requires one, and a control is indexed at one.
+if (JM_CLOCK == "icu") {
+  if (config$cohort == "imv") {
+    base <- base %>% filter(icu_day0)
+    message("icu clock: the ventilated panel keeps the ", nrow(base), " patients on IMV at ICU admission (icu_day0)")
+  }
+  if (anyNA(base$t0)) stop(sum(is.na(base$t0)), " patients on the icu clock have no ICU admission (icu_admission_dttm)")
+  index_after_t0_h <- as.numeric(difftime(base$index_dttm, base$t0, units = "hours"))
+  message("Index minus ICU admission, hours: ",
+          paste(sprintf("%s %.1f", c("min", "p05", "p25", "median", "p75", "p95", "max"),
+                        quantile(index_after_t0_h, c(0, 0.05, 0.25, 0.5, 0.75, 0.95, 1))), collapse = ", "),
+          "; ", sum(index_after_t0_h < 0), " indexed before ICU admission, ", sum(index_after_t0_h > 24),
+          " more than 24 h after it")
+}
 
-# End of follow-up: the first of death, the competing event and FOLLOWUP_END_D.
+# End of follow-up: the first of death, the competing event and FOLLOWUP_END_D (days from t0).
 base <- base %>%
   # a death within DEATH_ON_VENT_TOL_H of the last IMV record is a death on the
   # ventilator (utils/config.R), as in 03's ventilator-free days: no extubation
@@ -164,10 +215,10 @@ base <- base %>%
          followup_end_days   = pmin(death_time_days, competing_time_days, FOLLOWUP_END_D, na.rm = TRUE))
 if (config$cohort == "imv") {
   message("Extubation (last IMV record of the stay) resolved for ", sum(!is.na(base$extub_time_days)), " of ",
-          nrow(base), " patients; within ", FOLLOWUP_END_D, " days of the index for ",
+          nrow(base), " patients; within ", FOLLOWUP_END_D, " days of t0 for ",
           sum(base$extub_time_days <= FOLLOWUP_END_D, na.rm = TRUE))
 } else {
-  message("Control cohort (", config$cohort, "): escalation within ", FOLLOWUP_END_D, " days of the index for ",
+  message("Control cohort (", config$cohort, "): escalation within ", FOLLOWUP_END_D, " days of t0 for ",
           sum(base$escalation_time_days <= FOLLOWUP_END_D, na.rm = TRUE), " of ", nrow(base), " patients")
 }
 # Rows recorded at or after the end of the patient's follow-up are dropped from every
@@ -198,11 +249,24 @@ wf <- if (config$cohort != "imv") {
     mutate(tidal_volume_set = NA_real_, peep_set = NA_real_, resp_rate_set = NA_real_,
            plateau_pressure_obs = NA_real_, mean_airway_pressure_obs = NA_real_)
 } else wf %>% filter(!is.na(tidal_volume_set), tidal_volume_set > 0)
-# vent_day is whole days since the index time t0, in every cohort (in a control
-# cohort it counts days since the index, not days of ventilation). Rows for patients
-# outside `base` drop here.
 wf <- wf %>% select(-device_category) %>%
-  before_followup_end("recorded_dttm") %>%
+  before_followup_end("recorded_dttm")
+# The index VT: the median set tidal volume over the index period, the first STEP_H
+# hours after index_dttm (the first day on the daily grid), before the end of
+# follow-up. It is taken from index_dttm on both clocks, so the index VT/PBW
+# (vtpbw_idx, 21_biotrauma_panel.R) keeps its index-time value whichever clock the
+# panel runs on; on the index clock it is the median of the panel's period 0.
+# Controls have no set VT.
+index_vt <- wf %>%
+  inner_join(base %>% select(hospitalization_id, index_dttm), by = "hospitalization_id") %>%
+  filter(recorded_dttm >= index_dttm, recorded_dttm < index_dttm + STEP_H * 3600) %>%
+  group_by(hospitalization_id) %>%
+  summarise(vt_index_ml = median(tidal_volume_set, na.rm = TRUE), .groups = "drop")
+base <- base %>% left_join(index_vt, by = "hospitalization_id")
+# vent_day is whole days since t0, in every cohort (in a control cohort it counts
+# days since t0, not days of ventilation). Rows for patients outside `base`, and rows
+# before t0, drop here.
+wf <- wf %>%
   inner_join(base %>% select(hospitalization_id, t0, pfvc), by = "hospitalization_id") %>%
   mutate(vent_day = floor(as.numeric(difftime(recorded_dttm, t0, units = "days")))) %>%
   filter(vent_day >= 0, vent_day <= MAX_VENT_DAY) %>%

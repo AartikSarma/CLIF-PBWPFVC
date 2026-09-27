@@ -46,18 +46,28 @@
 #   mean (20_biotrauma_grid.R, PBWPFVC_JM_SEV_CENTER). No control patient is discarded
 #   for severity, and the severity x divergence term tests whether sicker controls
 #   diverge faster.
-#   Every fit runs on one clock: days from the index (the first qualifying ventilator
-#   row; ICU admission in the control), each patient entering the survival submodel at
-#   their first trajectory day; the baseline marker is its value in the first 24 h after the index; the dose is
-#   VT/PBW at the index and the previous day's VT/PBW minus the index (22_biotrauma_fit.R).
+#   Clocks (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R). Each fit runs on one clock, days
+#   from its time zero t0, and the comparisons with a control share one:
+#     index  t0 = the index, the first qualifying ventilator row: ventilated all
+#            (panel A), the SF classes, the arm without the lags, the channels
+#     icu    t0 = ICU admission, the first ICU in_dttm of the stay: ventilated on IMV
+#            at ICU admission, its anchors, both no-support arms and their anchors,
+#            so both sides of every difference-in-differences start at ICU admission
+#   On either clock each patient enters the survival submodel at their first
+#   trajectory day, follow-up ends 168 h after t0, and the baseline marker is its value
+#   in the first 24 h after t0; the dose is VT/PBW at the index (the first 24 h after
+#   index_dttm, on both clocks) and the previous day's VT/PBW minus it (22_biotrauma_fit.R).
 #   each fit adjusted and unadjusted for age, sex and race
 #
 # Steps, each logged to output/{site}_output/logs/figure4_{stamp}/:
 #   1 build     scripts 01-03 for the ventilated cohort and the no-support cohort,
 #               each only if its derived tables are missing (FORCE_BUILD=1 rebuilds)
-#   2 panels    the 7-day panel of both cohorts
+#   2 panels    three 7-day panels: the ventilated cohort on the index clock, the
+#               ventilated patients on IMV at ICU admission on the icu clock, and the
+#               no-support cohort on the icu clock
 #   3 anchors   the severity-anchor distributions of both cohorts, and the ventilated
-#               mean anchor per marker (final/injury/jm_severity_anchor_mean_*)
+#               mean anchor per marker (final/injury/jm_severity_anchor_mean_*), both
+#               on the icu clock
 #   3b overlap  supplement/xsec_intubation_overlap.R: a propensity score for intubation
 #               (ventilated at ICU admission against each control, covariates from the
 #               24 h before ICU admission) and its overlap, balance and effective sample
@@ -203,11 +213,20 @@ run_step <- function(step_name, script, cohort = "imv", step_env = character(0))
   invisible(identical(status, 0L))
 }
 
+# the settings of the ICU-admission clock, for every arm of a comparison with a control
+ICU_CLOCK <- c(PBWPFVC_JM_CLOCK = "icu")
+# the panel step an arm reads: its cohort and its clock
+panel_step_for <- function(cohort, arm_env) {
+  clock <- if ("PBWPFVC_JM_CLOCK" %in% names(arm_env)) arm_env[["PBWPFVC_JM_CLOCK"]] else "index"
+  paste0("panel_", cohort, if (clock == "icu") "_icu" else "")
+}
+
 # one arm: the markers, then creatinine with dialysis as a third competing cause
 fit_arm <- function(arm, cohort, markers, arm_env = character(0), with_creatinine = CREATININE) {
-  # a cohort whose panel failed to build is not fitted: its old panel is out of date
-  if (paste0("panel_", cohort) %in% FAILED) {
-    message("[", timestamp(), "] ", arm, ": skipped, the ", cohort, " panel failed to build")
+  # an arm whose panel failed to build is not fitted: its old panel is out of date
+  panel_step <- panel_step_for(cohort, arm_env)
+  if (panel_step %in% FAILED) {
+    message("[", timestamp(), "] ", arm, ": skipped, its panel (", panel_step, ") failed to build")
     FAILED <<- c(FAILED, paste0(arm, "_skipped"))
     return(invisible())
   }
@@ -250,22 +269,25 @@ build_cohort("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport
 # ---- 2 panels, rebuilt only when something they are built from has changed: a fit made
 #      on an older panel is refitted (22_biotrauma_fit.R compares the times), so an
 #      unconditional rebuild would refit everything on every rerun. FORCE_PANEL=1 rebuilds.
-build_panel <- function(cohort, derived) {    # cohort, folder holding its derived tables
-  panel <- file.path(derived, "jm_surv_7d.parquet")
+#      Each clock has its own panel files (an icu-clock panel's end in "_icu").
+build_panel <- function(cohort, derived, panel_env = character(0)) {   # cohort, folder holding its derived tables, clock
+  step_name <- panel_step_for(cohort, panel_env)
+  panel <- file.path(derived, paste0("jm_surv_7d", sub(paste0("^panel_", cohort), "", step_name), ".parquet"))   # "_icu" on the icu clock
   if (!FORCE_PANEL && !DRY && file.exists(panel)) {
     inputs <- c("code/21_biotrauma_panel.R", "code/10_panel_common.R", "code/20_biotrauma_grid.R", "utils/config.R",
                 file.path(derived, c("analysis_cross_sectional.parquet", "cohort_dialysis.parquet", "cohort_esrd.parquet")))
     stale <- inputs[!file.exists(inputs) | file.mtime(inputs) > file.mtime(panel)]
     if (!length(stale)) {
-      message("[", timestamp(), "] panel_", cohort, ": up to date, kept (FORCE_PANEL=1 rebuilds)")
+      message("[", timestamp(), "] ", step_name, ": up to date, kept (FORCE_PANEL=1 rebuilds)")
       return(invisible())
     }
-    message("[", timestamp(), "] panel_", cohort, ": ", basename(stale[1]), " is newer than the panel (or missing); rebuilding")
+    message("[", timestamp(), "] ", step_name, ": ", basename(stale[1]), " is newer than the panel (or missing); rebuilding")
   }
-  run_step(paste0("panel_", cohort), "code/21_biotrauma_panel.R", cohort)
+  run_step(step_name, "code/21_biotrauma_panel.R", cohort, panel_env)
 }
-build_panel("imv",       file.path(ROOT, "intermediate"))
-build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"))
+build_panel("imv",       file.path(ROOT, "intermediate"))                              # index clock: ventilated all, no lags, channels
+build_panel("imv",       file.path(ROOT, "intermediate"), ICU_CLOCK)                   # icu clock: ventilated on IMV at ICU admission
+build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"), ICU_CLOCK)   # icu clock: the control
 
 # ---- 3 anchors
 # creatinine is always anchored, even with CREATININE=0, so a missing creatinine centre
@@ -274,10 +296,11 @@ build_panel("nosupport", file.path(ROOT, "intermediate", "controls", "nosupport"
 ANCHOR_MARKERS <- paste0("creatinine,", CONTROL_MARKERS)
 anchor_env <- c(PBWPFVC_JM_ANCHOR_ONLY = "1", PBWPFVC_JM_MARKERS = ANCHOR_MARKERS)
 # the controls are read at the mean anchor of the ventilated arm they are compared with,
-# the patients on IMV at ICU admission (the difference-in-differences' ventilated side)
-ventilated_anchor_env <- c(anchor_env, PBWPFVC_JM_ICU_DAY0 = "1")
+# the patients on IMV at ICU admission (the difference-in-differences' ventilated side),
+# from the icu-clock panels both arms are fitted on
+ventilated_anchor_env <- c(anchor_env, ICU_CLOCK, PBWPFVC_JM_ICU_DAY0 = "1")
 run_step("anchors_ventilated", "code/22_biotrauma_fit.R", "imv",       ventilated_anchor_env)
-run_step("anchors_nosupport",  "code/22_biotrauma_fit.R", "nosupport", anchor_env)
+run_step("anchors_nosupport",  "code/22_biotrauma_fit.R", "nosupport", c(anchor_env, ICU_CLOCK))
 
 # ---- 3b overlap: could a propensity score for intubation weight the controls instead?
 run_step("intubation_overlap", "code/supplement/xsec_intubation_overlap.R")
@@ -312,21 +335,21 @@ CONTROL_MARKERS_CENTRED   <- centred_list(CONTROL_MARKERS)
 HYPOXEMIC_MARKERS_CENTRED <- centred_list(HYPOXEMIC_CONTROL_MARKERS)
 CONTROL_CREATININE        <- CREATININE && "creatinine" %in% centred_markers
 
-# ---- 5 fits, arm by arm
+# ---- 5 fits, arm by arm (index clock unless the arm sets ICU_CLOCK)
 fit_arm("ventilated", "imv", MARKERS)
 # the ventilated side of the comparisons with a control: patients on IMV at ICU
-# admission, fitted for the control's markers (and creatinine)
-fit_arm("ventilated_day0", "imv", CONTROL_MARKERS, c(PBWPFVC_JM_ICU_DAY0 = "1"))
+# admission, fitted for the control's markers (and creatinine), on the icu clock
+fit_arm("ventilated_day0", "imv", CONTROL_MARKERS, c(ICU_CLOCK, PBWPFVC_JM_ICU_DAY0 = "1"))
 for (band in SF_BANDS)
   fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
   if (nzchar(CONTROL_MARKERS_CENTRED) || CONTROL_CREATININE)
-    fit_arm("nosupport", "nosupport", CONTROL_MARKERS_CENTRED, c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER),
+    fit_arm("nosupport", "nosupport", CONTROL_MARKERS_CENTRED, c(ICU_CLOCK, PBWPFVC_JM_SEV_CENTER = SEV_CENTER),
             with_creatinine = CONTROL_CREATININE)
   # the hypoxemic control: the same control, index SF < 315, with the same markers
   if (nzchar(HYPOXEMIC_CONTROL_MARKERS) && (nzchar(HYPOXEMIC_MARKERS_CENTRED) || CONTROL_CREATININE))
     fit_arm("nosupport_hypoxemic", "nosupport", HYPOXEMIC_MARKERS_CENTRED,
-            c(PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"),
+            c(ICU_CLOCK, PBWPFVC_JM_SEV_CENTER = SEV_CENTER, PBWPFVC_JM_SF_BAND = "0,315"),
             with_creatinine = CONTROL_CREATININE)
 }
 
@@ -341,7 +364,7 @@ FIG_MARKERS <- paste0("platelets,bilirubin", if (CREATININE) ",creatinine", ",an
 # death against each control: the PFVC association with 60-day death before escalation
 # in the ventilated arm at ICU admission and in the no-support control, everyone and
 # hypoxemic at the index (the checks figure's mortality rows); it reads both cohorts'
-# tables and the control's 7-day panel
+# tables and the control's 7-day panel on the icu clock
 run_step("mortality_contrast", "code/supplement/xsec_pfvc_age_control.R")
 run_step("comparison", "code/27_control_comparison.R")
 run_step("figure", "code/24_biotrauma_figures.R", "imv",
