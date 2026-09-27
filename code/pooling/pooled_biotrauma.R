@@ -50,6 +50,9 @@
 #   jm_control_did_*       figure 4's difference-in-differences: the ventilated
 #                          divergence minus the no-support control's, per day
 #   jm_hypoxemic_control_did_*  the same against the hypoxemic control (SF < 315)
+#   jm_estimates_*sf<lo>to<hi>_*   the ventilated divergence within each index SF class,
+#                          pooled per class and tested for a trend across classes
+#                          (sf_band_trend; forest pooled_biotrauma_sf_bands.pdf)
 #   pfvc_age_control_channels_*, _channel_vcov_*, _contrast_*   the mortality control
 #                          contrast and its GLI channel breakdown (supplement/)
 #   crs_channels_estimates_*, crs_channels_tests_*   the compliance channels and the
@@ -349,11 +352,65 @@ if (nrow(es)) {
                             ", size R-hat ", round(size_terms_rhat, 2), ")"))
   if (nrow(dropped)) message("longitudinal terms dropped, lung-size R-hat > ", RHAT_GATE, ":\n  ",
                              paste(dropped$what, collapse = "\n  "))
+  es_checked <- es   # every fit with its gate, for the SF-class forest's hollow points (3b)
   es <- es %>% filter(size_gate) %>%
     to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"),
                  other_unit = if_else(str_detect(.$term, "vtpfvc_c"), "per point of VT/PFVC", "per site unit of the term"))
   pooled$longitudinal_terms <- pool_by(es, marker, model, adjustment, term, unit, panel_h, grid, arm_tag, form) %>%
     mutate(scale = marker_scale(marker))
+}
+
+# --- 3b. is the divergence worse in a more injured lung? 29_run_figure4.R fits the
+#         ventilated cohort within each class of SF at the index (SF_BANDS; arm tags
+#         sf<lo>to<hi>_, and rrtcause_sf<lo>to<hi>_ for creatinine, which is fitted only
+#         with dialysis as a third cause). SF is read at the index, before the protocol
+#         tidal volume can recruit lung, and not from DP or compliance, which scale with
+#         PFVC. The classes hold different patients, so their pooled divergences are
+#         independent: Q across them (classes - 1 df) asks whether they differ at all,
+#         and a common-effect meta-regression on the class step (0 = the mildest class,
+#         1 per class toward a lower SF) gives the change in the divergence per step
+#         toward a more injured lung. Both are read on the figures' toward-injury scale,
+#         so a positive trend means a smaller predicted lung diverges faster toward
+#         injury when the lung is more injured at the start.
+sf_class_of <- function(arm_tag, marker) {
+  band_tag <- if_else(marker == "creatinine", sub("^rrtcause_", "", arm_tag), arm_tag)
+  own_fit <- (marker == "creatinine") == startsWith(arm_tag, "rrtcause_")
+  limits <- str_match(band_tag, "^sf([0-9.]+)to([0-9.]+)_$")
+  tibble(sf_lo = if_else(own_fit, as.numeric(limits[, 2]), NA_real_), sf_hi = as.numeric(limits[, 3]))
+}
+# the divergence rows of the SF-class fits, with the class, its label and its step
+sf_class_rows <- function(d) {
+  d <- d %>% filter(model == "main", form == "pfvc", term == canonical_term("log_pfvc_sd:vent_day"), unit == PFVC_UNIT)
+  d <- bind_cols(d, sf_class_of(d$arm_tag, d$marker)) %>% filter(!is.na(sf_lo))
+  d %>% mutate(sf_class = if_else(sf_lo == 0, paste0("SF < ", sf_hi), paste0("SF ", sf_lo, "-", sf_hi)))
+}
+sf_sites  <- if (exists("es_checked")) es_checked %>% filter(model == "main") %>%
+  to_log_units(per_sd = str_detect(.$term, "log_pfvc_sd"), other_unit = "per site unit of the term") %>%
+  sf_class_rows() else tibble()
+sf_pooled <- if (!is.null(pooled$longitudinal_terms)) sf_class_rows(pooled$longitudinal_terms) else tibble()
+if (nrow(sf_pooled)) {
+  # mildest class first; the step counts classes toward a lower SF over every class any
+  # site fitted, so a class missing for one marker does not shift another's steps
+  class_order <- bind_rows(sf_sites, sf_pooled) %>% distinct(sf_lo, sf_class) %>% arrange(desc(sf_lo))
+  sf_pooled <- sf_pooled %>% mutate(severity_step = match(sf_lo, class_order$sf_lo) - 1L,
+                                    toward_injury = if_else(MARKER_WORSE[marker] == "higher", -pooled, pooled))
+  class_trend <- function(d) {
+    d <- d %>% arrange(severity_step)
+    base <- tibble(k_classes = nrow(d), classes = paste(d$sf_class, collapse = ";"),
+                   class_estimates = paste(signif(d$toward_injury, 4), collapse = ";"),
+                   class_sites = paste(d$k, collapse = ";"))
+    if (nrow(d) < 2) return(base %>% mutate(status = "fewer than two SF classes pooled: no test"))
+    heterogeneity <- rma(yi = toward_injury, sei = se, data = d, method = "FE")
+    trend <- rma(yi = toward_injury, sei = se, mods = ~ severity_step, data = d, method = "FE")
+    base %>% mutate(q = heterogeneity$QE, q_df = nrow(d) - 1L, q_p = heterogeneity$QEp,
+                    trend_per_step = trend$b[2], trend_se = trend$se[2],
+                    trend_lo = trend$ci.lb[2], trend_hi = trend$ci.ub[2], trend_p = trend$pval[2],
+                    status = if (nrow(d) == 2) "two classes: the trend is their difference" else "ok")
+  }
+  pooled$sf_band_trend <- sf_pooled %>% group_by(marker, adjustment, unit, panel_h) %>%
+    group_modify(~ class_trend(.x)) %>% ungroup() %>%
+    mutate(scale = paste0("divergence toward injury (", marker_scale(marker),
+                          " per day per 0.1 log smaller PFVC), change per SF class step toward a lower index SF"))
 }
 
 # --- 4. the figure-4 causal support: the difference-in-differences against the
@@ -670,6 +727,32 @@ if (!is.null(fd4) && nrow(fd4)) {
       x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
     ggsave(file.path(out_dir, paste0("pooled_biotrauma_figure4", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
            p4, width = 11, height = forest_height(d), limitsize = FALSE)
+  }
+}
+
+# --- forest: the ventilated divergence within each index SF class (3b), per site and
+#     pooled, mildest class on the left; one file per adjustment. A site whose fit did
+#     not pass the lung-size gate is drawn hollow and is not in the pool.
+if (nrow(sf_pooled)) {
+  class_levels <- class_order$sf_class
+  fsf <- bind_rows(
+    sf_sites %>% transmute(marker, adjustment, site, converged = size_gate,
+                           estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, sf_class),
+    sf_pooled %>% transmute(marker, adjustment, site = POOLED_LABEL, converged = NA, estimate = pooled, lo, hi, sf_class)) %>%
+    mutate(column = factor(sf_class, levels = class_levels)) %>%
+    toward_injury()
+  for (adj in c("adjusted", "unadjusted")) {
+    d <- fsf %>% filter(adjustment == adj)
+    if (!nrow(d)) next
+    p <- draw_forest(d,
+      title = paste0("Divergence by predicted lung size within each class of SF at the index (", adj, ")"),
+      subtitle = paste0("ventilated cohort; log marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (",
+                        PER_LOG_PFVC, " log units of PFVC),\n95% CI; injury upward for every marker; lower SF = more injured lung; ",
+                        "black diamond = common-effect pooled estimate;\nhollow point = the site's lung-size terms did not converge ",
+                        "(not pooled); trend across classes in pooled_biotrauma_sf_band_trend.csv"),
+      x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
+    ggsave(file.path(out_dir, paste0("pooled_biotrauma_sf_bands", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
+           p, width = 4 + 3.5 * length(class_levels), height = forest_height(d), limitsize = FALSE)
   }
 }
 

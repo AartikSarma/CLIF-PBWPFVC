@@ -184,8 +184,10 @@ what this runner has always done, so existing site instructions still work.
   conditional on it and is read only in the ventilated cohort; every comparison with
   the controls uses the on/off part.
 - **Arms:** all ventilated patients, and the negative control, patients with no
-  respiratory support. The ventilated cohort by baseline SF class is optional:
-  `SF_BANDS="235,315 115,235 0,115"`.
+  respiratory support. The ventilated cohort is also fitted within three classes of
+  SF at the index (235-315, 115-235, < 115; `SF_BANDS`, `SF_BAND_MARKERS`), to ask
+  whether the divergence is worse in a more injured lung; the pooling tests the trend
+  across classes (`pooled_biotrauma_sf_band_trend.csv`).
 - **Severity:** the control is standardised, not matched. Severity cannot confound a
   PFVC fixed by height, age, sex and race, but it could modify the divergence, so the
   control keeps every patient, its divergence varies with the marker's severity
