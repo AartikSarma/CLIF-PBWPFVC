@@ -79,8 +79,9 @@ to change; that stops once sites have returned `final/` folders.
   `xsec_crs_channels.R` asks whether measured compliance scales like predicted FVC,
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
-  height elasticity of Crs by sex beside GLI's and Devine's (figure 3C; run by
-  00_run_pipeline.R in the cross_sectional stage, after 05).
+  height elasticity of Crs by sex beside GLI's and Devine's (figure 3C).
+  00_run_pipeline.R's cross_sectional stage runs `xsec_crs_channels.R`,
+  `xsec_dp_vtpfvc_additive.R` and `xsec_mortality_prediction.R` after 05.
   `xsec_mortality_prediction.R` asks which dose or mechanics measure predicts death
   best, alone, given VT/PBW, and given VT/PBW, sex and race: VT/PBW, VT/PFVC, VT/PFVC at age 25, Ers scaled by
   each, mechanical power raw and scaled by Crs, PBW, PFVC and PFVC at age 25, and driving
