@@ -13,7 +13,9 @@
 #
 #   prep             01-03   cohort, quality checks, derived variables
 #   cross_sectional  04-05   figures 1-3: PBW bias by demographics, respiratory
-#                            mechanics, mortality
+#                            mechanics, mortality; then supplement/xsec_crs_channels.R,
+#                            whether measured compliance scales like PFVC or PBW
+#                            (figure 3C, written to final/supplement/)
 #   injury           20-29   figure 4: organ-injury markers over 7 days in the ventilated
 #                            cohort and the no-support controls (all, and hypoxemic with
 #                            SF < 315), each control standardised to the ventilated
@@ -166,7 +168,8 @@ message("[00] Packages synced.\n")
 stage_steps <- list(
   prep = c("01_cohort_identification.R", "02_quality_checks.R", "03_variable_derivation.R"),
   cross_sectional = c("04_analysis.R",                # bias, mechanics, mortality (figures 1-3)
-                      "05_normalization_analysis.R"), # PBW vs PFVC normalization of the injury metrics
+                      "05_normalization_analysis.R",  # PBW vs PFVC normalization of the injury metrics
+                      "supplement/xsec_crs_channels.R"), # compliance against PFVC and PBW (figure 3C)
   injury = "29_run_figure4.R"
 )
 pipeline_steps <- unlist(stage_steps[stages], use.names = FALSE)
