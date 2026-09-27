@@ -164,7 +164,7 @@ The `--` separates uvr's options from the runner's.
 | Stage | Runs | Rough cost |
 |---|---|---|
 | `prep` | `01`–`03`: cohort, quality checks, derived variables | minutes |
-| `cross_sectional` | `04`, `05` | minutes |
+| `cross_sectional` | `04`, `05`, then `supplement/xsec_crs_channels.R` (figure 3C) | minutes |
 | `injury` | `29_run_figure4.R`: every analysis behind figure 4 and the figure itself (see below) | a few hours |
 
 If a step fails the runner stops and names it. The default, with no `--stages`, is
