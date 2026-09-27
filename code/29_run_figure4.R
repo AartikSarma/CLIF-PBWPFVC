@@ -58,6 +58,11 @@
 #   2 panels    the 7-day panel of both cohorts
 #   3 anchors   the severity-anchor distributions of both cohorts, and the ventilated
 #               mean anchor per marker (final/injury/jm_severity_anchor_mean_*)
+#   3b overlap  supplement/xsec_intubation_overlap.R: a propensity score for intubation
+#               (ventilated at ICU admission against each control, covariates from the
+#               24 h before ICU admission) and its overlap, balance and effective sample
+#               size, the diagnostic for weighting the controls instead of standardising
+#               them; it needs both cohorts built and nothing from the fits
 #   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm: ventilated
 #               (all, then on IMV at ICU admission), any SF classes, the two controls,
@@ -273,6 +278,9 @@ anchor_env <- c(PBWPFVC_JM_ANCHOR_ONLY = "1", PBWPFVC_JM_MARKERS = ANCHOR_MARKER
 ventilated_anchor_env <- c(anchor_env, PBWPFVC_JM_ICU_DAY0 = "1")
 run_step("anchors_ventilated", "code/22_biotrauma_fit.R", "imv",       ventilated_anchor_env)
 run_step("anchors_nosupport",  "code/22_biotrauma_fit.R", "nosupport", anchor_env)
+
+# ---- 3b overlap: could a propensity score for intubation weight the controls instead?
+run_step("intubation_overlap", "code/supplement/xsec_intubation_overlap.R")
 
 # ---- 4 centres: the ventilated cohort's mean anchor per control marker, where each
 #      control fit reads its divergence (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R)
