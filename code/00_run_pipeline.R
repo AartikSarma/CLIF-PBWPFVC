@@ -13,9 +13,12 @@
 #
 #   prep             01-03   cohort, quality checks, derived variables
 #   cross_sectional  04-05   figures 1-3: PBW bias by demographics, respiratory
-#                            mechanics, mortality; then supplement/xsec_crs_channels.R,
-#                            whether measured compliance scales like PFVC or PBW
-#                            (figure 3C, written to final/supplement/)
+#                            mechanics, mortality; then three supplement scripts, all
+#                            written to final/supplement/: xsec_crs_channels.R (does
+#                            measured compliance scale like PFVC or PBW; figure 3C),
+#                            xsec_dp_vtpfvc_additive.R (driving pressure and VT/PFVC
+#                            as additive mortality risks) and xsec_mortality_prediction.R
+#                            (which dose or mechanics measure predicts death best)
 #   injury           20-29   figure 4: organ-injury markers over 7 days in the ventilated
 #                            cohort and the no-support controls (all, and hypoxemic with
 #                            SF < 315), each control standardised to the ventilated
@@ -169,7 +172,9 @@ stage_steps <- list(
   prep = c("01_cohort_identification.R", "02_quality_checks.R", "03_variable_derivation.R"),
   cross_sectional = c("04_analysis.R",                # bias, mechanics, mortality (figures 1-3)
                       "05_normalization_analysis.R",  # PBW vs PFVC normalization of the injury metrics
-                      "supplement/xsec_crs_channels.R"), # compliance against PFVC and PBW (figure 3C)
+                      "supplement/xsec_crs_channels.R",          # compliance against PFVC and PBW (figure 3C)
+                      "supplement/xsec_dp_vtpfvc_additive.R",    # driving pressure and VT/PFVC, additive risks
+                      "supplement/xsec_mortality_prediction.R"), # which measure predicts death best
   injury = "29_run_figure4.R"
 )
 pipeline_steps <- unlist(stage_steps[stages], use.names = FALSE)
