@@ -119,31 +119,45 @@ toward_injury <- function(d) {
 }
 # One forest in the cross-sectional style: sites as coloured points with capped
 # intervals, the pooled estimate as a black diamond at the foot, one row per marker
-# and one column per `column`, each column on its own x scale. A site row whose
-# `converged` column is FALSE (its lung-size terms did not converge, so it is not in
-# the pool) is drawn as a hollow point.
+# and one column per `column`. Each marker row has its own x scale, shared by the
+# columns in that row: markers sit on different scales (log-odds for any vasopressor
+# is ten times wider than a log lab value), so one scale for the page would flatten
+# the lab rows, while a row-wide scale keeps a row's columns directly comparable.
+# The rows are separate plots stacked with patchwork. A site row whose `converged`
+# column is FALSE (its lung-size terms did not converge, so it is not in the pool)
+# is drawn as a hollow point.
 draw_forest <- function(d, title, subtitle, x_label) {
   if (!"converged" %in% names(d)) d$converged <- NA
   d <- d %>% mutate(site = factor(site, levels = c(POOLED_LABEL, rev(site_levels))),
                     kind = case_when(site == POOLED_LABEL ~ "Pooled",
                                      !is.na(converged) & !converged ~ "Site, not converged",
                                      TRUE ~ "Site"))
-  ggplot(d, aes(x = estimate, y = site, colour = site)) +
-    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
-    geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.25, orientation = "y") +
-    geom_point(aes(size = kind, shape = kind)) +
-    facet_grid(marker_label ~ column, scales = "free_x", drop = FALSE) +
-    scale_colour_manual(values = forest_palette, guide = "none") +
-    scale_shape_manual(values = c(Site = 16, `Site, not converged` = 1, Pooled = 18), guide = "none") +
-    scale_size_manual(values = c(Site = 2.3, `Site, not converged` = 2.3, Pooled = 3.4), guide = "none") +
-    labs(title = title, subtitle = subtitle, x = x_label, y = "Cohort") +
-    theme_minimal(base_size = 11) +
-    theme(strip.text.x = element_text(face = "bold"),
-          strip.text.y = element_text(face = "bold", angle = 0),
-          panel.spacing = unit(0.6, "lines"),
-          panel.border = element_rect(colour = "grey60", fill = NA, linewidth = 0.5))
+  row_labels <- levels(droplevels(d$marker_label))
+  forest_row <- function(row_label) {
+    is_top <- row_label == first(row_labels)
+    is_bottom <- row_label == last(row_labels)
+    row_data <- d %>% filter(marker_label == row_label) %>% mutate(marker_label = droplevels(marker_label))
+    ggplot(row_data, aes(x = estimate, y = site, colour = site)) +
+      geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.25, orientation = "y") +
+      geom_point(aes(size = kind, shape = kind)) +
+      facet_grid(marker_label ~ column, drop = FALSE) +
+      scale_y_discrete(limits = levels(droplevels(d$site))) +
+      scale_colour_manual(values = forest_palette, guide = "none") +
+      scale_shape_manual(values = c(Site = 16, `Site, not converged` = 1, Pooled = 18), guide = "none") +
+      scale_size_manual(values = c(Site = 2.3, `Site, not converged` = 2.3, Pooled = 3.4), guide = "none") +
+      labs(x = if (is_bottom) x_label else NULL, y = NULL) +
+      theme_minimal(base_size = 11) +
+      theme(strip.text.x = if (is_top) element_text(face = "bold") else element_blank(),
+            strip.text.y = element_text(face = "bold", angle = 0),
+            panel.spacing = unit(0.6, "lines"),
+            panel.border = element_rect(colour = "grey60", fill = NA, linewidth = 0.5))
+  }
+  patchwork::wrap_plots(map(row_labels, forest_row), ncol = 1) +
+    patchwork::plot_annotation(title = title, subtitle = subtitle)
 }
-forest_height <- function(d) 2 + 0.28 * n_distinct(d$marker_label) * (n_distinct(d$site) + 1.5)
+# every row carries its own x axis, so each row gets room for its tick labels
+forest_height <- function(d) 2 + n_distinct(d$marker_label) * (0.28 * (n_distinct(d$site) + 1.5) + 0.3)
 
 # read one file family from every site, tagging the site; tolerant of absent files.
 # Every table a site returns is named {family}_{tags}{site name}.csv, and one family
@@ -632,8 +646,11 @@ fig4_pooled <- function(d, column_key, keep = TRUE) {
     transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = POOLED_LABEL,
               estimate = pooled, lo, hi)
 }
-# the divergence column is the full ventilated cohort's fit (arm tag "", pfvc form)
-is_primary_divergence <- function(d) d$term == DIVERGENCE[["pfvc"]] & d$model == "main" & d$arm_tag == "" & d$form == "pfvc"
+# the divergence column is the full ventilated cohort's fit (pfvc form, no restriction);
+# 29 fits creatinine only with dialysis as a third cause, so its fit carries the arm
+# tag rrtcause_ and every other marker's carries none
+is_primary_divergence <- function(d) d$term == DIVERGENCE[["pfvc"]] & d$model == "main" & d$form == "pfvc" &
+  d$arm_tag == if_else(d$marker == "creatinine", "rrtcause_", "")
 fd4 <- bind_rows(
   if (exists("es") && nrow(es)) fig4_rows(es, "divergence", is_primary_divergence(es)),
   if (!is.null(pooled$longitudinal_terms))
