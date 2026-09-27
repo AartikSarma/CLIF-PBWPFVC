@@ -71,6 +71,11 @@ to change; that stops once sites have returned `final/` folders.
   curve with and without log PFVC in the ventilated arm on invasive ventilation at ICU
   admission (`icu_day0`) and the no-support cohort, and the cohort x log PFVC contrast,
   with the control censored at escalation (needs scripts 01-03 run for both cohorts).
+  `xsec_intubation_overlap.R` asks whether a propensity score for intubation could
+  weight the no-support controls to the ventilated arm: it fits the score from the 24
+  hours before ICU admission (ventilated at ICU admission against each control) and
+  reports overlap, balance and effective sample size, with no outcome model (run by
+  29_run_figure4.R after the anchors).
   `xsec_crs_channels.R` asks whether measured compliance scales like predicted FVC,
   input by input: the Crs exponent through the height, age, sex and race pieces of
   log PFVC, the PFVC-against-PBW head-to-head (everyone, and short women), and the
