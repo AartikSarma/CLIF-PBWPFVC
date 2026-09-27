@@ -26,9 +26,11 @@
 # (hazard_rhat) and read with the longitudinal-only comparison (jm_lme_check_*). The
 # hazard-ratio table keeps its own gate on the association terms, which it reports.
 #
-# The fits read here share one clock: days from the index, every cause (death,
-# extubation or escalation, RRT) on it, each patient entering the survival submodel
-# at their first trajectory day; the baseline marker is its value in the first 24 h after the index (day 0).
+# Each fit read here runs on one clock: days from t0, the index, or ICU admission for
+# the ventilated arm on IMV at ICU admission and the controls (PBWPFVC_JM_CLOCK,
+# 20_biotrauma_grid.R), every cause (death, extubation or escalation, RRT) on it, each
+# patient entering the survival submodel at their first trajectory day; the baseline
+# marker is its value in the first 24 h after t0 (day 0).
 # The dose terms (VT/PBW at the index, and the previous day's VT/PBW minus the index)
 # are not reported: the manuscript does not read the dose inside the band, which is
 # confounded by indication.

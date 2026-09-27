@@ -191,6 +191,10 @@ what this runner has always done, so existing site instructions still work.
   control keeps every patient, its divergence varies with the marker's severity
   anchor, and it is read at the ventilated cohort's mean anchor. The severity x
   divergence term tests whether sicker controls diverge faster.
+- **Clock:** every comparison with the control counts days, the 7-day follow-up and the
+  day-0 baseline from ICU admission in both arms (the ventilated patients on IMV at ICU
+  admission and the control; `PBWPFVC_JM_CLOCK=icu`), while the full ventilated arm,
+  the sensitivity without the lags and the channel breakdown count them from the index.
 
 It builds the control cohort when missing, reuses finished fits, carries on past a
 failed step and lists the failures at the end. With the figure it writes the

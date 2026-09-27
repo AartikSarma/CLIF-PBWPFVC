@@ -140,11 +140,12 @@ message("=== 28_height_fingerprint: ", MARKER, ", site ", site_name, " (cohort "
 # =============================================================================
 # 1. The panel, with the fingerprint and the whole ratio per patient
 # =============================================================================
-panel_path <- file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet"))
-if (!file.exists(panel_path))
-  stop("no ", h_suffix, " panel for this cohort: run  PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/21_biotrauma_panel.R")
-long <- read_parquet(panel_path)
-surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
+# this clock's panel (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R; the index clock by default)
+if (!file.exists(panel_path("long")))
+  stop("no ", h_suffix, " panel on the ", JM_CLOCK, " clock for this cohort: run  PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 ",
+       "PBWPFVC_JM_CLOCK=", JM_CLOCK, " uvr run code/21_biotrauma_panel.R")
+long <- read_parquet(panel_path("long"))
+surv <- read_parquet(panel_path("surv"))
 
 # severity standardisation of the control (20_biotrauma_grid.R): the marker's own
 # anchor, centred at the ventilated cohort's mean

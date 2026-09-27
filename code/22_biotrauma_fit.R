@@ -25,7 +25,7 @@
 #                           standardised non-respiratory SOFA, baseline log SF,
 #                           BMI, age, sex and race. No size or dose term: this
 #                           submodel corrects for who leaves the panel. Time is
-#                           continuous days from the index, and each patient
+#                           continuous days from t0 (the clock, below), and each patient
 #                           enters at their first trajectory day (delayed entry,
 #                           Surv(entry_day, event_time, status)): nobody is at
 #                           risk in the model before their first modelled value.
@@ -44,7 +44,16 @@
 # refit with a smaller model.
 #
 # Inputs:  jm_long_{H}d.parquet, jm_surv_{H}d.parquet (21_biotrauma_panel.R, in the
-#          site's row-level output folder)
+#          site's row-level output folder); on the icu clock jm_long_{H}d_icu.parquet
+#          and jm_surv_{H}d_icu.parquet
+# Clock (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R): t0 is the index on the "index" clock
+# (the full ventilated arm, the arm without the lags, the channels form) and the first
+# ICU admission on the "icu" clock (the ventilated arm on IMV at ICU admission and the
+# no-support control, the two sides of every comparison). PBWPFVC_JM_ICU_DAY0=1 and a
+# control cohort require the icu clock, so the ventilated mean anchor that the
+# ICU_DAY0 anchor run writes comes from the icu-clock panel. Each fit's model_spec
+# records its clock. A saved fit is reused by file name alone, and the clock is not in
+# the name: a fit made on the other clock is refitted only when its files are deleted.
 # Outputs: final/jm_estimates_{tag}.csv   every coefficient of every fit (poolable)
 #          final/jm_manifest_{tag}.csv    per fit: status, counts at each entry step
 #                                         (n_rows_after_*, n_patients_after_*), the
@@ -74,7 +83,8 @@
 #   PBWPFVC_JM_RRT_EVENT    0 | 1   renal replacement as a third cause (creatinine only)
 #   PBWPFVC_JM_SEV_CENTER   unset | "marker=value,..."   severity-standardised control
 #   PBWPFVC_JM_SF_BAND      unset | "lo,hi"   index SF band, lo <= SF < hi
-#   PBWPFVC_JM_ICU_DAY0     0 | 1   icu_day0 patients only (the comparison arm)
+#   PBWPFVC_JM_CLOCK        index | icu   the panel's time zero (above)
+#   PBWPFVC_JM_ICU_DAY0     0 | 1   icu_day0 patients only (the comparison arm; icu clock)
 #   PBWPFVC_JM_NO_LAGS      0 | 1   no previous-day SF and pressor terms (sensitivity)
 #   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
 #   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
@@ -191,12 +201,14 @@ adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (
 # hazard coefficients do not converge at any practical chain length. HAZARD_SPEC and
 # MODEL_SPEC are stored with each fit, so a fit made under another hazard or model
 # specification is refitted rather than reused.
-HAZARD_SPEC <- paste0("Surv(entry_day, event_time): delayed entry at the first trajectory day, continuous days from the index; ",
+CLOCK_SPEC <- if (JM_CLOCK == "icu") "icu (t0 = icu_admission_dttm, the first ICU admission)" else
+  "index (t0 = index_dttm, the first qualifying ventilator row)"
+HAZARD_SPEC <- paste0("Surv(entry_day, event_time): delayed entry at the first trajectory day, continuous days from t0; ",
                       "severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
 MODEL_SPEC <- paste0("dose: between = index VT/PBW (vtpbw_idx), within = previous-day VT/PBW minus vtpbw_idx; ",
                      "baseline: the marker's day-0 value only; ",
                      "entry: first trajectory day, event_time > entry_day; ",
-                     "clock: continuous days from the index, no measurement after the event time; ",
+                     "clock: ", CLOCK_SPEC, ", continuous days from t0, no measurement after the event time; ",
                      "lags: ", if (NO_LAGS) "none (previous-day SF and pressor dropped)" else "previous-day log SF and pressor flag")
 # the time trend is part of each marker's specification: a 3-df natural spline in day
 # on the daily grid, linear for the binary on/off marker (its spline did not mix)
@@ -274,10 +286,13 @@ message("=== 22_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
         ", MCMC ", N_ITER, "/", N_BURNIN, " x ", N_CHAINS, " chains on ", JM_CORES, " cores ===")
 if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_JM_ITER for any reported fit ***")
 
-long_all <- read_parquet(file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
-surv_all <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
-meta     <- readRDS(file.path(output_dir, paste0("jm_meta_", h_suffix, ".rds")))
-message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients")
+# this clock's panel (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R)
+long_all <- read_parquet(panel_path("long"))
+surv_all <- read_parquet(panel_path("surv"))
+meta     <- readRDS(panel_path("meta"))
+if (!identical(meta$clock, JM_CLOCK) || is.null(meta$cohort_scale))
+  stop(basename(panel_path("meta")), " was not built on the ", JM_CLOCK, " clock by the current 21_biotrauma_panel.R: rebuild the panel")
+message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients (", JM_CLOCK, " clock)")
 
 # =============================================================================
 # 22e. Marker specification
@@ -360,7 +375,7 @@ severity_anchor <- map_dfr(markers, function(mk) {
     mutate(marker = mk$name, anchor = anchor_label(mk$name), .before = 1)
 }) %>% mutate(cohort = config$cohort, site = site_name)
 if (nrow(severity_anchor)) {
-  anchor_path <- file.path(final_dir, paste0("jm_severity_anchor_", h_suffix, "_", site_name, ".csv"))
+  anchor_path <- file.path(final_dir, paste0("jm_severity_anchor_", clock_tag, h_suffix, "_", site_name, ".csv"))
   if (file.exists(anchor_path)) {   # merge on write: keep other markers' rows from earlier runs
     anchor_on_disk <- read_csv(anchor_path, show_col_types = FALSE)
     # a file without a marker column has the single-anchor layout: replace it
@@ -372,15 +387,18 @@ if (nrow(severity_anchor)) {
   print(as.data.frame(severity_anchor %>% filter(marker %in% names(markers)) %>%
                         select(marker, anchor, sev_anchor, n_patients, pct, pct_at_or_above)), row.names = FALSE)
 }
-# The unit of every PFVC estimate: log_pfvc_sd is log PFVC standardised within THIS
-# cohort's panel (21_biotrauma_panel.R), so a rate "per SD" is in this cohort's own
-# unit. The SD goes to an aggregate table so the control can be put on the ventilated
-# cohort's unit (27_control_comparison.R, 24_biotrauma_figures.R) and the sites on a
-# common one in pooling.
-scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = sd(surv_all$log_pfvc, na.rm = TRUE),
-                    mean_log_pfvc = mean(surv_all$log_pfvc, na.rm = TRUE),
-                    n_patients = sum(!is.na(surv_all$log_pfvc)), horizon_days = JM_HORIZON, site = site_name)
-stopifnot(abs(sd(surv_all$log_pfvc_sd, na.rm = TRUE) - 1) < 1e-8)   # log_pfvc_sd is the standardised log_pfvc
+# The unit of every PFVC estimate: log_pfvc_sd is log PFVC standardised over THIS
+# cohort's whole baseline (21_biotrauma_panel.R; the panel's meta file carries the
+# mean and SD), so a rate "per SD" is in this cohort's own unit on either clock, even
+# on the icu clock's ventilated panel, which holds the icu_day0 patients only. The SD
+# goes to an aggregate table so the control can be put on the ventilated cohort's unit
+# (27_control_comparison.R, 24_biotrauma_figures.R) and the sites on a common one in
+# pooling.
+scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = meta$cohort_scale$log_pfvc_sd,
+                    mean_log_pfvc = meta$cohort_scale$log_pfvc_mean,
+                    n_patients = meta$cohort_scale$n_patients, horizon_days = JM_HORIZON, site = site_name)
+# log_pfvc_sd is log_pfvc standardised by those constants
+stopifnot(isTRUE(all.equal(surv_all$log_pfvc_sd, (surv_all$log_pfvc - scale_tbl$mean_log_pfvc) / scale_tbl$sd_log_pfvc)))
 write_csv(scale_tbl, file.path(final_dir, paste0("jm_scale_", h_suffix, "_", site_name, ".csv")))
 # The patients a marker's fit may use, after the ICU-day-0 restriction and the index
 # SF band. log_pfvc_sd keeps the WHOLE-cohort SD, so the per-SD unit matches the
@@ -596,7 +614,7 @@ prepare_fit_data <- function(mk, stamp) {
     stop("this panel predates the RRT competing event: rebuild it with the current 21_biotrauma_panel.R")
   if (use_rrt) sd_ <- sd_ %>% mutate(event = event_rrt, event_time = event_time_rrt, event_factor = event_factor_rrt)
   # Delayed entry: a patient is at risk in the survival submodel from their first
-  # trajectory day in THIS fit (the first row kept above), not from the index, so
+  # trajectory day in THIS fit (the first row kept above), not from t0, so
   # the hazard is never fitted over days on which the model holds no value of the
   # marker for them. A patient whose event comes at or before that day has no
   # time at risk and leaves the fit.

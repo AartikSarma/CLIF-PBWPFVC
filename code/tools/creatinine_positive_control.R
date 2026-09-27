@@ -44,8 +44,8 @@ output_dir <- config$output_dir
 final_dir  <- final_dir_for("injury")
 tables_path <- path.expand(config$tables_path)
 
-long <- read_parquet(file.path(output_dir, paste0("jm_long_", h_suffix, ".parquet")))
-surv <- read_parquet(file.path(output_dir, paste0("jm_surv_", h_suffix, ".parquet")))
+long <- read_parquet(panel_path("long"))   # this clock's panel (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R)
+surv <- read_parquet(panel_path("surv"))
 
 # ---- ESRD and haemodialysis flags from the CLIF tables (NA when a table is absent)
 read_table <- function(tbl, cols) {

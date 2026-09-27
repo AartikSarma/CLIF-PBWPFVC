@@ -28,8 +28,12 @@
 #                              the index ("sevstd_sf0to315_" tables), so that it
 #                              differs from the ventilated cohort in ventilation and
 #                              not in hypoxemia; its DiD is written separately
-# Every arm runs on one clock, days from its index (the first qualifying ventilator
-# row; ICU admission in the control), with delayed entry at the first trajectory day.
+# Clocks (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R). Both sides of every difference-in-
+# differences run on one clock that starts at ICU admission (the first ICU in_dttm of
+# the stay): the ventilated arm at ICU admission and both no-support arms count days,
+# the 7-day follow-up and the day-0 baseline from it. The full ventilated arm and the
+# SF bands count them from the index (the first qualifying ventilator row). Every arm
+# has delayed entry at the first trajectory day.
 # These are the arms 29_run_figure4.R fits. Only these arm tags are read (arm_pattern
 # below); any other tables in the folders are ignored.
 #

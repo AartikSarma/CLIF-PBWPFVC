@@ -113,7 +113,8 @@
 #   pfvc_age_control_hypoxemia_{site}.csv  the hypoxemia pathway in the control: onset
 #                                          of hypoxemia by PFVC, and PFVC's death HR
 #                                          before and after hypoxemia (needs the 7-day
-#                                          control panel of 21_biotrauma_panel.R)
+#                                          control panel of 21_biotrauma_panel.R on the
+#                                          ICU-admission clock, jm_*_7d_icu)
 # The contrast and the escalation hazard are fitted in five populations (column
 # population): everyone; full code at the index; full code throughout; hypoxemic at
 # the index (SF < 315, the ventilated cohort's own gate); hypoxemic and full code.
@@ -616,20 +617,37 @@ escalation_hazard <- expand_grid(
 # hypoxemic. The death model is therefore read at 7 days, where the state is fully
 # observed, and at 60 days as a companion. Formal mediation is not identifiable:
 # PFVC is fixed by the demographics, and hypoxemia is also driven by the illness.
-# The panel is optional here: without it the section is skipped and announced.
+# The panel is the control's 7-day panel on the ICU-admission clock (the one the
+# comparisons use; PBWPFVC_JM_CLOCK=icu, 20_biotrauma_grid.R), whose days count from
+# ICU admission. This script's clock is the index (index_dttm, the control's first
+# no-support row within 6 h of ICU admission), so each onset is moved onto it: the
+# start of the panel day whose worst SF first falls below 315, in days from the index.
+# An onset at or before the index is not an onset after a non-hypoxemic index; it is
+# counted and dropped. The panel is optional here: without it the section is skipped
+# and announced.
 HYPOXEMIA_HORIZONS <- c(7, 60)
 control_panel_dir <- file.path(config$output_dir, "controls", "nosupport")
-HAS_CONTROL_PANEL <- all(file.exists(file.path(control_panel_dir, c("jm_long_7d.parquet", "jm_surv_7d.parquet"))))
+control_panel_files <- file.path(control_panel_dir, c("jm_long_7d_icu.parquet", "jm_surv_7d_icu.parquet"))
+HAS_CONTROL_PANEL <- all(file.exists(control_panel_files))
 hypoxemia_pathway <- NULL
 if (HAS_CONTROL_PANEL) {
-  index_sf <- read_parquet(file.path(control_panel_dir, "jm_surv_7d.parquet"), col_select = c("hospitalization_id", "sf_index"))
-  onset <- read_parquet(file.path(control_panel_dir, "jm_long_7d.parquet"), col_select = c("hospitalization_id", "vent_day", "sf")) %>%
+  # sf_index and the panel's time zero (t0, the first ICU admission)
+  index_sf <- read_parquet(control_panel_files[2], col_select = c("hospitalization_id", "sf_index", "t0"))
+  onset <- read_parquet(control_panel_files[1], col_select = c("hospitalization_id", "vent_day", "sf")) %>%
     filter(vent_day >= 1, !is.na(sf), sf < SF_HYPOXEMIA_THRESHOLD) %>%
-    group_by(hospitalization_id) %>% summarise(hypoxemia_day = min(vent_day), .groups = "drop")
+    group_by(hospitalization_id) %>% summarise(hypoxemia_panel_day = min(vent_day), .groups = "drop") %>%
+    inner_join(index_sf %>% select(hospitalization_id, t0), by = "hospitalization_id")
   hypoxemia_population <- function(population) population_data(population, "No support") %>%
-    inner_join(index_sf, by = "hospitalization_id") %>%
+    inner_join(index_sf %>% select(-t0), by = "hospitalization_id") %>%
     filter(!is.na(sf_index), sf_index >= SF_HYPOXEMIA_THRESHOLD) %>%
     left_join(onset, by = "hospitalization_id") %>%
+    # the onset in days from the index: the panel day's start minus the index's delay after ICU admission
+    mutate(hypoxemia_day = hypoxemia_panel_day - index_day(index_dttm, t0)) %>%
+    { n_before <- sum(.$hypoxemia_day <= 0, na.rm = TRUE)
+      if (n_before) message("  hypoxemia pathway (", population, "): ", n_before,
+                            " onset(s) at or before the index dropped")
+      mutate(., hypoxemia_day = if_else(!is.na(hypoxemia_day) & hypoxemia_day <= 0, NA_real_, hypoxemia_day)) } %>%
+    select(-hypoxemia_panel_day, -t0) %>%
     # onset counts only while the patient is still unsupported
     mutate(hypoxemia_day = if_else(!is.na(escalation_day) & hypoxemia_day > escalation_day, NA_real_, hypoxemia_day))
   covariate_rhs <- function(adjustment) paste(c("sf_z", "sofa_z", "ns(age_at_admission, 4)",
@@ -695,9 +713,9 @@ if (HAS_CONTROL_PANEL) {
            p = 2 * pnorm(-abs(log_hr / se)), cohort = "No support, not hypoxemic on the index day",
            scale = "cause-specific HR per SD of log PFVC (the hypoxemic-state row: HR for being hypoxemic)",
            site = site_name)
-} else message("*** No 7-day control panel (jm_long_7d, jm_surv_7d) in ", control_panel_dir,
-               ": the hypoxemia pathway is skipped. Build it with PBWPFVC_COHORT=nosupport PBWPFVC_JM_GRID=daily ",
-               "PBWPFVC_JM_HORIZON=7 uvr run code/21_biotrauma_panel.R ***")
+} else message("*** No 7-day ICU-admission-clock control panel (jm_long_7d_icu, jm_surv_7d_icu) in ", control_panel_dir,
+               ": the hypoxemia pathway is skipped. Build it with PBWPFVC_COHORT=nosupport PBWPFVC_JM_CLOCK=icu ",
+               "PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/21_biotrauma_panel.R ***")
 
 # =============================================================================
 # The channel control contrast
