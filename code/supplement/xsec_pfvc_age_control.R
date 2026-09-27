@@ -299,10 +299,17 @@ read_clif_table <- function(table_name, columns) {
 code_status_file <- file.path(path.expand(config$tables_path), paste0("clif_code_status.", config$file_type))
 HAS_CODE_STATUS <- file.exists(code_status_file)
 if (HAS_CODE_STATUS) {
+  # the raw tables come from config$tables_path, which a PBWPFVC_SITE_NAME override
+  # alone does not change: if they hold no hospitalization of these cohorts, they are
+  # another site's tables, and the code-status populations would be silently empty
+  site_hospitalizations <- read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
+    filter(hospitalization_id %in% both_cohorts$hospitalization_id)
+  if (nrow(site_hospitalizations) == 0)
+    stop("clif_hospitalization at ", config$tables_path, " holds none of this site's ", nrow(both_cohorts),
+         " cohort hospitalizations: config$tables_path points at another site's tables. ",
+         "Set PBWPFVC_TABLES_PATH (or config.json) to ", site_name, "'s CLIF tables.")
   code_status <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
-    inner_join(read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
-                 filter(hospitalization_id %in% both_cohorts$hospitalization_id),
-               by = "patient_id", relationship = "many-to-many") %>%
+    inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
     # keyed by cohort too: a hospitalization can hold a no-support index and, later,
     # a ventilated one
     inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, index_dttm,
@@ -506,6 +513,10 @@ outcome_data <- function(cohort_data, outcome_key) {
     end_day = pmax(if_else(event == 1L, death_day, censor_day), 0.01))
 }
 fit_pfvc <- function(cohort_data, outcome_key, model, adjustment, severity) {
+  # a population can be empty in one cohort (no one full code at the index, say)
+  if (nrow(cohort_data) == 0)
+    return(tibble(term = "pfvc", log_ratio = NA_real_, se = NA_real_, n_patients = 0L,
+                  n_deaths = 0L, note = "skipped: no patients in this population"))
   is_ventilated <- cohort_data$cohort[1] == "Ventilated"
   rhs <- paste(c(if (is_ventilated) "vtpbw", severity_rhs[[severity]], "ns(age_at_admission, 4)",
                  if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]], "log_pfvc_z"), collapse = " + ")
