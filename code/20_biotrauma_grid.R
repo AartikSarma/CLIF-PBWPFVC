@@ -281,9 +281,9 @@ icu_day0_sfx <- if (ICU_DAY0) "_day0" else ""
 
 # Baseline SF band (PBWPFVC_JM_SF_BAND = "lo,hi"): keep patients with lo <= SF < hi at
 # the index timepoint (sf_index, the SF ratio of script 03's index row), the same gate
-# in every cohort. The strata in use are "235,315", "115,235" and "0,115" (315 and 235
-# are the Rice 2007 SF equivalents of P/F 300 and 200).
-# The upper bound is strict so that "0,315" is the ventilated cohort's own gate, SF < 315.
+# in every cohort. The band in use is "0,315", the hypoxemic control (315 is the Rice
+# 2007 SF equivalent of P/F 300); the upper bound is strict so that it is the
+# ventilated cohort's own gate, SF < 315.
 SF_BAND_RULE <- "lo <= SF < hi"   # stored with each fit: a fit made under another rule is refitted
 SF_BAND <- trimws(Sys.getenv("PBWPFVC_JM_SF_BAND", ""))
 sf_band_limits <- if (nzchar(SF_BAND)) suppressWarnings(as.numeric(strsplit(SF_BAND, ",")[[1]])) else c(NA_real_, NA_real_)

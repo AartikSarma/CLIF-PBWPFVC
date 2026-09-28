@@ -39,16 +39,6 @@
 #             ventilated, without the lags       (sensitivity: the full ventilated cohort
 #                                                without the previous-day SF and pressor
 #                                                terms; NOLAG_MARKERS and creatinine)
-#             ventilated, by index SF class      (is the divergence worse in a more injured
-#                                                lung? SF at the index, before the protocol VT
-#                                                can recruit lung, in three classes: 235-315,
-#                                                115-235 and < 115, the Rice 2007 equivalents of
-#                                                P/F 300, 200 and 100; SF_BAND_MARKERS and
-#                                                creatinine; pooled_biotrauma.R tests the trend
-#                                                across classes). A patient without an index SF
-#                                                is in no class. Severity is read from SF, not
-#                                                from DP or compliance: Crs scales with PFVC, so
-#                                                both sit downstream of the exposure
 #   The control is standardised, not matched: severity cannot confound a
 #   PFVC fixed by height, age, sex and race, but it could MODIFY the divergence, so the
 #   control's divergence varies with its severity anchor and is read at the ventilated
@@ -58,7 +48,7 @@
 #   Clocks (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R). Each fit runs on one clock, days
 #   from its time zero t0, and the comparisons with a control share one:
 #     index  t0 = the index, the first qualifying ventilator row: ventilated all
-#            (panel A), the SF classes, the arm without the lags, the channels
+#            (panel A), the arm without the lags, the channels
 #     icu    t0 = ICU admission, the first ICU in_dttm of the stay: ventilated on IMV
 #            at ICU admission, its anchors, both no-support arms and their anchors,
 #            so both sides of every difference-in-differences start at ICU admission
@@ -84,7 +74,7 @@
 #               them; it needs both cohorts built and nothing from the fits
 #   4 centres   each control marker's centre = that ventilated mean
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm: ventilated
-#               (all, then on IMV at ICU admission), the three SF classes, the two controls,
+#               (all, then on IMV at ICU admission), the two controls,
 #               and the sensitivity without the lags
 #   6 figure    supplement/xsec_pfvc_age_control.R (60-day death before escalation
 #               against each control, the checks figure's mortality rows),
@@ -109,10 +99,10 @@
 # through the library path `uvr run` sets.
 #   caffeinate -i nohup uvr run code/29_run_figure4.R > figure4.out 2>&1 &
 #   uvr run code/29_run_figure4.R -- --dry-run
-# Site default: 70 figure-4 fits (6 markers and creatinine in the ventilated cohort; 3 markers
-# and creatinine in the ventilated arm at ICU admission, in each control, the whole one
-# and the hypoxemic one, and in each of the three SF classes; 3 markers and creatinine
-# without the lags; each adjusted and unadjusted) plus 1 channel fit, at 5000 / 1000 iterations, four at a time; a run takes
+# Site default: 46 figure-4 fits (6 markers and creatinine in the ventilated cohort; 3 markers
+# and creatinine in the ventilated arm at ICU admission and in each control, the whole one
+# and the hypoxemic one; 3 markers and creatinine without the lags; each adjusted and
+# unadjusted) plus 1 channel fit, at 5000 / 1000 iterations, four at a time; a run takes
 # about 2.5 times as long as one at 2,000 iterations. The survival submodel is deliberately
 # small (22_biotrauma_fit.R, HAZARD_SPEC).
 # Convergence: the figure's estimates are gated on the lung-size terms (the size level and
@@ -122,10 +112,7 @@
 # Knobs (environment): ITER BURNIN CHAINS THIN (5000 / 1000 / 3 / 5), PAR (fits at a
 #   time, 4; a 7-day fit at a 7,000-patient site needs about 15-25 GB, so four at once
 #   can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
-#   SF_BANDS (the index SF classes of the ventilated cohort, "lo,hi" with lo <= SF < hi,
-#   "235,315 115,235 0,115" by default; empty skips them), SF_BAND_MARKERS (the markers
-#   fitted in each class, CONTROL_MARKERS by default, with creatinine as in the other
-#   arms), HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
+#   HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, CONTROL_MARKERS by default, with creatinine as in the other arms; empty
 #   skips it), NOLAG_MARKERS (the sensitivity without the lags, "platelets,bilirubin,osi"
 #   by default, with creatinine as in the other arms; empty skips it),
@@ -157,9 +144,6 @@ HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", CONTROL_M
 NOLAG_MARKERS             <- knob_or_skip("NOLAG_MARKERS", "platelets,bilirubin,osi")     # the sensitivity without the lags
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
 CREATININE  <- knob("CREATININE", "1") == "1"
-SF_BANDS    <- strsplit(trimws(knob_or_skip("SF_BANDS", "235,315 115,235 0,115")), "[[:space:]]+")[[1]]   # index SF classes
-SF_BANDS    <- SF_BANDS[nzchar(SF_BANDS)]
-SF_BAND_MARKERS <- knob("SF_BAND_MARKERS", CONTROL_MARKERS)   # the markers of each SF class
 ITER   <- knob("ITER", "5000"); BURNIN <- knob("BURNIN", "1000"); CHAINS <- knob("CHAINS", "3")
 THIN   <- knob("THIN", "5");    PAR    <- knob("PAR", "4")
 FORCE_BUILD <- knob("FORCE_BUILD", "0") == "1"
@@ -182,7 +166,7 @@ Sys.setenv(PBWPFVC_SITE_NAME = BASE_SITE,
            PBWPFVC_JM_ITER = ITER, PBWPFVC_JM_BURNIN = BURNIN, PBWPFVC_JM_CHAINS = CHAINS,
            PBWPFVC_JM_THIN = THIN, PBWPFVC_JM_PAR = PAR)
 message("site ", BASE_SITE, "; markers ", MARKERS, if (CREATININE) ",creatinine", "; controls ", CONTROL_MARKERS,
-        "; SF bands '", if (length(SF_BANDS)) paste(SF_BANDS, collapse = " ") else "none", "'; chains ",
+        "; chains ",
         ITER, "/", BURNIN, " x ", CHAINS)
 
 if (!DRY) {
@@ -353,10 +337,6 @@ fit_arm("ventilated", "imv", MARKERS)
 # the ventilated side of the comparisons with a control: patients on IMV at ICU
 # admission, fitted for the control's markers (and creatinine), on the icu clock
 fit_arm("ventilated_day0", "imv", CONTROL_MARKERS, c(ICU_CLOCK, PBWPFVC_JM_ICU_DAY0 = "1"))
-# the ventilated cohort within each index SF class, on the index clock: does the
-# divergence grow as the lung is more injured at the start?
-for (band in SF_BANDS)
-  fit_arm(paste0("ventilated_sf", sub(",", "to", band)), "imv", SF_BAND_MARKERS, c(PBWPFVC_JM_SF_BAND = band))
 if (nzchar(SEV_CENTER)) {
   if (nzchar(CONTROL_MARKERS_CENTRED) || CONTROL_CREATININE)
     fit_arm("nosupport", "nosupport", CONTROL_MARKERS_CENTRED, c(ICU_CLOCK, PBWPFVC_JM_SEV_CENTER = SEV_CENTER),

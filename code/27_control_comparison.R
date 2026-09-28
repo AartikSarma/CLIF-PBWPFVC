@@ -14,7 +14,6 @@
 #                              ("day0_" tables): the ventilated side of every
 #                              difference-in-differences, so that both arms are
 #                              assigned their status at the same moment, ICU admission
-#   ventilated, SF band        the same, within an index SF class (PBWPFVC_JM_SF_BAND)
 #   no support                 the negative control: no positive pressure, no strain.
 #                              Every patient is kept, and the divergence is read at
 #                              the ventilated cohort's severity (PBWPFVC_JM_SEV_CENTER,
@@ -31,8 +30,8 @@
 # Clocks (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R). Both sides of every difference-in-
 # differences run on one clock that starts at ICU admission (the first ICU in_dttm of
 # the stay): the ventilated arm at ICU admission and both no-support arms count days,
-# the 7-day follow-up and the day-0 baseline from it. The full ventilated arm and the
-# SF bands count them from the index (the first qualifying ventilator row). Every arm
+# the 7-day follow-up and the day-0 baseline from it. The full ventilated arm counts
+# them from the index (the first qualifying ventilator row). Every arm
 # has delayed entry at the first trajectory day.
 # These are the arms 29_run_figure4.R fits. Only these arm tags are read (arm_pattern
 # below); any other tables in the folders are ignored.
@@ -96,7 +95,7 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#0
 cohort_folders <- tibble(cohort = c("imv", "nosupport"),
                          cohort_label = c("Ventilated", "No support, at ventilated severity"),
                          site = c(base_site, paste0(base_site, "_nosupport")),
-                         arm_pattern = c("^(day0_)?(sf[0-9.]+to[0-9.]+_)?$", "^sevstd_(sf0to315_)?$"))
+                         arm_pattern = c("^(day0_)?$", "^sevstd_(sf0to315_)?$"))
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")

@@ -43,7 +43,7 @@
 #                          into the existing tables (default: every marker fitted)
 #   PBWPFVC_JM_ICU_DAY0    1 = the ventilated patients on IMV at ICU admission (default 0)
 #   PBWPFVC_JM_SEV_CENTER  a control read at the ventilated severity (default none)
-#   PBWPFVC_JM_SF_BAND     "lo,hi": the index SF class (default none)
+#   PBWPFVC_JM_SF_BAND     "lo,hi": the index SF band (the hypoxemic control; default none)
 #   PBWPFVC_JM_NO_LAGS     1 = the fit without the previous-day SF and pressor terms (default 0)
 #   PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON   grid and window (default daily, 7 days)
 #   PBWPFVC_JM_BASELINE    baseline form (default free)
@@ -90,7 +90,7 @@ why_not <- function(m) {
   r <- manifest %>% filter(marker %in% m) %>% distinct(marker, status, reason)
   paste(paste0(r$marker, " ", r$status, ifelse(is.na(r$reason), "", paste0(" (", r$reason, ")"))), collapse = "; ")
 }
-# An arm where no fit ran (a small SF class, a thin control) is a skip, not an error:
+# An arm where no fit ran (a thin control) is a skip, not an error:
 # say so and stop cleanly, so a runner over many arms carries on.
 if (!any(manifest$status %in% c("converged", "rhat_fail"))) {
   message("nothing to report for ", out_tag, ": no fit ran: ", why_not(unique(manifest$marker)))
