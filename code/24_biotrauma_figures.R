@@ -8,7 +8,7 @@
 #       horizons (the 7-day run): one row per marker, the contrast toward injury
 #       from hour 0 to the end of the window; the rate per day in every arm (the
 #       two no-support controls at the ventilated severity, the ventilated patients
-#       on IMV at ICU admission, any ventilated SF classes, and ventilated all),
+#       on IMV at ICU admission, and ventilated all),
 #       adjusted beside unadjusted; and the posterior probability of harm by day
 #   biotrauma_fig_checks_{tag}.pdf   the pfvc form's unrestricted run: every
 #       outcome against each control (every no-support patient, and the no-support
@@ -32,7 +32,7 @@
 # hypoxemic one (SF < 315) isolates ventilation, the all-patients one is the larger sample.
 #
 # Time is days from t0, the clock of every cause in the joint models: the index (the
-# first qualifying ventilator row) in the full ventilated arm and its SF classes, and
+# first qualifying ventilator row) in the full ventilated arm, and
 # ICU admission in both arms of every comparison with a control, the ventilated arm on
 # IMV at ICU admission and the no-support control (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R).
 #
@@ -243,7 +243,6 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
   #        Ventilated, at ICU admission     the ventilated patients on IMV at ICU
   #                                         admission (the day0_ tables): the ventilated
   #                                         side of the comparisons with the controls
-  #        Ventilated, SF <class>           the ventilated cohort by index SF
   #        Ventilated, all                  the ventilated cohort (panels A and C)
   #      The noninvasive cohort is deliberately NOT drawn: NIPPV delivers large, unlimited
   #      positive-pressure volumes, so it is a strained group and cannot be a control.
@@ -305,13 +304,6 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
   if ("day0_" %in% ventilated_restrictions && restrict_tag != "day0_")
     arms[["day0"]] <- list(folder = fig_dir, restriction = "day0_", site = site_name, rank = 3,
                            label = "Ventilated,\nat ICU\nadmission")
-  sf_found <- ventilated_restrictions[grepl("^sf[0-9.]+to[0-9.]+_$", ventilated_restrictions)]
-  sf_lo <- as.numeric(str_match(sf_found, "^sf([0-9.]+)to")[, 2])
-  sf_hi <- as.numeric(str_match(sf_found, "to([0-9.]+)_$")[, 2])
-  for (k in order(-sf_lo)) {                                          # mildest hypoxaemia first
-    arms[[sf_found[k]]] <- list(folder = fig_dir, restriction = sf_found[k], site = site_name, rank = 4 + match(k, order(-sf_lo)) / 10,
-                                label = paste0("Ventilated,\nSF ", if (sf_lo[k] == 0) paste0("< ", sf_hi[k]) else paste0(sf_lo[k], "-", sf_hi[k])))
-  }
   # The dose part (pressor_dose) is conditional on being on a pressor, an outcome, so it
   # is never compared with a control: its row has no ICU-admission or control column,
   # even where an older run left dose rows in those arms' tables.
@@ -341,7 +333,6 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
     labs(title = if (nrow(arm_rate)) "Rate per day, by cohort" else "Rate per day",
          subtitle = paste(c(if (has_ctrl) "controls: no respiratory support",
                             if ("day0" %in% names(arms)) "ventilated at ICU admission",
-                            if (length(sf_found)) "ventilated by baseline SF",
                             if (!nrow(arm_rate)) "adjusted vs unadjusted"), collapse = "; "),
          x = NULL, y = "change per day toward injury\n(log marker; log-odds for any vasopressor)")
   pm_c <- ggplot(trend, aes(day, p_harm, colour = adjustment)) +
