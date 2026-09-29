@@ -208,14 +208,17 @@ for (adjusted in c(TRUE, FALSE)) {
     Vsub <- V[c(i_zi, i_pos), c(i_zi, i_pos)]
     marg <- (1 - p_on) * b_on + b_pos
     se_marg <- sqrt(drop(t(g) %*% Vsub %*% g))
-    for (part in list(list("zero part (odds a pressor runs)", b_on, se_on),
-                      list("positive part (log dose when on)", b_pos, se_pos),
-                      list("marginal (expected daily dose, zeros included)", marg, se_marg)))
+    # the loop variable is not called `part`: tibble() evaluates its arguments in
+    # order and each sees the columns already made, so a column named part would
+    # shadow it from the second argument on
+    for (piece in list(list("zero part (odds a pressor runs)", b_on, se_on),
+                       list("positive part (log dose when on)", b_pos, se_pos),
+                       list("marginal (expected daily dose, zeros included)", marg, se_marg)))
       rows[[length(rows) + 1L]] <- tibble(
-        part = part[[1]], term = which_term, adjustment = adj_label,
-        estimate = part[[2]], se = part[[3]],
-        lo = part[[2]] - 1.96 * part[[3]], hi = part[[2]] + 1.96 * part[[3]],
-        p = 2 * pnorm(-abs(part[[2]] / part[[3]])),
+        part = piece[[1]], term = which_term, adjustment = adj_label,
+        estimate = piece[[2]], se = piece[[3]],
+        lo = piece[[2]] - 1.96 * piece[[3]], hi = piece[[2]] + 1.96 * piece[[3]],
+        p = 2 * pnorm(-abs(piece[[2]] / piece[[3]])),
         n_patients = n_distinct(d$hospitalization_id), n_obs = nrow(d),
         n_pressor_days = sum(d$y > 0), mean_p_on = p_on,
         zero_part_baseline = !zi_separates, zero_part_random_intercept = ZI_RANDOM)
