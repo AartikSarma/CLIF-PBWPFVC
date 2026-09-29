@@ -87,6 +87,11 @@ to change; that stops once sites have returned `final/` folders.
   best, alone, given VT/PBW, and given VT/PBW, sex and race: VT/PBW, VT/PFVC, VT/PFVC at age 25, Ers scaled by
   each, mechanical power raw and scaled by Crs, PBW, PFVC and PFVC at age 25, and driving
   pressure, by cross-validated AUC on the patients who have every measure.
+  `xsec_age_form_check.R` asks whether 04 and 05's linear age leaves curvature that
+  log PFVC then carries: it refits every model with a size exposure with
+  `ns(age10, 4)` in place of `age10`, nothing else changed, and reports how far each
+  size coefficient moves and how much of each claimed AIC advantage survives. Not in
+  the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
