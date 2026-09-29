@@ -676,7 +676,10 @@ fd4 <- bind_rows(
 # orders of magnitude out and would set its row's scale. The pooled point carries
 # "k = 1" instead, so a pool missing a site cannot be read as a pool of both.
 if (!is.null(fd4) && nrow(fd4)) {
-  fd4 <- fd4 %>% filter(unit == PFVC_UNIT) %>%
+  # SF is oxygenation, not organ injury: it reads as a positive control for the
+  # mechanics of ventilating a small lung, not as a row of this figure. It keeps its
+  # own pooled tables and the level-contrast forest.
+  fd4 <- fd4 %>% filter(unit == PFVC_UNIT, marker != "sf") %>%
     mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
     toward_injury()
   for (adj in c("adjusted", "unadjusted")) {
