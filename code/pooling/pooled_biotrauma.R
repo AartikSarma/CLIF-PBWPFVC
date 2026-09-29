@@ -670,15 +670,15 @@ FIG4_COLUMNS <- c(divergence = "Ventilated cohort:\ndivergence by predicted lung
 fig4_rows <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, grepl("d$", panel_h)) %>%
-    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site,
+    transmute(marker, adjustment, unit, panel_h, column = FIG4_COLUMNS[[.env$column_key]], site,
               converged = if ("converged" %in% names(d)) converged else NA,
               estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se)
 }
 fig4_pooled <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, grepl("d$", panel_h)) %>%
-    transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = POOLED_LABEL,
-              k, estimate = pooled, lo, hi)
+    transmute(marker, adjustment, unit, panel_h, column = FIG4_COLUMNS[[.env$column_key]],
+              site = POOLED_LABEL, k, estimate = pooled, lo, hi)
 }
 # the divergence column is the full ventilated cohort's fit (pfvc form, no restriction);
 # 29 fits creatinine only with dialysis as a third cause, so its fit carries the arm
@@ -719,9 +719,17 @@ for (method in c(JM_METHOD, LME_METHOD)) {
   # SF is oxygenation, not organ injury: it reads as a positive control for the
   # mechanics of ventilating a small lung, not as a row of this figure. It keeps its
   # own pooled tables and the level-contrast forest.
+  # Every model here estimates a rate, and a rate per day in log units reads as a
+  # number near zero however large the effect is: the axis, not the estimate, is what
+  # looks small. So the figure shows what the rate accumulates to over the week the
+  # panel covers, as a percentage: a log difference times 100 is a percentage
+  # difference to within a point over this range, and for the yes/no marker it is
+  # log-odds times 100, which the row's own strip names.
   fd4 <- fd4 %>% filter(unit == PFVC_UNIT, marker != "sf") %>%
-    mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
-    toward_injury()
+    mutate(column = factor(column, levels = unname(FIG4_COLUMNS)),
+           horizon_days = as.numeric(sub("d$", "", panel_h))) %>%
+    toward_injury() %>%
+    mutate(across(c(estimate, lo, hi), ~ .x * horizon_days * 100))
   stem <- if (method == JM_METHOD) "pooled_biotrauma_figure4" else "pooled_biotrauma_figure4_lme"
   source_note <- if (method == JM_METHOD)
     "joint models: the longitudinal trajectory linked to death and to extubation or escalation" else
@@ -731,11 +739,14 @@ for (method in c(JM_METHOD, LME_METHOD)) {
     if (!nrow(d)) next
     p4 <- draw_forest(d,
       title = paste0("Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation (", adj, ")"),
-      subtitle = paste0(source_note, "\nlog marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (",
-                        PER_LOG_PFVC, " log units of PFVC), 95% CI; injury upward for every marker;\n",
-                        "black diamond = common-effect pooled estimate, ",
-                        "marked k = 1 where a site was left out; dashed line = null (0)"),
-      x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
+      subtitle = paste0(source_note,
+                        "\nthe difference the daily rate accumulates to by day ", max(d$horizon_days),
+                        ", in percent (log-odds x 100 for any vasopressor), 95% CI; injury upward for every marker",
+                        "\nper 10% smaller predicted lung; one SD of predicted lung size is 22% smaller, so a ",
+                        "contrast that wide is 2.5 times what is shown",
+                        "\nblack diamond = common-effect pooled estimate, marked k = 1 where a site was left out; ",
+                        "dashed line = null (0)"),
+      x_label = paste0("% difference by day ", max(d$horizon_days), " toward injury, per 10% smaller predicted lung (95% CI)"))
     ggsave(file.path(out_dir, paste0(stem, if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
            # the facets keep every column level, drawn or empty, so the width follows the levels
            p4, width = 4 + 3.7 * nlevels(d$column), height = forest_height(d), limitsize = FALSE)
