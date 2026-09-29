@@ -141,6 +141,11 @@ draw_forest <- function(d, title, subtitle, x_label) {
       geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
       geom_errorbar(aes(xmin = lo, xmax = hi), width = 0.25, orientation = "y") +
       geom_point(aes(size = kind, shape = kind)) +
+      # a pool built from fewer sites than the panel shows says so beside its diamond
+      { if ("k" %in% names(row_data))
+          geom_text(aes(label = if_else(site == POOLED_LABEL & !is.na(k) & k < n_distinct(d$site) - 1,
+                                        paste0("k = ", k), "")),
+                    vjust = -1.1, size = 2.7, colour = "grey30", show.legend = FALSE) } +
       facet_grid(marker_label ~ column, drop = FALSE) +
       scale_y_discrete(limits = levels(droplevels(d$site))) +
       scale_colour_manual(values = forest_palette, guide = "none") +
@@ -368,8 +373,11 @@ if (nrow(did)) {
     message("difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
             did %>% filter(!both_converged) %>%
               transmute(what = paste(site, marker, adjustment)) %>% pull(what) %>% paste(collapse = "\n  "))
-  did <- did %>% filter(both_converged) %>%
-    to_log_units(per_sd = TRUE, other_unit = NA_character_)
+  # converted before the convergence filter: the figure draws the dropped site as a
+  # hollow point, so a pool of one site cannot be read as a pool of two
+  did <- did %>% to_log_units(per_sd = TRUE, other_unit = NA_character_) %>% rename(converged = both_converged)
+  did_all <- did
+  did <- did %>% filter(converged)
   if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
     mutate(scale = paste0("ventilated minus no-support divergence, ", marker_scale(marker), " per day"))
 }
@@ -377,7 +385,7 @@ if (nrow(did)) {
 # --- 5. the same difference against the hypoxemic control (index-day SF < 315,
 #        27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
 #        ventilation and not in hypoxemia. Its own file family, so it never mixes with
-#        figure 4's DiD; not drawn in the pooled figure 4.
+#        figure 4's DiD; drawn as the pooled figure's third column.
 hdid <- read_family("^jm_hypoxemic_control_did_.*\\.csv$")
 if (nrow(hdid)) {
   hdid <- hdid %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_hypoxemic_control_did", "pfvc"),
@@ -387,7 +395,9 @@ if (nrow(hdid)) {
     message("hypoxemic-control difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
             hdid %>% filter(!both_converged) %>% transmute(what = paste(site, marker, adjustment)) %>%
               pull(what) %>% paste(collapse = "\n  "))
-  hdid <- hdid %>% filter(both_converged) %>% to_log_units(per_sd = TRUE, other_unit = NA_character_)
+  hdid <- hdid %>% to_log_units(per_sd = TRUE, other_unit = NA_character_) %>% rename(converged = both_converged)
+  hdid_all <- hdid
+  hdid <- hdid %>% filter(converged)
   if (nrow(hdid)) pooled$hypoxemic_control_did <- pool_by(hdid, marker, adjustment, unit, panel_h, form) %>%
     mutate(scale = paste0("ventilated minus hypoxemic no-support divergence, ", marker_scale(marker), " per day"))
 }
@@ -631,20 +641,22 @@ for (nm in names(pooled)) {
 #     0.1 log units of PFVC only.
 DIVERGENCE <- c(pfvc = "log_pfvc_sd:vent_day")
 FIG4_COLUMNS <- c(divergence = "Ventilated cohort:\ndivergence by predicted lung size",
-                  did = "Ventilated minus no-support control\n(difference-in-differences)")
+                  did = "Ventilated minus no-support control\n(difference-in-differences)",
+                  hypoxemic_did = "Ventilated minus hypoxemic\nno-support control (SF < 315)")
 # the column label is read from the calling environment (.env) so that no table column
 # of the same name can shadow it
 fig4_rows <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, grepl("d$", panel_h)) %>%
     transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site,
+              converged = if ("converged" %in% names(d)) converged else NA,
               estimate, lo = estimate - 1.96 * se, hi = estimate + 1.96 * se)
 }
 fig4_pooled <- function(d, column_key, keep = TRUE) {
   if (is.null(d) || !nrow(d)) return(NULL)
   d %>% filter(keep, grepl("d$", panel_h)) %>%
     transmute(marker, adjustment, unit, column = FIG4_COLUMNS[[.env$column_key]], site = POOLED_LABEL,
-              estimate = pooled, lo, hi)
+              k, estimate = pooled, lo, hi)
 }
 # the divergence column is the full ventilated cohort's fit (pfvc form, no restriction);
 # 29 fits creatinine only with dialysis as a third cause, so its fit carries the arm
@@ -655,7 +667,14 @@ fd4 <- bind_rows(
   if (exists("es") && nrow(es)) fig4_rows(es, "divergence", is_primary_divergence(es)),
   if (!is.null(pooled$longitudinal_terms))
     fig4_pooled(pooled$longitudinal_terms, "divergence", is_primary_divergence(pooled$longitudinal_terms)),
-  fig4_rows(did, "did"), fig4_pooled(pooled$control_did, "did"))
+  fig4_rows(did, "did"), fig4_pooled(pooled$control_did, "did"),
+  # the third column holds the ventilation contrast with hypoxemia held on both sides:
+  # fewer control patients, so a wider interval is expected, not a weaker claim
+  if (exists("hdid")) fig4_rows(hdid, "hypoxemic_did"),
+  fig4_pooled(pooled$hypoxemic_control_did, "hypoxemic_did"))
+# An unconverged fit is not an estimate, so it is not drawn: one of them lands two
+# orders of magnitude out and would set its row's scale. The pooled point carries
+# "k = 1" instead, so a pool missing a site cannot be read as a pool of both.
 if (!is.null(fd4) && nrow(fd4)) {
   fd4 <- fd4 %>% filter(unit == PFVC_UNIT) %>%
     mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
@@ -666,10 +685,12 @@ if (!is.null(fd4) && nrow(fd4)) {
     p4 <- draw_forest(d,
       title = paste0("Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation (", adj, ")"),
       subtitle = paste0("log marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI; ",
-                        "injury upward for every marker;\nblack diamond = common-effect pooled estimate; dashed line = null (0)"),
+                        "injury upward for every marker;\nblack diamond = common-effect pooled estimate, ",
+                        "marked k = 1 where a site's fit did not converge and was left out; dashed line = null (0)"),
       x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
     ggsave(file.path(out_dir, paste0("pooled_biotrauma_figure4", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
-           p4, width = 11, height = forest_height(d), limitsize = FALSE)
+           # the facets keep every column level, drawn or empty, so the width follows the levels
+           p4, width = 4 + 3.7 * nlevels(d$column), height = forest_height(d), limitsize = FALSE)
   }
 }
 
