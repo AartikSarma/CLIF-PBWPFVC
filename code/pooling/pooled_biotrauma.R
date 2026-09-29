@@ -364,42 +364,64 @@ if (nrow(es)) {
 # --- 4. the figure-4 causal support: the difference-in-differences against the
 #        no-support control, per SD of log PFVC per day in the ventilated cohort's
 #        units, converted by to_log_units.
-did <- read_family("^jm_control_did_.*\\.csv$")
-if (nrow(did)) {
-  did <- did %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_control_did", "pfvc"),
-                           panel_h = jm_panel(file, "jm_control_did"),
-                           estimate = did_estimate, se = did_sd, both_converged)
-  if (any(!did$both_converged))
-    message("difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
-            did %>% filter(!both_converged) %>%
-              transmute(what = paste(site, marker, adjustment)) %>% pull(what) %>% paste(collapse = "\n  "))
-  # converted before the convergence filter: the figure draws the dropped site as a
-  # hollow point, so a pool of one site cannot be read as a pool of two
-  did <- did %>% to_log_units(per_sd = TRUE, other_unit = NA_character_) %>% rename(converged = both_converged)
-  did_all <- did
-  did <- did %>% filter(converged)
-  if (nrow(did)) pooled$control_did <- pool_by(did, marker, adjustment, unit, panel_h, form) %>%
-    mutate(scale = paste0("ventilated minus no-support divergence, ", marker_scale(marker), " per day"))
+# 27 writes each difference twice: from the joint models (did_*) and from each arm's
+# longitudinal submodel fitted alone (did_lme_*, no death correction). Both arrive in
+# the ventilated cohort's units, 27 having scaled the control side by the ratio of the
+# two cohorts' SDs of log PFVC before differencing. They are pooled side by side under
+# `method`, because the longitudinal-only estimate has no R-hat to fail and so survives
+# in cells where the sampler could not fit the joint model.
+JM_METHOD <- "joint model"; LME_METHOD <- "longitudinal only"
+read_did <- function(pattern, family, label) {
+  raw <- read_family(pattern)
+  if (!nrow(raw)) return(NULL)
+  base <- raw %>% transmute(site, marker, adjustment, form = jm_form(file, family, "pfvc"),
+                            panel_h = jm_panel(file, family), both_converged,
+                            jm_estimate = did_estimate, jm_se = did_sd,
+                            lme_estimate = did_lme_estimate, lme_se = did_lme_sd)
+  if (any(!base$both_converged))
+    message(label, ", joint model: dropped, an arm's lung-size terms did not converge:\n  ",
+            base %>% filter(!both_converged) %>% transmute(what = paste(site, marker, adjustment)) %>%
+              pull(what) %>% paste(collapse = "\n  "))
+  bind_rows(
+    base %>% transmute(site, marker, adjustment, form, panel_h, estimator = JM_METHOD,
+                       converged = both_converged, estimate = jm_estimate, se = jm_se),
+    # the longitudinal fit either converged or errored in 23; there is no gate to apply
+    base %>% transmute(site, marker, adjustment, form, panel_h, estimator = LME_METHOD,
+                       converged = TRUE, estimate = lme_estimate, se = lme_se)) %>%
+    filter(is.finite(estimate), is.finite(se), se > 0) %>%
+    to_log_units(per_sd = TRUE, other_unit = NA_character_)
 }
+did_all <- read_did("^jm_control_did_.*\\.csv$", "jm_control_did", "difference in differences")
+did <- if (is.null(did_all)) NULL else did_all %>% filter(converged)
+if (!is.null(did) && nrow(did))
+  pooled$control_did <- pool_by(did, marker, adjustment, estimator, unit, panel_h, form) %>%
+    mutate(scale = paste0("ventilated minus no-support divergence, ", marker_scale(marker), " per day"))
 
 # --- 5. the same difference against the hypoxemic control (index-day SF < 315,
 #        27_control_comparison.R, jm_hypoxemic_control_did_*): the arms then differ in
 #        ventilation and not in hypoxemia. Its own file family, so it never mixes with
 #        figure 4's DiD; drawn as the pooled figure's third column.
-hdid <- read_family("^jm_hypoxemic_control_did_.*\\.csv$")
-if (nrow(hdid)) {
-  hdid <- hdid %>% transmute(site, marker, adjustment, form = jm_form(file, "jm_hypoxemic_control_did", "pfvc"),
-                             panel_h = jm_panel(file, "jm_hypoxemic_control_did"),
-                             estimate = did_estimate, se = did_sd, both_converged)
-  if (any(!hdid$both_converged))
-    message("hypoxemic-control difference in differences dropped, an arm's lung-size terms did not converge:\n  ",
-            hdid %>% filter(!both_converged) %>% transmute(what = paste(site, marker, adjustment)) %>%
-              pull(what) %>% paste(collapse = "\n  "))
-  hdid <- hdid %>% to_log_units(per_sd = TRUE, other_unit = NA_character_) %>% rename(converged = both_converged)
-  hdid_all <- hdid
-  hdid <- hdid %>% filter(converged)
-  if (nrow(hdid)) pooled$hypoxemic_control_did <- pool_by(hdid, marker, adjustment, unit, panel_h, form) %>%
+hdid_all <- read_did("^jm_hypoxemic_control_did_.*\\.csv$", "jm_hypoxemic_control_did",
+                     "hypoxemic-control difference in differences")
+hdid <- if (is.null(hdid_all)) NULL else hdid_all %>% filter(converged)
+if (!is.null(hdid) && nrow(hdid))
+  pooled$hypoxemic_control_did <- pool_by(hdid, marker, adjustment, estimator, unit, panel_h, form) %>%
     mutate(scale = paste0("ventilated minus hypoxemic no-support divergence, ", marker_scale(marker), " per day"))
+
+# --- 5b. the ventilated cohort's own divergence read the same two ways: the joint
+#        model's term is pooled in section 3, and each fit's longitudinal submodel
+#        alone is in jm_lme_check_* beside it. Pooling it here lets the whole of
+#        figure 4 be drawn without a death correction anywhere in it.
+lmec <- read_family("^jm_lme_check_.*\\.csv$")
+if (nrow(lmec)) {
+  lmec <- lmec %>% filter(term == "divergence per day", exposure == "log_pfvc_sd") %>%
+    mutate(arm_tag = jm_arm(file, "jm_lme_check"), form = jm_form(file, "jm_lme_check", "pfvc"),
+           panel_h = jm_panel(file, "jm_lme_check"), estimator = LME_METHOD,
+           estimate = lme_estimate, se = lme_se) %>%
+    to_log_units(per_sd = TRUE, other_unit = NA_character_)
+  if (nrow(lmec)) pooled$divergence_lme <- pool_by(lmec, marker, model, adjustment, estimator, unit,
+                                                   panel_h, arm_tag, form) %>%
+    mutate(scale = paste0("divergence by lung size, longitudinal submodel alone, ", marker_scale(marker), " per day"))
 }
 
 # --- 6. the height fingerprint (28_height_fingerprint.R): the rate per log unit of
@@ -661,37 +683,60 @@ fig4_pooled <- function(d, column_key, keep = TRUE) {
 # the divergence column is the full ventilated cohort's fit (pfvc form, no restriction);
 # 29 fits creatinine only with dialysis as a third cause, so its fit carries the arm
 # tag rrtcause_ and every other marker's carries none
-is_primary_divergence <- function(d) d$term == DIVERGENCE[["pfvc"]] & d$model == "main" & d$form == "pfvc" &
-  d$arm_tag == if_else(d$marker == "creatinine", "rrtcause_", "")
-fd4 <- bind_rows(
-  if (exists("es") && nrow(es)) fig4_rows(es, "divergence", is_primary_divergence(es)),
-  if (!is.null(pooled$longitudinal_terms))
-    fig4_pooled(pooled$longitudinal_terms, "divergence", is_primary_divergence(pooled$longitudinal_terms)),
-  fig4_rows(did, "did"), fig4_pooled(pooled$control_did, "did"),
-  # the third column holds the ventilation contrast with hypoxemia held on both sides:
-  # fewer control patients, so a wider interval is expected, not a weaker claim
-  if (exists("hdid")) fig4_rows(hdid, "hypoxemic_did"),
-  fig4_pooled(pooled$hypoxemic_control_did, "hypoxemic_did"))
+# The two sources name the same quantity differently: the joint model's estimates table
+# holds the model term, jm_lme_check_* holds a row already labelled "divergence per
+# day", and a pooled table carries no term column at all.
+DIVERGENCE_TERMS <- c(DIVERGENCE[["pfvc"]], "divergence per day")
+is_primary_divergence <- function(d) d$model == "main" & d$form == "pfvc" &
+  d$arm_tag == if_else(d$marker == "creatinine", "rrtcause_", "") &
+  (if ("term" %in% names(d)) d$term %in% DIVERGENCE_TERMS else TRUE)
+# The figure is drawn twice, from the same three contrasts: once from the joint models
+# and once from each arm's longitudinal submodel fitted alone. The second is not a
+# sensitivity tacked on -- the death correction moves these slopes by a fraction of a
+# standard error, while it is the joint models that fail to converge -- so the
+# longitudinal-only figure carries cells the joint-model one has to leave empty.
+by_method <- function(d, want) if (is.null(d) || !"estimator" %in% names(d)) NULL else filter(d, estimator == want)
+fig4_data <- function(method) {
+  divergence_site   <- if (method == JM_METHOD) es else lmec
+  divergence_pooled <- if (method == JM_METHOD) pooled$longitudinal_terms else pooled$divergence_lme
+  bind_rows(
+    if (!is.null(divergence_site) && nrow(divergence_site))
+      fig4_rows(divergence_site, "divergence", is_primary_divergence(divergence_site)),
+    if (!is.null(divergence_pooled))
+      fig4_pooled(divergence_pooled, "divergence", is_primary_divergence(divergence_pooled)),
+    fig4_rows(by_method(did, method), "did"), fig4_pooled(by_method(pooled$control_did, method), "did"),
+    # the third column holds the ventilation contrast with hypoxemia held on both sides:
+    # fewer control patients, so a wider interval is expected, not a weaker claim
+    fig4_rows(by_method(hdid, method), "hypoxemic_did"),
+    fig4_pooled(by_method(pooled$hypoxemic_control_did, method), "hypoxemic_did"))
+}
 # An unconverged fit is not an estimate, so it is not drawn: one of them lands two
 # orders of magnitude out and would set its row's scale. The pooled point carries
 # "k = 1" instead, so a pool missing a site cannot be read as a pool of both.
-if (!is.null(fd4) && nrow(fd4)) {
+for (method in c(JM_METHOD, LME_METHOD)) {
+  fd4 <- fig4_data(method)
+  if (is.null(fd4) || !nrow(fd4)) next
   # SF is oxygenation, not organ injury: it reads as a positive control for the
   # mechanics of ventilating a small lung, not as a row of this figure. It keeps its
   # own pooled tables and the level-contrast forest.
   fd4 <- fd4 %>% filter(unit == PFVC_UNIT, marker != "sf") %>%
     mutate(column = factor(column, levels = unname(FIG4_COLUMNS))) %>%
     toward_injury()
+  stem <- if (method == JM_METHOD) "pooled_biotrauma_figure4" else "pooled_biotrauma_figure4_lme"
+  source_note <- if (method == JM_METHOD)
+    "joint models: the longitudinal trajectory linked to death and to extubation or escalation" else
+    "each arm's longitudinal submodel fitted alone: no death correction, and no R-hat to fail"
   for (adj in c("adjusted", "unadjusted")) {
     d <- fd4 %>% filter(adjustment == adj)
     if (!nrow(d)) next
     p4 <- draw_forest(d,
       title = paste0("Figure 4 pooled: divergence by predicted lung size over 7 days of ventilation (", adj, ")"),
-      subtitle = paste0("log marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (", PER_LOG_PFVC, " log units of PFVC), 95% CI; ",
-                        "injury upward for every marker;\nblack diamond = common-effect pooled estimate, ",
-                        "marked k = 1 where a site's fit did not converge and was left out; dashed line = null (0)"),
+      subtitle = paste0(source_note, "\nlog marker (log-odds for any vasopressor) per day per 10% smaller predicted lung (",
+                        PER_LOG_PFVC, " log units of PFVC), 95% CI; injury upward for every marker;\n",
+                        "black diamond = common-effect pooled estimate, ",
+                        "marked k = 1 where a site was left out; dashed line = null (0)"),
       x_label = "change per day toward injury per 10% smaller predicted lung (95% CI)")
-    ggsave(file.path(out_dir, paste0("pooled_biotrauma_figure4", if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
+    ggsave(file.path(out_dir, paste0(stem, if (adj == "unadjusted") "_unadjusted" else "", ".pdf")),
            # the facets keep every column level, drawn or empty, so the width follows the levels
            p4, width = 4 + 3.7 * nlevels(d$column), height = forest_height(d), limitsize = FALSE)
   }
