@@ -1,16 +1,20 @@
 # =============================================================================
 # Supplement (cross-sectional): does linear age leave curvature for PFVC to carry?
 # =============================================================================
-# Scripts 04 and 05 adjust for age as a straight line (age10). GLI predicts FVC from
-# age non-linearly, so whatever curvature a straight line misses is still in log
-# PFVC, and a model with both would credit it to predicted lung size. After
-# demographic adjustment PBW/PFVC keeps 6.1% of its variance with linear age and
-# 2.4% with a spline (negative_control_identifying_variation_*), so the concern is
-# not hypothetical. The figure-4 longitudinal models already use ns(age10, 4); the
-# cross-sectional ones do not.
+# Scripts 04 and 05 adjusted for age as a straight line (age10) until 2026-09-29, when
+# this check moved them to ns(age10, 4); it is kept as the record of why, and as the
+# sensitivity that shows what the old form gave. GLI predicts FVC from age
+# non-linearly, so whatever curvature a straight line misses is still in log PFVC,
+# and a model with both credits it to predicted lung size. After demographic
+# adjustment PBW/PFVC keeps 6.1% of its variance with linear age and 2.4% with a
+# spline (negative_control_identifying_variation_*).
 #
-# This refits the models whose exposure contains predicted lung size, once with
-# 04/05's own linear age and once with ns(age10, 4), changing NOTHING else -- the
+# At MIMIC and UCSF the spline fitted mortality better by 39 and 14 AIC points; the
+# PBW/PFVC ratio's mortality association disappeared with it at both sites, and log
+# PFVC's shrank by about a sixth and stayed clear.
+#
+# This refits the models whose exposure contains predicted lung size, once with the
+# old linear age and once with ns(age10, 4), changing NOTHING else -- the
 # same data, outcomes, exposures, covariates and BMI rule -- and compares:
 #
 #   coefficients   every exposure term under both age forms; the change is given in

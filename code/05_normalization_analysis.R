@@ -152,7 +152,10 @@ recl_tbl %>% filter(group_type == "Overall") %>%
 # VT/PBW is the delivered dose, so every mechanics-mortality model adjusts for it;
 # BMI because Ers and MP are driving-pressure derived (see 04_analysis.R, DP_DERIVED).
 base_cov <- "vtpbw + sofa_total + sf10 + bmi"
-demo_cov <- "age10 + sex_category + race_category"
+# age as the 4-df natural spline every adjusted model in 04 and figure 4 uses; a
+# straight line leaves GLI's age curvature in any PFVC-scaled exposure
+# (supplement/xsec_age_form_check.R)
+demo_cov <- "splines::ns(age10, 4) + sex_category + race_category"
 
 # 2x2 design (form x size) so the gain from "separate" can be split into model FORM
 # (free vs locked size coefficient) and PHYSIOLOGY (PBW vs PFVC), plus the mechanic

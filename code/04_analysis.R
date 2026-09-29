@@ -27,8 +27,8 @@
 #   4j  negative-control cohorts                 4k  saturated log model (VT, PBW, PFVC;
 #                                                    unadjusted) and size-term forms
 #   4l  delivered strain inside the band (figure 2)
-# Covariates in 4c-4f: unadjusted = SOFA + SF ratio; adjusted = unadjusted + age10 +
-# sex + race; either + BMI when the outcome or exposure is driving-pressure derived
+# Covariates in 4c-4f: unadjusted = SOFA + SF ratio; adjusted = unadjusted + a 4-df
+# natural spline in age + sex + race; either + BMI when the outcome or exposure is driving-pressure derived
 # (DP_DERIVED). Every 4c, 4d, 4d2 and 4f model is reported both ways (adjustment
 # column). Sections 4f2, 4f3, 4j and 4k state their own covariate sets.
 # Exposure specs (4c, 4d, 4d2): VT/PFVC; VT/PBW; VT/PFVC + VT/PBW; VT/PBW + PFVC;
@@ -155,7 +155,14 @@ message("Table 1 written (", n_cohort, " patients)")
 # (age/sex/race) -- deterministic parents of the PBW/PFVC exposures -- and keeps
 # illness severity; both adjusted and unadjusted estimates are reported per the
 # adjusted+unadjusted convention.
-covariates       <- "race_category + age10 + sex_category + sofa_total + sf10"
+# Age enters as a 4-df natural spline, as in every figure-4 model. GLI predicts FVC
+# from age non-linearly, so a straight line in age leaves curvature that log PFVC and
+# the PBW/PFVC ratio then carry: at MIMIC and UCSF the spline fits mortality better by
+# 39 and 14 AIC points, and with it the ratio's mortality association disappears at
+# both sites (supplement/xsec_age_form_check.R, which refits both forms). Linear age
+# stays only where the age coefficient is itself the result (4f2, 4f3).
+AGE_ADJ          <- "ns(age10, 4)"
+covariates       <- paste("race_category +", AGE_ADJ, "+ sex_category + sofa_total + sf10")
 covariates_unadj <- "sofa_total + sf10"
 
 # As in the original paper (PMC12313249), any model whose outcome OR exposure is
@@ -209,7 +216,16 @@ exposure_labels <- c(
 # 4c. Logistic regression — mortality
 # =============================================================================
 
-has_mortality_variation <- length(unique(na.omit(cross_sectional$deceased))) > 1
+# The mortality models need deaths AND survivors enough to estimate them, not merely
+# one of each. Below the project's minimum cell (10) they are not fitted at all: a
+# logistic model of a dozen or more parameters on a handful of deaths separates, and
+# its coefficients are artefacts. (The synthetic cohort has 2 deaths in 2,296; with
+# linear age its fits happened to finish, with the age spline they diverge, and
+# neither was ever an estimate.) Every mortality block below checks this flag.
+MIN_MORTALITY_EVENTS <- 10
+n_mortality_events <- c(deaths    = sum(cross_sectional$deceased == 1, na.rm = TRUE),
+                        survivors = sum(cross_sectional$deceased == 0, na.rm = TRUE))
+has_mortality_variation <- all(n_mortality_events >= MIN_MORTALITY_EVENTS)
 
 if (has_mortality_variation) {
   mortality_models <- map(exposure_specs, ~ {
@@ -221,8 +237,9 @@ if (has_mortality_variation) {
   iwalk(mortality_models, ~ message("  ", exposure_labels[.y], ": ", round(AIC(.x), 1)))
 } else {
   mortality_models <- NULL
-  message("Skipping mortality regression: no variation in outcome (all deceased = ",
-          unique(na.omit(cross_sectional$deceased)), ")")
+  message("Skipping the mortality models: ", n_mortality_events[["deaths"]], " in-hospital deaths and ",
+          n_mortality_events[["survivors"]], " survivors, fewer than ", MIN_MORTALITY_EVENTS,
+          " in one of them, too few to estimate a logistic model")
 }
 
 # =============================================================================
@@ -455,7 +472,7 @@ message("Survival analysis: ", nrow(surv_data), " patients, ", n_deaths,
 
 if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
   cox_model <- coxph(
-    Surv(surv_time, event) ~ pbwpfvc + vtpbw + age10 +
+    Surv(surv_time, event) ~ pbwpfvc + vtpbw + ns(age10, 4) +
       sex_category + race_category + sf10 + sofa_total,
     data = surv_data
   )
@@ -463,14 +480,14 @@ if (n_deaths > 0 && length(unique(surv_data$event)) > 1) {
   # Companion model with PFVC as the scaling exposure (mirrors the VT/PBW + PFVC
   # mortality model), so the survival analysis carries both headline exposures.
   cox_model_pfvc <- coxph(
-    Surv(surv_time, event) ~ pfvc + vtpbw + age10 +
+    Surv(surv_time, event) ~ pfvc + vtpbw + ns(age10, 4) +
       sex_category + race_category + sf10 + sofa_total,
     data = surv_data
   )
 
   # the primary size term, log PFVC (Table 2)
   cox_model_logpfvc <- coxph(
-    Surv(surv_time, event) ~ log_pfvc + vtpbw + age10 +
+    Surv(surv_time, event) ~ log_pfvc + vtpbw + ns(age10, 4) +
       sex_category + race_category + sf10 + sofa_total,
     data = surv_data
   )
@@ -507,6 +524,9 @@ demo_data <- cross_sectional %>%
          height10 = height_cm / 10,
          sf10 = sf_ratio / 10)
 
+# Age is linear here, unlike the adjusted models (AGE_ADJ): its coefficient is the
+# result -- how far each metric moves per decade of age -- and a spline has no single
+# coefficient to report.
 demo_covars     <- "age10 + sex_category + race_category + height10 + sf10 + sofa_total"
 demo_covars_bmi <- paste(demo_covars, "+ bmi")
 
@@ -573,6 +593,8 @@ broad_pfvc <- read_parquet(file.path(output_dir, "analysis_broad_pfvc.parquet"))
     age10 = age_at_admission / 10
   )
 
+# linear age by design, as in 4f2: the age coefficient (litres of PFVC per decade at a
+# fixed PBW) is what this model reports
 pfvc_vs_pbw_model <- lm(pfvc ~ pbw + age10 + sex_category + race_category, data = broad_pfvc)
 pfvc_vs_pbw_formula <- "pfvc ~ pbw + age10 + sex_category + race_category"
 message("PFVC-vs-PBW model fitted (N = ", nrow(broad_pfvc), "); rows in regression_results_long")
@@ -657,7 +679,7 @@ results_long <- c(results_long, imap(vfd_cr_models, ~ {
 # specs (PBW/PFVC, PFVC, log PFVC, each with VT/PBW), mirroring the mortality models; HR > 1 = higher death hazard (worse), the
 # same direction as the mortality OR.
 if (exists("cox_model")) {
-  cox_covars  <- "vtpbw + age10 + sex_category + race_category + sf10 + sofa_total"
+  cox_covars  <- paste("vtpbw +", AGE_ADJ, "+ sex_category + race_category + sf10 + sofa_total")
   results_long <- c(results_long, list(
     # Same vtpbw + pbwpfvc exposure spec as the mortality model — label it with
     # the shared convention so it collapses into one column cross-cohort.
@@ -1120,7 +1142,8 @@ print(as.data.frame(nc_idvar %>% filter(age_form == "linear") %>%
 # reference is the analytic cohort. When the analytic cohort falls below
 # NC_MIN_PATIENTS or NC_MIN_EVENTS for an outcome, the first remaining cohort
 # becomes the reference: the script says so, and reference_cohort names it in every
-# row. Cox models stratify the baseline hazard by cohort. Linear age. The contrasts
+# row. Cox models stratify the baseline hazard by cohort. Age is the 4-df spline of
+# every adjusted model here (AGE_ADJ), within each cohort. The contrasts
 # are poolable across sites (random effects on the log difference); the p-values by
 # Fisher.
 nc_interaction <- map_dfr(names(nc_exposures), function(e) {
@@ -1134,17 +1157,17 @@ nc_interaction <- map_dfr(names(nc_exposures), function(e) {
       ev_ok <- d %>% group_by(cohort) %>% summarise(ev = sum(deceased == 1), .groups = "drop")
       dd <- d %>% filter(cohort %in% ev_ok$cohort[ev_ok$ev >= NC_MIN_EVENTS]) %>% droplevels()
       if (n_distinct(dd$cohort) < 2) return(tibble())
-      f0 <- glm(deceased ~ z + cohort * (age10 + sex_category + race_category), data = dd, family = binomial)
-      f1 <- glm(deceased ~ z * cohort + cohort * (age10 + sex_category + race_category), data = dd, family = binomial)
+      f0 <- glm(deceased ~ z + cohort * (ns(age10, 4) + sex_category + race_category), data = dd, family = binomial)
+      f1 <- glm(deceased ~ z * cohort + cohort * (ns(age10, 4) + sex_category + race_category), data = dd, family = binomial)
       V <- vcov(f1); b <- coef(f1); est_type <- "OR"
     } else {
       dd <- d %>% filter(!is.na(surv_time), surv_time > 0)
       ev_ok <- dd %>% group_by(cohort) %>% summarise(ev = sum(mortality_event_60 == 1), .groups = "drop")
       dd <- dd %>% filter(cohort %in% ev_ok$cohort[ev_ok$ev >= NC_MIN_EVENTS]) %>% droplevels()
       if (n_distinct(dd$cohort) < 2) return(tibble())
-      f0 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z + cohort:(age10 + sex_category + race_category) +
+      f0 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z + cohort:(ns(age10, 4) + sex_category + race_category) +
                               survival::strata(cohort), data = dd)
-      f1 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z * cohort + cohort:(age10 + sex_category + race_category) +
+      f1 <- survival::coxph(survival::Surv(surv_time, mortality_event_60) ~ z * cohort + cohort:(ns(age10, 4) + sex_category + race_category) +
                               survival::strata(cohort), data = dd)
       V <- vcov(f1); b <- coef(f1); est_type <- "HR"
     }

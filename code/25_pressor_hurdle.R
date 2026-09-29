@@ -96,7 +96,7 @@ if (n_distinct(d$hospitalization_id) < 50 || sum(d$y > 0) < 50) {
 }
 
 DEMO    <- "ns(age10, 4) + sex_category + race_category"
-DEMO_ZI <- "age10 + sex_category + race_category"
+DEMO_ZI <- DEMO   # the same age spline in both parts, as everywhere else
 # The previous day's pressor state belongs in the dose part, where it is the lag the
 # joint models use. It cannot go in the zero part: a pressor running yesterday almost
 # determines one running today, the starting logistic fit separates, and the hurdle
@@ -140,12 +140,14 @@ message("Pressor pattern: ", switchers$switch, " patients switch on or off, ",
 
 rows <- list()
 for (adjusted in c(TRUE, FALSE)) {
-  # The dose part keeps the day spline. The zero part takes time linearly and age
-  # linearly: it is a binary outcome with a pressor running on a small minority of
-  # days, and a three-degree spline in time beside a four-degree one in age is more
-  # shape than that supports -- fitted, the optimiser runs a coefficient off. The
-  # term this script reports from that part is the exposure by day interaction,
-  # which is linear in either case.
+  # The dose part keeps the day spline; the zero part takes time linearly, which costs
+  # nothing since the term it reports is the exposure by day interaction, linear in
+  # either case. Both parts use the age spline, the one age form used everywhere.
+  # The zero part's age was briefly linear, a choice made on the synthetic panel, whose
+  # pressors run on 9% of days and never start after day 0. MIMIC (8,735 pressor days
+  # of 17,019) identified the model with that linear term; the spline there is
+  # untested until the next run, and a failure stops the script rather than falling
+  # back to the line.
   rhs    <- paste("ns(vent_day, 3) +", SIZE, "+", BASE,    if (adjusted) paste("+", DEMO) else "")
   rhs_zi <- paste("vent_day +", SIZE, "+", BASE_ZI,        if (adjusted) paste("+", DEMO_ZI) else "")
   adj_label <- if (adjusted) "adjusted" else "unadjusted"

@@ -79,7 +79,8 @@
 #   PBWPFVC_JM_CUM          none | mean | days   cumulative-strain term
 #   PBWPFVC_JM_BASELINE     free | offset   offset fixes the baseline coefficient at 1
 #                           (log percent change; files get an offset_ prefix)
-#   PBWPFVC_JM_HAZARD_AGE   linear | spline   age in the survival submodel
+#   PBWPFVC_JM_HAZARD_AGE   spline | linear   age in the survival submodel (spline by
+#                           default since 2026-09-29; see HAZARD_AGE below)
 #   PBWPFVC_JM_RRT_EVENT    0 | 1   renal replacement as a third cause (creatinine only)
 #   PBWPFVC_JM_SEV_CENTER   unset | "marker=value,..."   severity-standardised control
 #   PBWPFVC_JM_SF_BAND      unset | "lo,hi"   index SF band, lo <= SF < hi
@@ -199,8 +200,10 @@ adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (
 # PFVC is a fixed function of height, age, sex and race, so beside the demographics
 # it is identified only by height and the curvature of GLI's age term, and its
 # hazard coefficients do not converge at any practical chain length. HAZARD_SPEC and
-# MODEL_SPEC are stored with each fit, so a fit made under another hazard or model
-# specification is refitted rather than reused.
+# MODEL_SPEC, and the hazard's age form, are stored with each fit in the manifest,
+# so a fit says what it was made under. They do NOT trigger a refit: a saved fit is
+# reused whenever its files exist (below), so a change of specification takes
+# effect only with PBWPFVC_JM_FRESH=1 or after the old fit's files are deleted.
 CLOCK_SPEC <- if (JM_CLOCK == "icu") "icu (t0 = icu_admission_dttm, the first ICU admission)" else
   "index (t0 = index_dttm, the first qualifying ventilator row)"
 HAZARD_SPEC <- paste0("Surv(entry_day, event_time): delayed entry at the first trajectory day, continuous days from t0; ",
@@ -218,11 +221,15 @@ model_spec_for <- function(mk) paste0(MODEL_SPEC, "; time: ", time_term_for(mk))
 # default because it redefines the other two: with RRT in, the death hazard is
 # the hazard of death BEFORE dialysis, on a risk set that empties faster.
 RRT_EVENT  <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
-# Age in the HAZARD: linear (default) or the 4-df spline. With sex and race also
-# in the hazard, log PFVC is nearly a linear combination of a spline in age, so
-# the two sit on a posterior ridge the sampler crawls along. The longitudinal
-# submodel keeps the spline.
-HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "linear")
+# Age in the HAZARD: the 4-df spline (default), as in the longitudinal submodel and
+# every adjusted model in 04 and 05, or linear. It was made linear on 2026-09-14
+# because log PFVC was then in the hazard beside sex, race and the age spline, of
+# which it is nearly a linear combination, and the sampler stalled on that ridge
+# (R-hat 3.2). Log PFVC has since left the hazard (HAZARD_SPEC: no size or dose
+# terms), so that ridge cannot form, and linear age had not bought convergence in
+# its place: the hazard blocks of the linear-age fits still ran to R-hat 1.3-2.1 at
+# MIMIC and UCSF. PBWPFVC_JM_HAZARD_AGE=linear restores it.
+HAZARD_AGE <- Sys.getenv("PBWPFVC_JM_HAZARD_AGE", "spline")
 stopifnot(HAZARD_AGE %in% c("linear", "spline"))
 # Every finished fit leaves a small result file (jm_result_*.rds) and a slim
 # bundle (jm_fit_*.rds: the posterior draws the report needs, not the model
