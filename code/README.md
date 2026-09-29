@@ -92,6 +92,12 @@ to change; that stops once sites have returned `final/` folders.
   `ns(age10, 4)` in place of `age10`, nothing else changed, and reports how far each
   size coefficient moves and how much of each claimed AIC advantage survives. Not in
   the runner.
+  `xsec_mortality_channel_equality.R` asks whether sex and race predict death as their
+  share of predicted lung size says they should: with age held by `ns(age, 4)`, each
+  group's coefficient divided by its GLI shift in log PFVC is tested against the
+  height slope (sex, Black, Other, and jointly), in the ventilated arm, the no-support
+  control and their difference (needs scripts 01-03 run for both cohorts). Not in the
+  runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
