@@ -18,7 +18,11 @@
 #     fit changes the sampling frame and nothing else. If the platelet divergence
 #     survives on bilirubin's frame, that frame is not what distorts bilirubin; if
 #     it moves, the distortion has been measured directly, in a marker whose
-#     answer we already trust. Written to measurement_frame_{tag}.csv.
+#     answer we already trust. The restricted sample is nested in the full one, so
+#     the difference between the two carries the Hausman variance, var(restricted)
+#     minus var(full), and not the restricted fit's own standard error: a subset is
+#     not an independent study, and treating it as one reads a shift as bigger than
+#     the smaller sample can support. Written to measurement_frame_{tag}.csv.
 #
 #   measurement model (the mechanism).  Does predicted lung size predict being
 #     measured at all? Two parts per marker:
@@ -173,9 +177,8 @@ message("measurement model -> ", file.path(final_dir, paste0("measurement_model_
 
 # --- 2. the frame check ------------------------------------------------------
 # The same platelet model on two sampling frames. Nothing but the rows changes, so
-# a difference between the two is the frame's doing. The samples are nested, so the
-# difference carries no p-value: it is reported in the restricted fit's own standard
-# errors, the convention jm_lme_check_* uses for the same kind of comparison.
+# a difference between the two is the frame's doing -- or the smaller sample's noise,
+# which is what the nested variance below separates.
 frame_rows <- list()
 if (all(c("platelets", FRAME_MARKER) %in% MARKERS) && FRAME_MARKER != "platelets") {
   platelet_fit <- function(d, adjusted, label) {
@@ -209,11 +212,25 @@ if (all(c("platelets", FRAME_MARKER) %in% MARKERS) && FRAME_MARKER != "platelets
       frame_rows[[length(frame_rows) + 1L]] <- tidy_row(
         s$estimate, s$se, marker = "platelets", adjustment = adj_label, sample = s$sample,
         n_patients = s$n_patients, n_obs = s$n_obs)
-    frame_rows[[length(frame_rows) + 1L]] <- tidy_row(
-      on_bili$estimate - all_days$estimate, on_bili$se, marker = "platelets", adjustment = adj_label,
+    # The restricted sample is NESTED in the full one, so the two estimates are
+    # correlated and the difference does not carry the restricted fit's standard
+    # error: under the full model it is var(restricted) - var(full), the Hausman
+    # form. Using the restricted SE instead treats a subset as an independent study
+    # and reads a shift as larger than the smaller sample can support. Where the
+    # difference of variances is not positive the assumption behind it has failed,
+    # and no z is reported rather than a fabricated one.
+    diff <- on_bili$estimate - all_days$estimate
+    nested_var <- on_bili$se^2 - all_days$se^2
+    nested_se  <- if (nested_var > 0) sqrt(nested_var) else NA_real_
+    frame_rows[[length(frame_rows) + 1L]] <- tibble(
+      estimate = diff, se = nested_se,
+      lo = if (is.na(nested_se)) NA_real_ else diff - 1.96 * nested_se,
+      hi = if (is.na(nested_se)) NA_real_ else diff + 1.96 * nested_se,
+      p = if (is.na(nested_se)) NA_real_ else 2 * pnorm(-abs(diff / nested_se)),
+      marker = "platelets", adjustment = adj_label,
       sample = "difference (restricted minus every day)",
-      n_patients = on_bili$n_patients, n_obs = on_bili$n_obs) %>%
-      mutate(difference_in_restricted_se = (on_bili$estimate - all_days$estimate) / on_bili$se, p = NA_real_)
+      n_patients = on_bili$n_patients, n_obs = on_bili$n_obs,
+      z_nested = if (is.na(nested_se)) NA_real_ else diff / nested_se)
   }
 }
 if (length(frame_rows)) {
