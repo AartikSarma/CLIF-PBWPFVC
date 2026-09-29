@@ -76,6 +76,10 @@
 #   5 fits      22_biotrauma_fit.R and 23_biotrauma_report.R for every arm: ventilated
 #               (all, then on IMV at ICU admission), the two controls,
 #               and the sensitivity without the lags
+#   5b measure  26_measurement_check.R on both sides of the difference-in-differences:
+#               whether a marker's being measured at all depends on predicted lung size,
+#               and whether the platelet divergence survives on bilirubin's sampling
+#               frame (panels only, seconds; MEASUREMENT_CHECK=0 skips it)
 #   6 figure    supplement/xsec_pfvc_age_control.R (60-day death before escalation
 #               against each control, the checks figure's mortality rows),
 #               27_control_comparison.R (the difference-in-differences, ventilated at ICU
@@ -112,6 +116,7 @@
 # Knobs (environment): ITER BURNIN CHAINS THIN (5000 / 1000 / 3 / 5), PAR (fits at a
 #   time, 4; a 7-day fit at a 7,000-patient site needs about 15-25 GB, so four at once
 #   can need 60-100 GB: lower PAR on a smaller machine), MARKERS, CONTROL_MARKERS, CREATININE (1; 0 skips it),
+#   MEASUREMENT_CHECK (1; 0 skips step 5b),
 #   HYPOXEMIC_CONTROL_MARKERS (the hypoxemic
 #   control arm, CONTROL_MARKERS by default, with creatinine as in the other arms; empty
 #   skips it), NOLAG_MARKERS (the sensitivity without the lags, "platelets,bilirubin,osi"
@@ -144,6 +149,7 @@ HYPOXEMIC_CONTROL_MARKERS <- knob_or_skip("HYPOXEMIC_CONTROL_MARKERS", CONTROL_M
 NOLAG_MARKERS             <- knob_or_skip("NOLAG_MARKERS", "platelets,bilirubin,osi")     # the sensitivity without the lags
 CHANNEL_MARKERS           <- knob_or_skip("CHANNEL_MARKERS", "platelets")             # step 7, the channel breakdown (supplement)
 CREATININE  <- knob("CREATININE", "1") == "1"
+MEASUREMENT_CHECK <- knob("MEASUREMENT_CHECK", "1") == "1"   # step 5b, 26_measurement_check.R
 ITER   <- knob("ITER", "5000"); BURNIN <- knob("BURNIN", "1000"); CHAINS <- knob("CHAINS", "3")
 THIN   <- knob("THIN", "5");    PAR    <- knob("PAR", "4")
 FORCE_BUILD <- knob("FORCE_BUILD", "0") == "1"
@@ -351,6 +357,16 @@ if (nzchar(SEV_CENTER)) {
 # the sensitivity without the previous-day SF and pressor terms, full ventilated cohort
 if (nzchar(NOLAG_MARKERS))
   fit_arm("ventilated_nolag", "imv", NOLAG_MARKERS, c(PBWPFVC_JM_NO_LAGS = "1"))
+
+# ---- 5b is a marker missing in a way that biases the comparison? (26). Bilirubin is
+#      ordered, not routine, and it reaches a smaller and sicker share of the control
+#      arm than of the ventilated one. Panels only, so this costs seconds and does not
+#      wait on any fit; both sides of the difference-in-differences, on their own clock.
+if (MEASUREMENT_CHECK) {
+  run_step("measurement_ventilated", "code/26_measurement_check.R", "imv",       ICU_CLOCK)
+  run_step("measurement_nosupport",  "code/26_measurement_check.R", "nosupport", ICU_CLOCK)
+  run_step("measurement_ventilated_index", "code/26_measurement_check.R", "imv", character(0))
+}
 
 # ---- 6 comparison table and the figure
 # figure rows are fixed; changing MARKERS does not change them (a marker with no fit
