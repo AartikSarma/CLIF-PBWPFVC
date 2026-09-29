@@ -183,24 +183,31 @@ for (adjusted in c(TRUE, FALSE)) {
   # coefficients, then the random-effects variances (D_11, ...), then the zero part's
   # with a zi_ prefix. The variances sit BETWEEN the two blocks, so a row cannot be
   # found by counting along from the start -- each is matched by name.
-  idx <- function(name, zi) {
-    hit <- match(if (zi) paste0("zi_", name) else name, rownames(V))
-    if (is.na(hit)) NA_integer_ else hit
+  # R names an interaction in the order its variables first appear in the formula,
+  # so the same term is log_pfvc_sd:vent_day in the dose part, where a spline comes
+  # first, and vent_day:log_pfvc_sd in the zero part, where vent_day does. Each
+  # part's term is therefore found by its components, never by the other part's
+  # spelling. A term that cannot be found is an error, not a skipped row: the first
+  # MIMIC run lost its divergence rows to exactly this, with only a log line to say so.
+  same_term <- function(a, b) identical(sort(strsplit(a, ":", fixed = TRUE)[[1]]),
+                                        sort(strsplit(b, ":", fixed = TRUE)[[1]]))
+  find_name <- function(names_in_part, wanted) {
+    hit <- names_in_part[vapply(names_in_part, same_term, logical(1), b = wanted)]
+    if (length(hit)) hit[1] else NA_character_
   }
-  rate_term <- intersect(c(paste0(EXPOSURE, ":vent_day"), paste0("vent_day:", EXPOSURE)),
-                         names(fe_pos))[1]
+  TERMS <- c("level" = EXPOSURE, "divergence per day" = paste0(EXPOSURE, ":vent_day"))
 
-  for (which_term in c("level", "divergence per day")) {
-    tm <- if (which_term == "level") EXPOSURE else rate_term
-    if (is.na(tm)) { message("  ", adj_label, ": no ", which_term, " term in the fit; skipped"); next }
-    i_pos <- idx(tm, FALSE); i_zi <- idx(tm, TRUE)
-    if (is.na(i_pos) || is.na(i_zi)) {
-      message("  ", adj_label, ": ", which_term, " not found in both parts (",
-              paste(head(rownames(V), 3), collapse = ", "), " ...); skipped")
-      next
-    }
-    b_on  <- -unname(fe_zi[[tm]])            # log-odds that a pressor RUNS
-    b_pos <-  unname(fe_pos[[tm]])
+  for (which_term in names(TERMS)) {
+    nm_pos <- find_name(names(fe_pos), TERMS[[which_term]])
+    nm_zi  <- find_name(names(fe_zi),  TERMS[[which_term]])
+    i_pos  <- if (is.na(nm_pos)) NA_integer_ else match(nm_pos, rownames(V))
+    i_zi   <- if (is.na(nm_zi))  NA_integer_ else match(paste0("zi_", nm_zi), rownames(V))
+    if (anyNA(c(i_pos, i_zi)))
+      stop(adj_label, ": the ", which_term, " term (", TERMS[[which_term]], ") was not found in ",
+           if (is.na(i_pos)) "the dose part" else "the zero part", "; its names are: ",
+           paste(if (is.na(i_pos)) names(fe_pos) else names(fe_zi), collapse = ", "))
+    b_on  <- -unname(fe_zi[[nm_zi]])         # log-odds that a pressor RUNS
+    b_pos <-  unname(fe_pos[[nm_pos]])
     se_on <- sqrt(V[i_zi, i_zi]); se_pos <- sqrt(V[i_pos, i_pos])
     # d log E[Y] / dx = (1 - p) * b_on + b_pos, with the covariance of the two parts
     # from the one fit; the sign flip makes the zero part's covariance negative
