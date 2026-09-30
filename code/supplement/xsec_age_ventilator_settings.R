@@ -1,6 +1,6 @@
 # =============================================================================
-# Supplement (cross-sectional, exploratory): does the mortality gradient of GLI's
-# age decline change with the ventilator's rate and PEEP?
+# Supplement (cross-sectional, exploratory): do the mortality gradients of GLI's age
+# decline and of predicted lung size change with the ventilator's rate and PEEP?
 # =============================================================================
 # The strain denominator is plausibly the lung volume that can take part in tidal
 # ventilation, which shrinks with age as GLI's FVC does: closing volume rises, units
@@ -21,6 +21,15 @@
 # the patient's height, sex and race, per 0.1 log units. Linear age per decade is
 # reported beside it.
 #
+# The same interactions for predicted lung size and the strain error: log PFVC, log
+# PFVC at age 25 (height, sex and race only) and log PBW/PFVC. Under the usable-range
+# model (a breath must fit between end-expiratory volume and total lung capacity),
+# PEEP raises end-expiratory volume and shrinks the room left, most in the smallest
+# lungs, so a larger PFVC should protect MORE at higher PEEP (log PFVC x PEEP below 0;
+# log PBW/PFVC x PEEP above 0). This prediction was written after the age x PEEP
+# result (steeper at higher PEEP, against the closure prediction above), so it is
+# post hoc.
+#
 # Model, ventilated cohort (script 03's cross-sectional table, every patient):
 #   death ~ SF (z) + SOFA (z) + VT/PBW + setting (z) + age decline + age decline x setting
 #           [+ sex + race, the adjusted fit]
@@ -36,10 +45,10 @@
 #
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03, ventilated)
 # Outputs: final/supplement/
-#   age_setting_interaction_{site}.csv  the age-decline (or age) gradient, the setting's
-#                                       main term and their interaction, per outcome,
-#                                       setting and adjustment
-#   age_setting_tertiles_{site}.csv     the age gradient within each tertile of the setting
+#   age_setting_interaction_{site}.csv  each exposure's gradient, the setting's main term
+#                                       and their interaction, per outcome, setting and
+#                                       adjustment (column exposure)
+#   age_setting_tertiles_{site}.csv     each exposure's gradient within groups of the setting
 #   age_setting_settings_{site}.csv     the settings' distribution and missingness
 # Usage: uvr run code/supplement/xsec_age_ventilator_settings.R
 # =============================================================================
@@ -60,7 +69,7 @@ MIN_EVENTS <- 10L   # minimum deaths per model: the CLIF minimum-count standard
 
 cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet"),
                        col_select = c("hospitalization_id", "age_at_admission", "sex_category", "race_category",
-                                      "pfvc", "pfvc_age25", "vtpbw", "sf_ratio", "sofa_total", "resp_rate_set", "peep_set",
+                                      "pfvc", "pfvc_age25", "pbw", "vtpbw", "sf_ratio", "sofa_total", "resp_rate_set", "peep_set",
                                       "deceased", "surv_time", "mortality_event_60"))
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable, so death is simulated
 # independently of every exposure (35% by day 60, time log-normal with median 9 days;
@@ -87,7 +96,7 @@ print(as.data.frame(settings_summary), row.names = FALSE)
 # Patients missing an input, a setting or an outcome are excluded; the count is printed.
 n_before <- nrow(cohort)
 cohort <- cohort %>%
-  filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0, !is.na(vtpbw), !is.na(sf_ratio),
+  filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0, !is.na(pbw), pbw > 0, !is.na(vtpbw), !is.na(sf_ratio),
          !is.na(sofa_total), !is.na(resp_rate_set), resp_rate_set > 0, !is.na(peep_set), peep_set >= 0,
          !is.na(deceased), !is.na(surv_time), !is.na(mortality_event_60),
          !is.na(sex_category), !is.na(race_category)) %>%
@@ -96,17 +105,22 @@ cohort <- cohort %>%
          # GLI's age decline in log units: what the patient's age has taken off the
          # vital capacity predicted for their height, sex and race at age 25
          age_decline = log(pfvc_age25) - log(pfvc),
+         log_pfvc = log(pfvc), log_pfvc25 = log(pfvc_age25), log_ratio = log(pbw / pfvc),
          age10 = age_at_admission / 10,
          sf_z = as.numeric(scale(sf_ratio)), sofa_z = as.numeric(scale(sofa_total)),
          rate_z = as.numeric(scale(resp_rate_set)), peep_z = as.numeric(scale(peep_set)),
-         surv_time = pmax(surv_time, 0.01))
+         surv_time = pmax(surv_time, 0.01)) %>%
+  # every exposure centred at the cohort mean, so a setting's main term is its
+  # association at the average patient, not at an exposure of zero
+  mutate(across(c(age_decline, age10, log_pfvc, log_pfvc25, log_ratio), ~ .x - mean(.x)))
 message("Excluded for a missing input, setting or outcome: ", n_before - nrow(cohort), " of ", n_before)
 if (sum(cohort$deceased == 1) < MIN_EVENTS) stop("fewer than ", MIN_EVENTS, " in-hospital deaths")
 
 fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
   stop("model warning, stopping: ", conditionMessage(w), call. = FALSE))
 OUTCOMES <- c(inhosp_logistic = "in-hospital death (logistic)", day60_cox = "60-day death (Cox)")
-AGE_TERMS <- c(age_decline = "GLI age decline (log PFVC at 25 minus log PFVC)", age10 = "age, per decade")
+EXPOSURES <- c(age_decline = "GLI age decline (log PFVC at 25 minus log PFVC)", age10 = "age, per decade",
+               log_pfvc = "log PFVC", log_pfvc25 = "log PFVC at age 25", log_ratio = "log PBW/PFVC")
 SETTINGS <- list(rate = "rate_z", peep = "peep_z", both = c("rate_z", "peep_z"))
 SETTING_LABELS <- c(rate_z = "set respiratory rate", peep_z = "PEEP")
 ADJUSTMENTS <- c(adjusted = "sex_category + race_category", unadjusted = NA_character_)
@@ -118,36 +132,36 @@ fit_outcome <- function(outcome_key, rhs, data = cohort) {
 # the coefficient of a term named by its components, in either order
 coefficient_named <- function(b, parts) names(b)[vapply(strsplit(names(b), ":"), setequal, logical(1), parts)]
 
-interaction_rows <- expand_grid(outcome_key = names(OUTCOMES), age_term = names(AGE_TERMS),
+interaction_rows <- expand_grid(outcome_key = names(OUTCOMES), exposure = names(EXPOSURES),
                                 setting_set = names(SETTINGS), adjustment = names(ADJUSTMENTS)) %>%
-  pmap_dfr(function(outcome_key, age_term, setting_set, adjustment) {
+  pmap_dfr(function(outcome_key, exposure, setting_set, adjustment) {
     settings <- SETTINGS[[setting_set]]
-    rhs <- paste(c("sf_z", "sofa_z", "vtpbw", settings, age_term, paste0(age_term, ":", settings),
+    rhs <- paste(c("sf_z", "sofa_z", "vtpbw", settings, exposure, paste0(exposure, ":", settings),
                    if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]]), collapse = " + ")
     fit <- fit_outcome(outcome_key, rhs)
     b <- coef(fit); V <- vcov(fit)
-    terms <- c(setNames(age_term, "age gradient (at the mean setting)"),
+    terms <- c(setNames(exposure, "exposure gradient (at the mean setting)"),
                setNames(settings, paste("main term:", SETTING_LABELS[settings])),
-               setNames(map_chr(settings, ~ coefficient_named(b, c(age_term, .x))),
-                        paste("interaction: age x", SETTING_LABELS[settings])))
-    tibble(outcome = OUTCOMES[[outcome_key]], age_term = AGE_TERMS[[age_term]],
+               setNames(map_chr(settings, ~ coefficient_named(b, c(exposure, .x))),
+                        paste("interaction: exposure x", SETTING_LABELS[settings])))
+    tibble(outcome = OUTCOMES[[outcome_key]], exposure = EXPOSURES[[exposure]],
            settings_in_model = paste(SETTING_LABELS[settings], collapse = " and "), adjustment = adjustment,
            quantity = names(terms), estimate = unname(b[terms]), se = unname(sqrt(diag(V)[terms])),
            n_patients = nrow(cohort),
            n_deaths = if (outcome_key == "inhosp_logistic") sum(cohort$deceased == 1) else sum(cohort$mortality_event_60 == 1))
   }) %>%
   mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, p = 2 * pnorm(-abs(estimate / se)),
-         scale = case_when(grepl("^age gradient", quantity) & grepl("decline", age_term) ~ "log ratio per log unit of age decline (x 0.1 for 10% of vital capacity)",
-                           grepl("^age gradient", quantity) ~ "log ratio per decade",
-                           grepl("^main term", quantity) ~ "log ratio per SD of the setting",
-                           grepl("decline", age_term) ~ "change in the age-decline gradient (per log unit) per SD of the setting",
-                           TRUE ~ "change in the per-decade gradient per SD of the setting"),
+         scale = case_when(grepl("^main term", quantity) ~ "log ratio per SD of the setting",
+                           grepl("^exposure gradient", quantity) & grepl("decade", exposure) ~ "log ratio per decade",
+                           grepl("^exposure gradient", quantity) ~ "log ratio per log unit of the exposure (x 0.1 for about 10%)",
+                           grepl("decade", exposure) ~ "change in the per-decade gradient per SD of the setting",
+                           TRUE ~ "change in the gradient per log unit per SD of the setting"),
          site = site_name)
 
 # the age gradient within each tertile of each setting, for reading the interaction
-tertile_rows <- expand_grid(outcome_key = names(OUTCOMES), age_term = names(AGE_TERMS),
+tertile_rows <- expand_grid(outcome_key = names(OUTCOMES), exposure = names(EXPOSURES),
                             setting = c("resp_rate_set", "peep_set"), adjustment = names(ADJUSTMENTS)) %>%
-  pmap_dfr(function(outcome_key, age_term, setting, adjustment) {
+  pmap_dfr(function(outcome_key, exposure, setting, adjustment) {
     # PEEP clusters at 5 cmH2O, so equal-count tertiles would split one value across
     # groups: PEEP is grouped at clinical cut points (5 or less, 6 to 9, 10 or more),
     # and the rate at its tertiles with tied values kept together
@@ -155,15 +169,15 @@ tertile_rows <- expand_grid(outcome_key = names(OUTCOMES), age_term = names(AGE_
       cut(peep_set, breaks = c(-Inf, 5, 9, Inf), labels = c("low", "middle", "high")) else
       cut(resp_rate_set, breaks = unique(quantile(resp_rate_set, c(0, 1 / 3, 2 / 3, 1))), include.lowest = TRUE,
           labels = c("low", "middle", "high")))
-    rhs <- paste(c("sf_z", "sofa_z", "vtpbw", "setting_tertile", paste0(age_term, ":setting_tertile"),
+    rhs <- paste(c("sf_z", "sofa_z", "vtpbw", "setting_tertile", paste0(exposure, ":setting_tertile"),
                    if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]]), collapse = " + ")
     fit <- fit_outcome(outcome_key, rhs, tertile_data)
     b <- coef(fit); V <- vcov(fit)
     map_dfr(c("low", "middle", "high"), function(tertile) {
-      term <- coefficient_named(b, c(age_term, paste0("setting_tertile", tertile)))
+      term <- coefficient_named(b, c(exposure, paste0("setting_tertile", tertile)))
       # computed before tibble(), whose own `setting` column would mask the argument
       tertile_range <- paste(range(tertile_data[[setting]][tertile_data$setting_tertile == tertile]), collapse = " to ")
-      tibble(outcome = OUTCOMES[[outcome_key]], age_term = AGE_TERMS[[age_term]],
+      tibble(outcome = OUTCOMES[[outcome_key]], exposure = EXPOSURES[[exposure]],
              setting = if (setting == "resp_rate_set") "set respiratory rate" else "PEEP", adjustment = adjustment,
              tertile = tertile,
              setting_range = tertile_range,
@@ -173,13 +187,13 @@ tertile_rows <- expand_grid(outcome_key = names(OUTCOMES), age_term = names(AGE_
   }) %>%
   mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, site = site_name)
 
-message("\nAge x setting, in-hospital death, adjusted, each setting alone (strain predicts rate +, PEEP -):")
+message("\nExposure x setting, in-hospital death, adjusted, each setting alone:")
 print(as.data.frame(interaction_rows %>%
                       filter(grepl("^in-hospital", outcome), adjustment == "adjusted", settings_in_model != "set respiratory rate and PEEP") %>%
-                      select(age_term, settings_in_model, quantity, estimate, lo, hi, p) %>%
-                      mutate(age_term = substr(age_term, 1, 16), across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
+                      select(exposure, settings_in_model, quantity, estimate, lo, hi, p) %>%
+                      mutate(exposure = substr(exposure, 1, 16), across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
 message("\nThe age-decline gradient by tertile of the setting (in-hospital, adjusted; log odds per log unit):")
-print(as.data.frame(tertile_rows %>% filter(grepl("^in-hospital", outcome), adjustment == "adjusted", grepl("decline", age_term)) %>%
+print(as.data.frame(tertile_rows %>% filter(grepl("^in-hospital", outcome), adjustment == "adjusted", grepl("decline", exposure)) %>%
                       select(setting, tertile, setting_range, n_patients, estimate, lo, hi) %>%
                       mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
 
