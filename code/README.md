@@ -98,6 +98,13 @@ to change; that stops once sites have returned `final/` folders.
   height slope (sex, Black, Other, and jointly), in the ventilated arm, the no-support
   control and their difference (needs scripts 01-03 run for both cohorts). Not in the
   runner.
+  `xsec_strain_invariance.R` asks whether ventilation's mortality gradient follows
+  the strain error or any index of the same demographics, with severity-only models:
+  the site's tidal-volume rule (slope of set VT on PBW before the 6-8 gate), the
+  ventilated-minus-control contrast for log PBW/PFVC and log PFVC, and 500 random
+  weightings of age, sex, race and height beside GLI's ratio, PFVC and pieces. The
+  cross-site test (the contrast against the dosing rule) is a pooling step. Not in
+  the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
