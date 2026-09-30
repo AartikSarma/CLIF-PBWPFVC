@@ -74,6 +74,7 @@
 # Inputs : intermediate/analysis_cross_sectional.parquet, analysis_all_eligible_timepoints.parquet
 #          (script 03, ventilated), intermediate/controls/nosupport/analysis_cross_sectional.parquet
 #          and resp_support_waterfall_clean.parquet (scripts 01-03, PBWPFVC_COHORT=nosupport)
+#          clif_code_status and clif_hospitalization (config$tables_path; optional)
 # Outputs: final/supplement/
 #   strain_invariance_dosing_{site}.csv     the dosing rule: slopes, R2, SDs, before the
 #                                           VT/PBW gate and (for reference) inside it
@@ -88,7 +89,6 @@
 #                                           difference, relative to age 60, by population
 #   strain_invariance_code_status_{site}.csv  patients and deaths by code status at the
 #                                           index, per cohort (with the code_status table)
-#          clif_code_status and clif_hospitalization (config$tables_path; optional)
 # Usage: uvr run code/supplement/xsec_strain_invariance.R   (PBWPFVC_COHORT unset)
 # =============================================================================
 
