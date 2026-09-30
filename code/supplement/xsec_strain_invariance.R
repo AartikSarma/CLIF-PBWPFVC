@@ -62,6 +62,11 @@
 #    jointly (Wald, 4 df). It asks whether ventilation changes age's mortality curve in
 #    any shape; its p is reported, with the equivalent |z| only for rough placement.
 #
+# 4. Flexible age in everyone and in full-code patients, with its curve (section 4
+#    below): goals of care can reshape the control's age curve without a ventilator,
+#    so the test, the curve and the named references are repeated in patients who
+#    are full code at the index. Needs the optional clif_code_status table.
+#
 # The cohorts are xsec_mortality_channel_equality.R's (copied from it, same
 # synthetic seed): the ventilated arm on IMV at ICU admission (icu_day0), gated at
 # VT/PBW 6-8 and SF < 315 by script 03, and the no-support control.
@@ -76,7 +81,14 @@
 #                                           strain row, by population, outcome and dose
 #   strain_invariance_placebo_{site}.csv    every index: the two cohorts' coefficients,
 #                                           the difference, its z, and (references) the
-#                                           percentile of |z| among the placebos
+#                                           percentile of |z| among the placebos; the
+#                                           flexible-age tests; the references in
+#                                           full-code patients (column population)
+#   strain_invariance_age_curve_{site}.csv  each cohort's age curve and their
+#                                           difference, relative to age 60, by population
+#   strain_invariance_code_status_{site}.csv  patients and deaths by code status at the
+#                                           index, per cohort (with the code_status table)
+#          clif_code_status and clif_hospitalization (config$tables_path; optional)
 # Usage: uvr run code/supplement/xsec_strain_invariance.R   (PBWPFVC_COHORT unset)
 # =============================================================================
 
@@ -300,7 +312,9 @@ print(as.data.frame(contrast %>% filter(population == "everyone", grepl("^in-hos
 # The inputs, whitened over both cohorts together: X centred, then rotated and scaled
 # by its covariance's eigen-decomposition, so Z has identity covariance and any unit
 # vector w gives an index Z w with SD 1.
-input_matrix <- cbind(ns(both_cohorts$age_at_admission, df = 4),
+# the age spline's basis, kept so the flexible-age curve can be evaluated at any age
+age_basis <- ns(both_cohorts$age_at_admission, df = 4)
+input_matrix <- cbind(age_basis,
                       female = as.numeric(both_cohorts$sex_category == "Female"),
                       black  = as.numeric(both_cohorts$race_category == "BLACK"),
                       other  = as.numeric(both_cohorts$race_category == "OTHER"),
@@ -328,19 +342,22 @@ placebo_directions <- matrix(rnorm(PLACEBO_N * ncol(whitened)), nrow = ncol(whit
 placebo_directions <- sweep(placebo_directions, 2, sqrt(colSums(placebo_directions^2)), "/")   # unit vectors
 placebo_indices <- map(seq_len(PLACEBO_N), ~ as.vector(whitened %*% placebo_directions[, .x]))
 names(placebo_indices) <- sprintf("placebo %03d", seq_len(PLACEBO_N))
-# the in-hospital contrast (everyone, no dose) of one index
-index_contrast <- function(index_values) {
-  dat <- both_cohorts %>% mutate(index = index_values)
+# the in-hospital contrast (no dose) of one index, in the patients `rows` selects
+index_contrast <- function(index_values, rows = rep(TRUE, nrow(both_cohorts))) {
+  dat <- both_cohorts %>% mutate(index = index_values) %>% filter(rows)
   fits <- map(set_names(COHORTS), ~ fit_term(dat %>% filter(cohort == .x), "inhosp_logistic", "index"))
   tibble(ventilated = fits$Ventilated$log_ratio, ventilated_se = fits$Ventilated$se,
          control = fits$`No support`$log_ratio, control_se = fits$`No support`$se,
-         note = coalesce(fits$Ventilated$note, fits$`No support`$note)) %>%
+         note = coalesce(fits$Ventilated$note, fits$`No support`$note),
+         n_ventilated = fits$Ventilated$n_patients, deaths_ventilated = fits$Ventilated$n_deaths,
+         n_control = fits$`No support`$n_patients, deaths_control = fits$`No support`$n_deaths) %>%
     mutate(difference = ventilated - control, difference_se = sqrt(ventilated_se^2 + control_se^2),
            z = difference / difference_se)
 }
 message("\nPlacebo formulas: ", PLACEBO_N, " random directions and ", length(reference_indices), " references ...")
 placebo_results <- imap_dfr(c(reference_indices, placebo_indices), ~ index_contrast(.x) %>% mutate(index = .y)) %>%
-  mutate(kind = if_else(index %in% names(reference_indices), "reference", "placebo"))
+  mutate(kind = if_else(index %in% names(reference_indices), "reference", "placebo")) %>%
+  mutate(population = "everyone")
 placebo_abs_z <- abs(placebo_results$z[placebo_results$kind == "placebo"])
 placebo_results <- placebo_results %>%
   mutate(percentile_abs_z_among_placebos = if_else(kind == "reference",
@@ -357,41 +374,164 @@ print(as.data.frame(placebo_results %>% filter(kind == "reference") %>%
 message("Placebo |z|: median ", signif(median(placebo_abs_z, na.rm = TRUE), 3), ", 95th percentile ",
         signif(quantile(placebo_abs_z, 0.95, na.rm = TRUE), 3))
 
-# Flexible age. The GLI age piece gives age one shape (GLI's curve) and one
-# coefficient; ventilation could change age's mortality curve in another shape (flat,
-# then steep in the oldest). Here age enters each cohort as the 4-df natural spline of
-# the placebo inputs (knots from both cohorts together, so the two fits share one
-# basis), and the four ventilated-minus-control differences are tested jointly (Wald,
-# 4 df): does ventilation change age's curve in ANY shape? Its statistic is a
-# chi-square on 4 df, not a z on 1 df; the row carries the equivalent |z| (the normal
-# quantile of its p) and that |z|'s percentile among the placebos only as a rough
-# placement, not as a comparison on one scale.
+# =============================================================================
+# 4. Flexible age, in everyone and in full-code patients
+# =============================================================================
+# The GLI age piece gives age one shape (GLI's curve) and one coefficient; ventilation
+# could change age's mortality curve in another shape (flat, then steep in the
+# oldest). Here age enters each cohort as the placebo inputs' 4-df natural spline
+# (knots from both cohorts together, so the two fits share one basis), and the four
+# ventilated-minus-control differences are tested jointly (Wald, 4 df): does
+# ventilation change age's curve in ANY shape? Its statistic is a chi-square on 4 df,
+# not a z on 1 df; the row carries the equivalent |z| (the normal quantile of its p)
+# and, in everyone, that |z|'s percentile among the placebos, only as a rough
+# placement. The curve behind the test is written too: each cohort's log-odds of
+# in-hospital death by age relative to age CURVE_REFERENCE_AGE, and their difference,
+# at the cohort's mean severity.
+#
+# Goals of care can reshape the control's age curve without any ventilator: an older
+# control patient under a do-not-intubate order dies unintubated, where a younger one
+# is intubated and leaves the control. The test and the curve are therefore repeated
+# in patients who are full code at the index (the last code status recorded up to
+# CODE_STATUS_WINDOW_H hours after it is Full or Presume Full), with the named
+# reference indices beside them. A difference that collapses among full-code patients
+# is do-not-intubate selection, not ventilation. Code status is an optional CLIF table
+# (clif_code_status, patient-level, mapped through clif_hospitalization, both read
+# from config$tables_path, as xsec_pfvc_age_control.R reads them); without it the
+# full-code population is skipped and announced.
+CURVE_AGES <- seq(30, 90, by = 5)
+CURVE_REFERENCE_AGE <- 60
+CODE_STATUS_WINDOW_H <- 24
+FULL_CODE_CATEGORIES <- c("full", "presume full")
 age_spline_terms <- paste0("age_spline_", 1:4)
 age_spline_data <- both_cohorts %>% bind_cols(as_tibble(input_matrix[, age_spline_terms]))
-age_spline_fit <- function(cohort_now) {
-  dat <- age_spline_data %>% filter(cohort == cohort_now)
-  fit <- fit_strict(glm(as.formula(paste("deceased ~ sf_z + sofa_z +", paste(age_spline_terms, collapse = " + "))),
-                        family = binomial, data = dat))
-  list(b = coef(fit)[age_spline_terms], V = vcov(fit)[age_spline_terms, age_spline_terms])
+# the spline's rows at each curve age, less its row at the reference age
+curve_contrast_rows <- predict(age_basis, CURVE_AGES) -
+  predict(age_basis, rep(CURVE_REFERENCE_AGE, length(CURVE_AGES)))
+colnames(curve_contrast_rows) <- age_spline_terms
+flexible_age_for <- function(rows, population) {
+  fits <- map(set_names(COHORTS), function(cohort_now) {
+    dat <- age_spline_data %>% filter(rows, cohort == cohort_now)
+    if (sum(dat$deceased == 1) < MIN_EVENTS) return(NULL)
+    fit <- fit_strict(glm(as.formula(paste("deceased ~ sf_z + sofa_z +", paste(age_spline_terms, collapse = " + "))),
+                          family = binomial, data = dat))
+    list(b = coef(fit)[age_spline_terms], V = vcov(fit)[age_spline_terms, age_spline_terms],
+         n_patients = nrow(dat), n_deaths = sum(dat$deceased == 1))
+  })
+  if (any(map_lgl(fits, is.null))) {
+    message("  flexible age not estimable in ", population, ": fewer than ", MIN_EVENTS, " deaths in a cohort")
+    return(NULL)
+  }
+  difference <- fits$Ventilated$b - fits$`No support`$b
+  difference_V <- fits$Ventilated$V + fits$`No support`$V          # independent cohorts
+  chi2 <- as.numeric(t(difference) %*% solve(difference_V) %*% difference)
+  p <- pchisq(chi2, df = length(age_spline_terms), lower.tail = FALSE)
+  test_row <- tibble(kind = "reference", index = "age, 4-df spline (any shape; Wald on 4 df)", population = population,
+                     chi2 = chi2, df = length(age_spline_terms), p = p, z = qnorm(p / 2, lower.tail = FALSE),
+                     n_ventilated = fits$Ventilated$n_patients, deaths_ventilated = fits$Ventilated$n_deaths,
+                     n_control = fits$`No support`$n_patients, deaths_control = fits$`No support`$n_deaths)
+  curve_for <- function(b, V, quantity) tibble(
+    population = population, quantity = quantity, age = CURVE_AGES, reference_age = CURVE_REFERENCE_AGE,
+    log_odds = as.vector(curve_contrast_rows %*% b),
+    se = sqrt(rowSums((curve_contrast_rows %*% V) * curve_contrast_rows)))
+  curve <- bind_rows(curve_for(fits$Ventilated$b, fits$Ventilated$V, "Ventilated"),
+                     curve_for(fits$`No support`$b, fits$`No support`$V, "No support"),
+                     curve_for(difference, difference_V, DIFFERENCE))
+  list(test = test_row, curve = curve)
 }
-age_fits <- map(set_names(COHORTS), age_spline_fit)
-age_difference <- age_fits$Ventilated$b - age_fits$`No support`$b
-age_difference_V <- age_fits$Ventilated$V + age_fits$`No support`$V          # independent cohorts
-age_chi2 <- as.numeric(t(age_difference) %*% solve(age_difference_V) %*% age_difference)
-age_p <- pchisq(age_chi2, df = length(age_spline_terms), lower.tail = FALSE)
-flexible_age <- tibble(kind = "reference", index = "age, 4-df spline (any shape; Wald on 4 df)",
-                       chi2 = age_chi2, df = length(age_spline_terms), p = age_p,
-                       z = qnorm(age_p / 2, lower.tail = FALSE),
-                       percentile_abs_z_among_placebos = mean(placebo_abs_z < qnorm(age_p / 2, lower.tail = FALSE), na.rm = TRUE),
-                       ratio_projection_r2 = summary(ratio_projection)$r.squared,
-                       scale = "Wald chi-square (4 df) on the ventilated-minus-control differences of the age spline; z is the normal equivalent of p",
-                       site = site_name)
-placebo_results <- bind_rows(placebo_results, flexible_age)
-message("Flexible age (4-df spline, ventilated minus control, joint Wald): chi2 ", signif(age_chi2, 3), " on 4 df, p ",
-        signif(age_p, 3), " (equivalent |z| ", signif(flexible_age$z, 3), ", at the ",
-        signif(100 * flexible_age$percentile_abs_z_among_placebos, 3), "th percentile of the placebos' |z|)")
+
+# code status at the index, per patient and cohort
+code_status_file <- file.path(path.expand(config$tables_path), paste0("clif_code_status.", config$file_type))
+HAS_CODE_STATUS <- file.exists(code_status_file)
+if (HAS_CODE_STATUS) {
+  read_clif_table <- function(table_name, columns) {
+    path <- file.path(path.expand(config$tables_path), paste0("clif_", table_name, ".", config$file_type))
+    switch(config$file_type,
+           parquet = read_parquet(path, col_select = all_of(columns)),
+           csv     = readr::read_csv(path, col_select = all_of(columns), show_col_types = FALSE),
+           fst     = fst::read_fst(path, columns = columns))
+  }
+  # the raw tables come from config$tables_path, which a PBWPFVC_SITE_NAME override
+  # alone does not change: if they hold none of these hospitalizations they are
+  # another site's tables, and the full-code population would be silently empty
+  site_hospitalizations <- read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
+    filter(hospitalization_id %in% both_cohorts$hospitalization_id)
+  if (nrow(site_hospitalizations) == 0)
+    stop("clif_hospitalization at ", config$tables_path, " holds none of this site's ", nrow(both_cohorts),
+         " cohort hospitalizations: config$tables_path points at another site's tables. ",
+         "Set PBWPFVC_TABLES_PATH (or config.json) to ", site_name, "'s CLIF tables.")
+  # a status counts only from this hospitalization's admission to CODE_STATUS_WINDOW_H
+  # after the index (the table is patient-level; orders are often written hours after
+  # ICU admission); the last one in that window is the status at the index. Keyed by
+  # cohort too: a hospitalization can hold a no-support index and a ventilated one.
+  status_at_index <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
+    inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
+    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, index_dttm),
+               by = "hospitalization_id", relationship = "many-to-many") %>%
+    filter(start_dttm >= admission_dttm, start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
+    group_by(cohort, hospitalization_id) %>% slice_max(start_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    transmute(cohort, hospitalization_id,
+              code_status_at_index = if_else(tolower(code_status_category) %in% FULL_CODE_CATEGORIES, "full code", "limited or other"))
+  both_cohorts <- both_cohorts %>% left_join(status_at_index, by = c("cohort", "hospitalization_id")) %>%
+    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"))
+  age_spline_data <- age_spline_data %>% left_join(status_at_index, by = c("cohort", "hospitalization_id")) %>%
+    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"))
+  code_status_counts <- both_cohorts %>% count(cohort, code_status_at_index, name = "n_patients") %>%
+    left_join(both_cohorts %>% group_by(cohort, code_status_at_index) %>% summarise(n_deaths = sum(deceased == 1), .groups = "drop"),
+              by = c("cohort", "code_status_at_index")) %>% mutate(site = site_name)
+  message("\nCode status at the index (last status up to ", CODE_STATUS_WINDOW_H, " h after it):")
+  print(as.data.frame(code_status_counts), row.names = FALSE)
+} else {
+  message("\n*** No code_status table at ", config$tables_path, ": the full-code population is skipped. ***")
+  both_cohorts <- both_cohorts %>% mutate(code_status_at_index = "no record")
+  age_spline_data <- age_spline_data %>% mutate(code_status_at_index = "no record")
+  code_status_counts <- NULL
+}
+
+age_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(full_code = "full code at the index"))
+flexible_age <- imap(age_populations, function(label, key)
+  flexible_age_for(if (key == "full_code") age_spline_data$code_status_at_index == "full code" else rep(TRUE, nrow(age_spline_data)), label)) %>%
+  compact()
+age_tests <- map_dfr(flexible_age, "test") %>%
+  mutate(percentile_abs_z_among_placebos = if_else(population == "everyone",
+                                                   map_dbl(z, ~ mean(placebo_abs_z < .x, na.rm = TRUE)), NA_real_),
+         scale = "Wald chi-square (4 df) on the ventilated-minus-control differences of the age spline; z is the normal equivalent of p")
+age_curve <- map_dfr(flexible_age, "curve") %>%
+  mutate(lo = log_odds - 1.96 * se, hi = log_odds + 1.96 * se,
+         scale = paste0("log-odds of in-hospital death relative to age ", CURVE_REFERENCE_AGE, ", at the cohort's mean severity"),
+         site = site_name)
+message("\nFlexible age (4-df spline, ventilated minus control, joint Wald on 4 df):")
+print(as.data.frame(age_tests %>% select(population, chi2, p, z, percentile_abs_z_among_placebos, n_ventilated, deaths_ventilated,
+                                         n_control, deaths_control) %>%
+                      mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
+message("Ventilated minus control, log-odds by age relative to ", CURVE_REFERENCE_AGE, ":")
+print(as.data.frame(age_curve %>% filter(quantity == DIFFERENCE) %>%
+                      transmute(population, age, difference = signif(log_odds, 3), lo = signif(lo, 3), hi = signif(hi, 3)) %>%
+                      pivot_wider(names_from = population, values_from = c(difference, lo, hi))), row.names = FALSE)
+
+# the named reference indices in full-code patients (no placebos: their cloud is
+# everyone's)
+full_code_references <- if (HAS_CODE_STATUS) {
+  full_code_rows <- both_cohorts$code_status_at_index == "full code"
+  imap_dfr(reference_indices, ~ index_contrast(.x, full_code_rows) %>% mutate(index = .y)) %>%
+    mutate(kind = "reference", population = "full code at the index",
+           scale = "log OR of in-hospital death per SD of the index (SD over both cohorts, everyone); severity only")
+} else NULL
+if (!is.null(full_code_references)) {
+  message("\nReference indices in full-code patients (in-hospital, severity only, per SD of the index):")
+  print(as.data.frame(full_code_references %>% select(index, ventilated, control, difference, difference_se, z,
+                                                      n_ventilated, deaths_ventilated, n_control, deaths_control) %>%
+                        mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
+}
+placebo_results <- bind_rows(placebo_results, full_code_references, age_tests) %>%
+  mutate(ratio_projection_r2 = summary(ratio_projection)$r.squared, site = site_name) %>%
+  relocate(kind, index, population)
 
 write_csv(dosing, file.path(final_dir, paste0("strain_invariance_dosing_", site_name, ".csv")))
 write_csv(contrast, file.path(final_dir, paste0("strain_invariance_contrast_", site_name, ".csv")))
 write_csv(placebo_results, file.path(final_dir, paste0("strain_invariance_placebo_", site_name, ".csv")))
-message("\nWrote strain_invariance_{dosing,contrast,placebo}_", site_name, ".csv to ", final_dir)
+write_csv(age_curve, file.path(final_dir, paste0("strain_invariance_age_curve_", site_name, ".csv")))
+if (!is.null(code_status_counts))
+  write_csv(code_status_counts, file.path(final_dir, paste0("strain_invariance_code_status_", site_name, ".csv")))
+message("\nWrote strain_invariance_{dosing,contrast,placebo,age_curve", if (!is.null(code_status_counts)) ",code_status" else "",
+        "}_", site_name, ".csv to ", final_dir)
