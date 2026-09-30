@@ -426,25 +426,35 @@ index_contrast <- function(index_values, rows = rep(TRUE, nrow(both_cohorts))) {
     mutate(difference = ventilated - control, difference_se = sqrt(ventilated_se^2 + control_se^2),
            z = difference / difference_se)
 }
-message("\nPlacebo formulas: ", PLACEBO_N, " random directions and ", length(reference_indices), " references ...")
-placebo_results <- imap_dfr(c(reference_indices, placebo_indices), ~ index_contrast(.x) %>% mutate(index = .y)) %>%
-  mutate(kind = if_else(index %in% names(reference_indices), "reference", "placebo")) %>%
-  mutate(population = "everyone")
-placebo_abs_z <- abs(placebo_results$z[placebo_results$kind == "placebo"])
-placebo_results <- placebo_results %>%
-  mutate(percentile_abs_z_among_placebos = if_else(kind == "reference",
-                                                   map_dbl(abs(z), ~ mean(placebo_abs_z < .x, na.rm = TRUE)), NA_real_),
-         ratio_projection_r2 = summary(ratio_projection)$r.squared,
-         scale = "log OR of in-hospital death per SD of the index (SD over both cohorts); severity only",
+# The placebos and references are run in everyone and, with the code_status table, in
+# the intubation-eligible population (section "Code status"); each reference is
+# placed among its own population's placebos. The indices keep everyone's
+# standardisation in both.
+placebo_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(eligible = ELIGIBLE_LABEL))
+placebo_abs_z <- list()
+placebo_results <- imap_dfr(placebo_populations, function(label, key) {
+  rows <- if (key == "eligible") both_cohorts$intubation_eligible else rep(TRUE, nrow(both_cohorts))
+  message("\nPlacebo formulas, ", label, ": ", PLACEBO_N, " random directions and ", length(reference_indices), " references ...")
+  results <- imap_dfr(c(reference_indices, placebo_indices), ~ index_contrast(.x, rows) %>% mutate(index = .y)) %>%
+    mutate(kind = if_else(index %in% names(reference_indices), "reference", "placebo"), population = label)
+  abs_z <- abs(results$z[results$kind == "placebo"])
+  placebo_abs_z[[label]] <<- abs_z
+  results <- results %>%
+    mutate(percentile_abs_z_among_placebos = if_else(kind == "reference", map_dbl(abs(z), ~ mean(abs_z < .x, na.rm = TRUE)), NA_real_))
+  message("Reference indices against the placebos (in-hospital, severity only, per SD of the index; the ratio's",
+          " projection on the inputs has R2 ", signif(summary(ratio_projection)$r.squared, 3), "):")
+  print(as.data.frame(results %>% filter(kind == "reference") %>%
+                        select(index, ventilated, control, difference, difference_se, z, percentile_abs_z_among_placebos,
+                               n_ventilated, deaths_ventilated, n_control, deaths_control) %>%
+                        mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
+  message("Placebo |z|: median ", signif(median(abs_z, na.rm = TRUE), 3), ", 95th percentile ",
+          signif(quantile(abs_z, 0.95, na.rm = TRUE), 3))
+  results
+}) %>%
+  mutate(ratio_projection_r2 = summary(ratio_projection)$r.squared,
+         scale = "log OR of in-hospital death per SD of the index (SD over both cohorts, everyone); severity only",
          site = site_name) %>%
-  relocate(kind, index)
-message("\nReference indices against ", PLACEBO_N, " placebo directions (in-hospital, everyone, severity only;",
-        " per SD of the index; the ratio's projection on the inputs has R2 ", signif(summary(ratio_projection)$r.squared, 3), "):")
-print(as.data.frame(placebo_results %>% filter(kind == "reference") %>%
-                      select(index, ventilated, control, difference, difference_se, z, percentile_abs_z_among_placebos) %>%
-                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-message("Placebo |z|: median ", signif(median(placebo_abs_z, na.rm = TRUE), 3), ", 95th percentile ",
-        signif(quantile(placebo_abs_z, 0.95, na.rm = TRUE), 3))
+  relocate(kind, index, population)
 
 # =============================================================================
 # 4. Flexible age, in everyone and in the intubation-eligible population
@@ -510,8 +520,7 @@ flexible_age <- imap(age_populations, function(label, key)
   flexible_age_for(if (key == "eligible") age_spline_data$intubation_eligible else rep(TRUE, nrow(age_spline_data)), label)) %>%
   compact()
 age_tests <- map_dfr(flexible_age, "test") %>%
-  mutate(percentile_abs_z_among_placebos = if_else(population == "everyone",
-                                                   map_dbl(z, ~ mean(placebo_abs_z < .x, na.rm = TRUE)), NA_real_),
+  mutate(percentile_abs_z_among_placebos = map2_dbl(population, z, ~ mean(placebo_abs_z[[.x]] < .y, na.rm = TRUE)),
          scale = "Wald chi-square (4 df) on the ventilated-minus-control differences of the age spline; z is the normal equivalent of p")
 age_curve <- map_dfr(flexible_age, "curve") %>%
   mutate(lo = log_odds - 1.96 * se, hi = log_odds + 1.96 * se,
@@ -526,20 +535,7 @@ print(as.data.frame(age_curve %>% filter(quantity == DIFFERENCE) %>%
                       transmute(population, age, difference = signif(log_odds, 3), lo = signif(lo, 3), hi = signif(hi, 3)) %>%
                       pivot_wider(names_from = population, values_from = c(difference, lo, hi))), row.names = FALSE)
 
-# the named reference indices in the intubation-eligible population (no placebos:
-# their cloud is everyone's)
-eligible_references <- if (HAS_CODE_STATUS) {
-  imap_dfr(reference_indices, ~ index_contrast(.x, both_cohorts$intubation_eligible) %>% mutate(index = .y)) %>%
-    mutate(kind = "reference", population = ELIGIBLE_LABEL,
-           scale = "log OR of in-hospital death per SD of the index (SD over both cohorts, everyone); severity only")
-} else NULL
-if (!is.null(eligible_references)) {
-  message("\nReference indices in the intubation-eligible population (in-hospital, severity only, per SD of the index):")
-  print(as.data.frame(eligible_references %>% select(index, ventilated, control, difference, difference_se, z,
-                                                      n_ventilated, deaths_ventilated, n_control, deaths_control) %>%
-                        mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
-}
-placebo_results <- bind_rows(placebo_results, eligible_references, age_tests) %>%
+placebo_results <- bind_rows(placebo_results, age_tests) %>%
   mutate(ratio_projection_r2 = summary(ratio_projection)$r.squared, site = site_name) %>%
   relocate(kind, index, population)
 
