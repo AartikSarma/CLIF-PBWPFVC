@@ -29,7 +29,9 @@
 # 2. The ventilation contrast. Per cohort, in-hospital death (logistic) and 60-day
 #    death before invasive ventilation (cause-specific Cox):
 #      death ~ SF (z) + SOFA (z) + exposure       [+ VT/PBW, ventilated, "at fixed VT/PBW"]
-#    for log PBW/PFVC and log PFVC, per 0.1 log units. The difference, ventilated
+#    for log PBW/PFVC and log PFVC, and their age-standardised versions (GLI at age 25:
+#    height, sex and race only, the structural lung size and strain error), per 0.1
+#    log units. The difference, ventilated
 #    minus control, is ventilation's share. Two dose versions of the ventilated side:
 #      no dose           the association as the site's practice delivers it: under
 #                        strain, the ratio's difference grows with the site's per-kg
@@ -52,7 +54,7 @@
 #    direction has SD 1 on one scale. PLACEBO_N random directions on the unit sphere
 #    are each run through the in-hospital contrast (everyone, no dose). Beside them,
 #    named reference indices, each standardised the same way: log PBW/PFVC, log PFVC,
-#    the ratio's projection onto the inputs (R2 reported), and GLI's four pieces
+#    both at age 25, the ratio's projection onto the inputs (R2 reported), and GLI's four pieces
 #    (height, age, sex, race; pfvc_channels() in 20_biotrauma_grid.R). Read where each
 #    reference falls in the placebo cloud, not GLI's percentile alone: the ratio is
 #    mostly age, so if age alone lands in the tail the ratio will too.
@@ -126,7 +128,7 @@ DIFFERENCE <- "ventilated minus no support"
 # Data: both cross-sectional cohorts, as xsec_mortality_channel_equality.R builds them
 # =============================================================================
 cohort_columns <- c("hospitalization_id", "index_dttm", "age_at_admission", "sex_category",
-                    "race_category", "pfvc", "pbw", "sf_ratio", "sofa_total", "deceased", "admission_dttm", "death_dttm",
+                    "race_category", "pfvc", "pfvc_age25", "pbw", "sf_ratio", "sofa_total", "deceased", "admission_dttm", "death_dttm",
                     "discharge_dttm", "height_cm")
 control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_cross_sectional.parquet")
 if (!file.exists(control_file))
@@ -176,7 +178,7 @@ index_day <- function(dttm, index) as.numeric(difftime(dttm, index, units = "day
 # discharge time are excluded; the counts before and after are printed per cohort.
 n_before_missing_data <- both_cohorts %>% count(cohort, name = "n_before")
 both_cohorts <- both_cohorts %>%
-  filter(!is.na(pfvc), pfvc > 0, !is.na(pbw), pbw > 0, !is.na(sf_ratio), !is.na(sofa_total), !is.na(deceased),
+  filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0, !is.na(pbw), pbw > 0, !is.na(sf_ratio), !is.na(sofa_total), !is.na(deceased),
          !is.na(age_at_admission), !is.na(sex_category), !is.na(race_category), !is.na(discharge_dttm),
          !is.na(height_cm), height_cm > 0) %>%
   group_by(cohort) %>%
@@ -187,6 +189,10 @@ both_cohorts <- both_cohorts %>%
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          log_pfvc      = log(pfvc),
          log_ratio     = log(pbw / pfvc),                  # log PBW/PFVC: the strain error at a given VT/PBW
+         # age-standardised (GLI at age 25): the structural lung size and strain error,
+         # height, sex and race only
+         log_pfvc_age25  = log(pfvc_age25),
+         log_ratio_age25 = log(pbw / pfvc_age25),
          log_vtpfvc    = log(vtpbw) + log_ratio,           # log VT/PFVC up to a constant (ventilated only)
          death_stamped_before_index = !is.na(death_dttm) & death_dttm < index_dttm,
          death_index_day     = if_else(death_stamped_before_index, SAME_DAY_DEATH_D, index_day(death_dttm, index_dttm)),
@@ -348,7 +354,8 @@ POPULATIONS <- c(everyone = "everyone", hypoxemic = "hypoxemic at the index (SF 
 population_data <- function(population, cohort_now) both_cohorts %>%
   filter(cohort == cohort_now,
          if (population == "hypoxemic") hypoxemic else if (population == "eligible") intubation_eligible else TRUE)
-EXPOSURES <- c(log_ratio = "log PBW/PFVC", log_pfvc = "log PFVC")
+EXPOSURES <- c(log_ratio = "log PBW/PFVC", log_pfvc = "log PFVC",
+               log_ratio_age25 = "log PBW/PFVC at age 25", log_pfvc_age25 = "log PFVC at age 25")
 DOSES <- c(no_dose = "no dose", fixed_vtpbw = "at fixed VT/PBW")
 contrast_grid <- expand_grid(population = names(POPULATIONS), outcome_key = names(OUTCOMES), exposure = names(EXPOSURES))
 per_cohort <- contrast_grid %>%
@@ -408,6 +415,8 @@ ratio_projection <- lm(both_cohorts$log_ratio ~ input_matrix)
 reference_indices <- list(
   `log PBW/PFVC (GLI and Devine)`       = both_cohorts$log_ratio,
   `log PFVC (GLI)`                      = both_cohorts$log_pfvc,
+  `log PBW/PFVC at age 25`            = both_cohorts$log_ratio_age25,
+  `log PFVC at age 25`                  = both_cohorts$log_pfvc_age25,
   `log PBW/PFVC projected on the inputs` = fitted(ratio_projection),
   `GLI height piece`                    = gli_pieces$ch_height,
   `GLI age piece`                       = gli_pieces$ch_age,
@@ -434,7 +443,7 @@ height_free_directions <- matrix(rnorm(PLACEBO_N * ncol(whitened_height_free)), 
 height_free_directions <- sweep(height_free_directions, 2, sqrt(colSums(height_free_directions^2)), "/")
 height_free_indices <- map(seq_len(PLACEBO_N), ~ as.vector(whitened_height_free %*% height_free_directions[, .x]))
 names(height_free_indices) <- sprintf("height-free placebo %03d", seq_len(PLACEBO_N))
-HEIGHT_FREE_REFERENCES <- c("log PBW/PFVC (GLI and Devine)", "log PBW/PFVC projected on the inputs",
+HEIGHT_FREE_REFERENCES <- c("log PBW/PFVC (GLI and Devine)", "log PBW/PFVC projected on the inputs", "log PBW/PFVC at age 25",
                             "GLI age piece", "GLI sex piece", "GLI race piece")
 message("\nThe ratio's height content: correlation of log PBW/PFVC with log height ",
         signif(cor(both_cohorts$log_ratio, log(both_cohorts$height_cm)), 3), "; R2 of log PBW/PFVC on the height-free inputs ",
