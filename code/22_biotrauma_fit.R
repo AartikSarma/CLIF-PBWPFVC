@@ -93,6 +93,10 @@
 #   PBWPFVC_JM_LME_ONLY     0 | 1   no joint models: the longitudinal submodel alone, by
 #                           maximum likelihood, on the same patients and formula;
 #                           its tables are tagged lmeonly_ (jm_estimates_{..}{form}_lmeonly_{h}_{site})
+#   PBWPFVC_JM_DEMO_TREND   0 | 1   the adjusted fit also lets age (the spline), sex and race
+#                           each have their own trend in day, so the size divergence is
+#                           identified only by what the demographic trends leave; adjusted
+#                           fits only, tagged demotrend_ (before lmeonly_)
 #   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs;
 #                           29_run_figure4.R passes 5000 / 1000 / 3)
 #   PBWPFVC_JM_THIN         5   thinning of the stored draws
@@ -290,6 +294,7 @@ SEPARATION_COEF <- 15
 result_file <- function(marker, model, adj_lab)
   file.path(output_dir, paste0("jm_result_", marker, "_", model, "_", adj_lab, "_", BASELINE_FORM,
                                if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                               if (DEMO_TREND) "_demotrend" else "",
                                if (RRT_EVENT && marker == "creatinine") "_rrtcause" else "",
                                restrict_sfx_for(marker), "_", h_suffix, ".rds"))
 # Shape check (section 22f0): PBWPFVC_JM_SHAPE_ONLY=1 fits the longitudinal submodel
@@ -304,6 +309,15 @@ if (SHAPE_ONLY && (MOD_FORM != "pfvc" || JM_GRID != "daily"))
 # jm_lme_check_* makes after it. Its fits are never cached as joint-model results.
 LME_ONLY <- identical(Sys.getenv("PBWPFVC_JM_LME_ONLY", "0"), "1")
 if (LME_ONLY && SHAPE_ONLY) stop("PBWPFVC_JM_LME_ONLY and PBWPFVC_JM_SHAPE_ONLY are separate runs: set one")
+# Demographic trends (PBWPFVC_JM_DEMO_TREND=1). The adjusted model's age, sex and race
+# are levels only, so the size divergence (size x day) is still estimated in part from
+# how the demographics shape the trajectory. With their own day terms, that part is
+# removed: log PBW/PFVC's divergence then rests on the ratio's variation within age,
+# sex and race (height's small share and GLI's age curve beyond the spline), and
+# log PFVC's mostly on height.
+DEMO_TREND <- identical(Sys.getenv("PBWPFVC_JM_DEMO_TREND", "0"), "1")
+DEMO_TREND_RHS <- "ns(age10, 4):vent_day + sex_category:vent_day + race_category:vent_day"
+if (DEMO_TREND && MOD_FORM == "channels") stop("PBWPFVC_JM_DEMO_TREND needs demographic covariates; the channels form has none")
 message("=== 22_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
         ", MCMC ", N_ITER, "/", N_BURNIN, " x ", N_CHAINS, " chains on ", JM_CORES, " cores ===")
 if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_JM_ITER for any reported fit ***")
@@ -704,6 +718,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   rrt_sfx <- if (RRT_EVENT && mk$name == "creatinine") "_rrtcause" else ""
   bundle_file <- file.path(output_dir, paste0("jm_fit_", tag, "_", BASELINE_FORM,
                                               if (MOD_FORM != "disc") paste0("_", MOD_FORM) else "",
+                                              if (DEMO_TREND) "_demotrend" else "",
                                               rrt_sfx, restrict_sfx_for(mk$name), "_", h_suffix, ".rds"))
   rf <- result_file(mk$name, model, adj_lab)
   # a saved fit is kept: it is refitted only when its files are missing (or with
@@ -800,7 +815,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_idx", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
            if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
-           lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS)
+           lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS,
+           if (adjusted && DEMO_TREND) DEMO_TREND_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
   stamp("longitudinal: ", deparse1(lme_formula))
   random_spec <- switch(mk$random,
@@ -971,6 +987,7 @@ RUN_START <- Sys.time()
 # =============================================================================
 jobs <- expand_grid(marker = names(markers), model = "main", adjusted = c(TRUE, FALSE)) %>%
   filter(!(MOD_FORM == "channels" & adjusted))          # channels: one arm, the pieces are the demographics
+if (DEMO_TREND) jobs <- jobs %>% filter(adjusted)            # the trends are demographic terms: adjusted fits only
 run_job <- function(marker, model, adjusted) {
   tryCatch(fit_one(markers[[marker]], model, adjusted),
            error = function(e) {
@@ -1050,6 +1067,7 @@ estimates  <- map_dfr(results, "estimates")
 out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                   if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
+                  if (DEMO_TREND) "demotrend_" else "",
                   if (LME_ONLY) "lmeonly_" else "",
                   h_suffix, "_", site_name)
 

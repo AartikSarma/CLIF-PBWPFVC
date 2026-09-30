@@ -75,7 +75,8 @@
 # Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/27_control_comparison.R
 # Other forms and fits: PBWPFVC_JM_MODIFIER=disc_level reads the log PBW/PFVC fits (the
 # strain-error companion); PBWPFVC_JM_LME_ONLY=1 reads 22's longitudinal-only tables
-# (lmeonly_), and writes its own tables tagged the same way.
+# (lmeonly_), and writes its own tables tagged the same way; PBWPFVC_JM_DEMO_TREND=1
+# reads the fits with demographic x day terms (demotrend_).
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -102,6 +103,10 @@ SCALE_SD      <- if (MOD_FORM == "disc_level") "sd_ldisc" else "sd_log_pfvc"   #
 # both_converged is NA.
 LME_ONLY <- identical(Sys.getenv("PBWPFVC_JM_LME_ONLY", "0"), "1")
 LME_TAG  <- if (LME_ONLY) "lmeonly_" else ""
+# PBWPFVC_JM_DEMO_TREND=1 reads 22's fits with demographic x day terms (demotrend_
+# tables; adjusted fits only)
+DEMO_TREND <- identical(Sys.getenv("PBWPFVC_JM_DEMO_TREND", "0"), "1")
+LME_TAG  <- paste0(if (DEMO_TREND) "demotrend_" else "", LME_TAG)
 final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
