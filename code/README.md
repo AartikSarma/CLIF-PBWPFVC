@@ -105,6 +105,11 @@ to change; that stops once sites have returned `final/` folders.
   weightings of age, sex, race and height beside GLI's ratio, PFVC and pieces. The
   cross-site test (the contrast against the dosing rule) is a pooling step. Not in
   the runner.
+  `xsec_age_ventilator_settings.R` (exploratory) asks whether the mortality gradient
+  of GLI's age decline changes with the set respiratory rate and PEEP, as it would if
+  age shrinks the volume that takes part in tidal ventilation (steeper at higher
+  rates, flatter at higher PEEP). Both settings are chosen for severity, so the
+  interactions are patterns, not tests. Not in the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
