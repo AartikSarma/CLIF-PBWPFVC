@@ -28,10 +28,12 @@
 #                          from that index (analysis_cross_sectional)
 #   paper cohort + VT/PBW  the same, + vtpbw
 #
-# The gate acts on the timepoint more than on the patient. Almost every ventilated
-# patient has some complete hypoxemic timepoint at 6-8 mL/kg and so enters the
-# paper's cohort (the _gate_ table counts those who do not); what the gate decides is
-# WHICH timepoint becomes the index. The "index 6-8" designs isolate the selection on
+# The gate can select patients (those with no complete hypoxemic timepoint at 6-8
+# mL/kg never enter) or timepoints (which one becomes the index). The balance depends
+# on the site's practice, and the _gate_ table counts it. Where most patients pass,
+# the gate mainly decides WHICH timepoint becomes the index; where low-VT practice
+# dominates, it also drops patients and indexes others later, once VT has drifted up.
+# The "index 6-8" designs isolate the selection on
 # VT/PBW at one fixed index. The "paper cohort" designs are what the paper fitted;
 # they differ from the reference both by that selection and by indexing some
 # patients later, so they bound the gate's total effect rather than isolate it.
@@ -40,7 +42,8 @@
 # reference's slope. A slope that moves away from the reference, positive for the
 # ratio or negative for log PFVC, is the bias the gate adds. Every design's change
 # from the reference has a patient bootstrap interval: the designs share patients,
-# so their standard errors cannot be differenced.
+# so their standard errors cannot be differenced. Only the VT/PBW gate is tested: every
+# design keeps the hypoxemia gate (SF < 315), which illness and lung size also move.
 #
 # SOFA is split into its respiratory component and the rest. If the respiratory
 # component carries the association, the selection is titration to oxygenation or
