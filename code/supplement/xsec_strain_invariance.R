@@ -57,6 +57,10 @@
 #    reference falls in the placebo cloud, not GLI's percentile alone: the ratio is
 #    mostly age, so if age alone lands in the tail the ratio will too.
 #    The statistic is |z| of the difference; random directions have no sign.
+#    The GLI age piece fixes age's shape, so one more reference frees it: the 4-df
+#    age spline in each cohort, its four ventilated-minus-control differences tested
+#    jointly (Wald, 4 df). It asks whether ventilation changes age's mortality curve in
+#    any shape; its p is reported, with the equivalent |z| only for rough placement.
 #
 # The cohorts are xsec_mortality_channel_equality.R's (copied from it, same
 # synthetic seed): the ventilated arm on IMV at ICU admission (icu_day0), gated at
@@ -352,6 +356,40 @@ print(as.data.frame(placebo_results %>% filter(kind == "reference") %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 message("Placebo |z|: median ", signif(median(placebo_abs_z, na.rm = TRUE), 3), ", 95th percentile ",
         signif(quantile(placebo_abs_z, 0.95, na.rm = TRUE), 3))
+
+# Flexible age. The GLI age piece gives age one shape (GLI's curve) and one
+# coefficient; ventilation could change age's mortality curve in another shape (flat,
+# then steep in the oldest). Here age enters each cohort as the 4-df natural spline of
+# the placebo inputs (knots from both cohorts together, so the two fits share one
+# basis), and the four ventilated-minus-control differences are tested jointly (Wald,
+# 4 df): does ventilation change age's curve in ANY shape? Its statistic is a
+# chi-square on 4 df, not a z on 1 df; the row carries the equivalent |z| (the normal
+# quantile of its p) and that |z|'s percentile among the placebos only as a rough
+# placement, not as a comparison on one scale.
+age_spline_terms <- paste0("age_spline_", 1:4)
+age_spline_data <- both_cohorts %>% bind_cols(as_tibble(input_matrix[, age_spline_terms]))
+age_spline_fit <- function(cohort_now) {
+  dat <- age_spline_data %>% filter(cohort == cohort_now)
+  fit <- fit_strict(glm(as.formula(paste("deceased ~ sf_z + sofa_z +", paste(age_spline_terms, collapse = " + "))),
+                        family = binomial, data = dat))
+  list(b = coef(fit)[age_spline_terms], V = vcov(fit)[age_spline_terms, age_spline_terms])
+}
+age_fits <- map(set_names(COHORTS), age_spline_fit)
+age_difference <- age_fits$Ventilated$b - age_fits$`No support`$b
+age_difference_V <- age_fits$Ventilated$V + age_fits$`No support`$V          # independent cohorts
+age_chi2 <- as.numeric(t(age_difference) %*% solve(age_difference_V) %*% age_difference)
+age_p <- pchisq(age_chi2, df = length(age_spline_terms), lower.tail = FALSE)
+flexible_age <- tibble(kind = "reference", index = "age, 4-df spline (any shape; Wald on 4 df)",
+                       chi2 = age_chi2, df = length(age_spline_terms), p = age_p,
+                       z = qnorm(age_p / 2, lower.tail = FALSE),
+                       percentile_abs_z_among_placebos = mean(placebo_abs_z < qnorm(age_p / 2, lower.tail = FALSE), na.rm = TRUE),
+                       ratio_projection_r2 = summary(ratio_projection)$r.squared,
+                       scale = "Wald chi-square (4 df) on the ventilated-minus-control differences of the age spline; z is the normal equivalent of p",
+                       site = site_name)
+placebo_results <- bind_rows(placebo_results, flexible_age)
+message("Flexible age (4-df spline, ventilated minus control, joint Wald): chi2 ", signif(age_chi2, 3), " on 4 df, p ",
+        signif(age_p, 3), " (equivalent |z| ", signif(flexible_age$z, 3), ", at the ",
+        signif(100 * flexible_age$percentile_abs_z_among_placebos, 3), "th percentile of the placebos' |z|)")
 
 write_csv(dosing, file.path(final_dir, paste0("strain_invariance_dosing_", site_name, ".csv")))
 write_csv(contrast, file.path(final_dir, paste0("strain_invariance_contrast_", site_name, ".csv")))
