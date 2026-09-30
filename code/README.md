@@ -92,6 +92,13 @@ to change; that stops once sites have returned `final/` folders.
   `ns(age10, 4)` in place of `age10`, nothing else changed, and reports how far each
   size coefficient moves and how much of each claimed AIC advantage survives. Not in
   the runner.
+  `xsec_vtpbw_gate_collider.R` asks whether the VT/PBW 6-8 gate makes predicted lung
+  size look sicker than it is. VT/PBW rises with the PBW/PFVC ratio and falls with
+  illness, so selecting on it or adjusting for it can link the two. On an index chosen
+  without the gate (03's `analysis_ungated_index`), it compares the size term's SOFA
+  slope with and without the gate and the VT/PBW term, with bootstrap intervals for
+  the change, split into respiratory and other SOFA. It uses no outcome model. Not in
+  the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises

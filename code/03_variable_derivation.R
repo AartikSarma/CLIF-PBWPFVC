@@ -32,7 +32,7 @@
 #
 # Sections: 3a PBW and PFVC (Devine; race-specific GLI-2012), 3b SF and PF ratios,
 # 3d per-timepoint dose, mechanics, vasopressor and lab variables, 3e the index,
-# 3e2 SOFA, 3f ventilator-free days, 3h-3i saved tables and the attrition log,
+# 3e2 SOFA, 3e3 the ungated index (the gate check), 3f ventilator-free days, 3h-3i saved tables and the attrition log,
 # 3k the non-hypoxemic negative-control cohorts, 3l federated PBW/PFVC distributions.
 #
 # Inputs (config$output_dir): the _clean tables of script 02, and cohort_demographics,
@@ -42,6 +42,8 @@
 #   analysis_cross_sectional    one row per patient at the index -> 04, 05, 10, 29, supplement/
 #   analysis_all_timepoints     every ventilator timepoint of those patients -> 04
 #   analysis_all_eligible_timepoints  every timepoint before the VT/PBW gate -> 10
+#   analysis_ungated_index      one row per patient at an index chosen without the
+#                               VT/PBW gate, with SOFA (3e3) -> supplement/xsec_vtpbw_gate_collider
 #   analysis_broad_pfvc         everyone with PBW and PFVC, before ventilation gates -> 04
 #   analysis_negative_control   the non-hypoxemic cohorts -> 04 (4j)
 #   ne_equiv_admin              norepinephrine-equivalent dose in force over time -> 10, 21
@@ -720,22 +722,28 @@ imv_start <- analysis_with_completeness %>%
   group_by(hospitalization_id) %>%
   summarise(imv_start_dttm = min(recorded_dttm), .groups = "drop")
 
-# Tier 1: first qualifying + pressure-complete timepoint within the window.
-index_tier1 <- qualifying_timepoints %>%
-  left_join(imv_start, by = "hospitalization_id") %>%
-  filter(!is.na(dp),
-         recorded_dttm <= imv_start_dttm + lubridate::hours(INDEX_WINDOW_HOURS)) %>%
-  group_by(hospitalization_id) %>%
-  slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  select(-imv_start_dttm)
-
-# Tier 2 (fallback): first qualifying timepoint for patients not covered by tier 1.
-index_tier2 <- qualifying_timepoints %>%
-  filter(!hospitalization_id %in% index_tier1$hospitalization_id) %>%
-  group_by(hospitalization_id) %>%
-  slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
-  ungroup()
+# The rule is a function because 3e3 applies it a second time, without the VT/PBW gate.
+index_tiers <- function(qualifying) {
+  # Tier 1: first qualifying + pressure-complete timepoint within the window.
+  tier1 <- qualifying %>%
+    left_join(imv_start, by = "hospitalization_id") %>%
+    filter(!is.na(dp),
+           recorded_dttm <= imv_start_dttm + lubridate::hours(INDEX_WINDOW_HOURS)) %>%
+    group_by(hospitalization_id) %>%
+    slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    select(-imv_start_dttm)
+  # Tier 2 (fallback): first qualifying timepoint for patients not covered by tier 1.
+  tier2 <- qualifying %>%
+    filter(!hospitalization_id %in% tier1$hospitalization_id) %>%
+    group_by(hospitalization_id) %>%
+    slice_min(recorded_dttm, n = 1, with_ties = FALSE) %>%
+    ungroup()
+  list(tier1 = tier1, tier2 = tier2)
+}
+paper_index <- index_tiers(qualifying_timepoints)
+index_tier1 <- paper_index$tier1
+index_tier2 <- paper_index$tier2
 
 cross_sectional <- bind_rows(index_tier1, index_tier2) %>%
   # Attach weight and BMI (needed as a covariate in the driving-pressure /
@@ -904,69 +912,73 @@ if (config$cohort == "imv") {
 #   A component with no data in the window scores 0.
 # Vasoactive doses are converted to mcg/kg/min first (utils/standardize_pressor_dose.R).
 SOFA_COMPONENTS <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_resp", "sofa_cns", "sofa_renal")
-sofa_window <- cross_sectional %>%
-  transmute(hospitalization_id, start_time = recorded_dttm,
-            end_time = recorded_dttm + lubridate::hours(SOFA_WINDOW_H))
-sofa_ids <- sofa_window$hospitalization_id
-# clifR's device names (IMV, High Flow NC, ...); the waterfall holds them in lower case
-clifr_device_names <- setNames(names(clifR::DEVICE_RANK_DICT), tolower(names(clifR::DEVICE_RANK_DICT)))
-# Vasoactive inputs are positive doses only, from administration rows (a stop, a
-# pause or a zero dose is not a dose), and an infusion already running at the window
-# start counts: the rate in force then (3d, rate_in_force) enters as a row at the
-# window start.
-sofa_pressor_events <- function(drug) {
-  agent_rows <- pressor_rate_rows(drug, paste0(drug, " (SOFA)")) %>%
-    filter(hospitalization_id %in% sofa_ids)
-  in_window <- agent_rows %>%
-    filter(rate > 0) %>%
-    inner_join(sofa_window %>% transmute(hospitalization_id, start_t = as.numeric(start_time),
-                                         end_t = as.numeric(end_time)), by = "hospitalization_id") %>%
-    filter(t >= start_t, t <= end_t) %>%
-    select(hospitalization_id, t, rate)
-  window_start <- sofa_window %>% transmute(hospitalization_id, t = as.numeric(start_time))
-  running_at_start <- window_start %>%
-    mutate(rate = rate_in_force(agent_rows, window_start)) %>%
-    filter(rate > 0)
-  bind_rows(in_window, running_at_start) %>%
-    transmute(hospitalization_id, event_time = as.POSIXct(t, origin = "1970-01-01", tz = meds_tz),
-              variable = paste0(drug, "_mcg_kg_min"), value = rate)
+# Scored by a function because 3e3 scores a second index, without the VT/PBW gate.
+score_sofa <- function(index_rows) {
+  sofa_window <- index_rows %>%
+    transmute(hospitalization_id, start_time = recorded_dttm,
+              end_time = recorded_dttm + lubridate::hours(SOFA_WINDOW_H))
+  sofa_ids <- sofa_window$hospitalization_id
+  # clifR's device names (IMV, High Flow NC, ...); the waterfall holds them in lower case
+  clifr_device_names <- setNames(names(clifR::DEVICE_RANK_DICT), tolower(names(clifR::DEVICE_RANK_DICT)))
+  # Vasoactive inputs are positive doses only, from administration rows (a stop, a
+  # pause or a zero dose is not a dose), and an infusion already running at the window
+  # start counts: the rate in force then (3d, rate_in_force) enters as a row at the
+  # window start.
+  sofa_pressor_events <- function(drug) {
+    agent_rows <- pressor_rate_rows(drug, paste0(drug, " (SOFA)")) %>%
+      filter(hospitalization_id %in% sofa_ids)
+    in_window <- agent_rows %>%
+      filter(rate > 0) %>%
+      inner_join(sofa_window %>% transmute(hospitalization_id, start_t = as.numeric(start_time),
+                                           end_t = as.numeric(end_time)), by = "hospitalization_id") %>%
+      filter(t >= start_t, t <= end_t) %>%
+      select(hospitalization_id, t, rate)
+    window_start <- sofa_window %>% transmute(hospitalization_id, t = as.numeric(start_time))
+    running_at_start <- window_start %>%
+      mutate(rate = rate_in_force(agent_rows, window_start)) %>%
+      filter(rate > 0)
+    bind_rows(in_window, running_at_start) %>%
+      transmute(hospitalization_id, event_time = as.POSIXct(t, origin = "1970-01-01", tz = meds_tz),
+                variable = paste0(drug, "_mcg_kg_min"), value = rate)
+  }
+  # every numeric input as one row per measurement: patient, time, variable, value
+  sofa_numeric_events <- bind_rows(
+    cohort_labs %>%
+      filter(hospitalization_id %in% sofa_ids, !is.na(lab_value_numeric),
+             lab_category %in% c("creatinine", "bilirubin_total", "platelet_count", "po2_arterial")) %>%
+      transmute(hospitalization_id, event_time = lab_result_dttm, variable = lab_category, value = lab_value_numeric),
+    cohort_vitals %>%
+      filter(hospitalization_id %in% sofa_ids, !is.na(vital_value), vital_category %in% c("map", "spo2")) %>%
+      transmute(hospitalization_id, event_time = recorded_dttm, variable = vital_category, value = vital_value),
+    cohort_assessments %>%
+      filter(hospitalization_id %in% sofa_ids, assessment_category == "gcs_total") %>%
+      transmute(hospitalization_id, event_time = recorded_dttm, variable = "gcs_total",
+                value = as.numeric(numerical_value)) %>%
+      filter(!is.na(value)),
+    resp_waterfall %>%
+      filter(hospitalization_id %in% sofa_ids, !is.na(fio2_set)) %>%
+      transmute(hospitalization_id, event_time = recorded_dttm, variable = "fio2_set", value = fio2_set),
+    map_dfr(c("norepinephrine", "epinephrine", "dopamine", "dobutamine"), sofa_pressor_events)
+  )
+  # compute_sofa() reads a wide table. One row per measurement keeps every value; its
+  # worst-value aggregation per patient ignores the empty cells.
+  sofa_wide <- bind_rows(
+    sofa_numeric_events %>%
+      mutate(measurement = row_number()) %>%
+      pivot_wider(id_cols = c(hospitalization_id, event_time, measurement),
+                  names_from = variable, values_from = value) %>%
+      select(-measurement),
+    resp_waterfall %>%
+      filter(hospitalization_id %in% sofa_ids, !is.na(device_category)) %>%
+      transmute(hospitalization_id, event_time = recorded_dttm,
+                device_category = unname(clifr_device_names[tolower(device_category)]))
+  )
+  for (input_column in c(clifR::MAX_ITEMS, setdiff(clifR::MIN_ITEMS, "pao2_imputed")))
+    if (!input_column %in% names(sofa_wide)) sofa_wide[[input_column]] <- NA_real_
+  clifR::compute_sofa(sofa_wide, cohort_df = sofa_window, id_name = "hospitalization_id") %>%
+    select(hospitalization_id, sofa_total, all_of(SOFA_COMPONENTS))
 }
-# every numeric input as one row per measurement: patient, time, variable, value
-sofa_numeric_events <- bind_rows(
-  cohort_labs %>%
-    filter(hospitalization_id %in% sofa_ids, !is.na(lab_value_numeric),
-           lab_category %in% c("creatinine", "bilirubin_total", "platelet_count", "po2_arterial")) %>%
-    transmute(hospitalization_id, event_time = lab_result_dttm, variable = lab_category, value = lab_value_numeric),
-  cohort_vitals %>%
-    filter(hospitalization_id %in% sofa_ids, !is.na(vital_value), vital_category %in% c("map", "spo2")) %>%
-    transmute(hospitalization_id, event_time = recorded_dttm, variable = vital_category, value = vital_value),
-  cohort_assessments %>%
-    filter(hospitalization_id %in% sofa_ids, assessment_category == "gcs_total") %>%
-    transmute(hospitalization_id, event_time = recorded_dttm, variable = "gcs_total",
-              value = as.numeric(numerical_value)) %>%
-    filter(!is.na(value)),
-  resp_waterfall %>%
-    filter(hospitalization_id %in% sofa_ids, !is.na(fio2_set)) %>%
-    transmute(hospitalization_id, event_time = recorded_dttm, variable = "fio2_set", value = fio2_set),
-  map_dfr(c("norepinephrine", "epinephrine", "dopamine", "dobutamine"), sofa_pressor_events)
-)
-# compute_sofa() reads a wide table. One row per measurement keeps every value; its
-# worst-value aggregation per patient ignores the empty cells.
-sofa_wide <- bind_rows(
-  sofa_numeric_events %>%
-    mutate(measurement = row_number()) %>%
-    pivot_wider(id_cols = c(hospitalization_id, event_time, measurement),
-                names_from = variable, values_from = value) %>%
-    select(-measurement),
-  resp_waterfall %>%
-    filter(hospitalization_id %in% sofa_ids, !is.na(device_category)) %>%
-    transmute(hospitalization_id, event_time = recorded_dttm,
-              device_category = unname(clifr_device_names[tolower(device_category)]))
-)
-for (input_column in c(clifR::MAX_ITEMS, setdiff(clifR::MIN_ITEMS, "pao2_imputed")))
-  if (!input_column %in% names(sofa_wide)) sofa_wide[[input_column]] <- NA_real_
-sofa_index <- clifR::compute_sofa(sofa_wide, cohort_df = sofa_window, id_name = "hospitalization_id") %>%
-  select(hospitalization_id, sofa_total, all_of(SOFA_COMPONENTS))
+sofa_index <- score_sofa(cross_sectional)
 cross_sectional <- cross_sectional %>% left_join(sofa_index, by = "hospitalization_id")
 # every index row is itself a measurement inside its window, so a missing score is a bug
 if (any(is.na(cross_sectional$sofa_total)))
@@ -976,6 +988,32 @@ message("SOFA over the 24 h from the index (clifR): median ", median(cross_secti
         nrow(cross_sectional), " patients; mean component scores: ",
         paste(sprintf("%s %.2f", sub("sofa_", "", SOFA_COMPONENTS), colMeans(cross_sectional[SOFA_COMPONENTS])),
               collapse = ", "))
+
+# =============================================================================
+# 3e3. The ungated index, for the VT/PBW gate check (ventilated cohort only)
+# =============================================================================
+# VT/PBW follows both predicted lung size and illness, so the 6-8 gate may itself
+# link the two (code/supplement/xsec_vtpbw_gate_collider.R). That check needs an
+# index chosen without the gate: the two-tier rule of 3e applied to every
+# complete-data hypoxemic IMV timepoint, whatever its VT/PBW, and SOFA scored over
+# the 24 h from it. in_paper_cohort marks the patients the gate admits. Nothing else
+# in the pipeline reads this table.
+if (config$cohort == "imv") {
+  ungated_index <- analysis_with_completeness %>%
+    filter(has_all_data, sf_ratio < SF_HYPOXEMIA_THRESHOLD) %>%
+    index_tiers() %>%
+    bind_rows() %>%
+    select(hospitalization_id, patient_id, recorded_dttm, vtpbw, vtpfvc, pbw, pfvc, pbwpfvc,
+           height_cm, age_at_admission, sex_category, race_category, sf_ratio, dp) %>%
+    mutate(in_paper_cohort = hospitalization_id %in% eligible_patients)
+  ungated_index <- ungated_index %>% left_join(score_sofa(ungated_index), by = "hospitalization_id")
+  if (any(is.na(ungated_index$sofa_total)))
+    stop(sum(is.na(ungated_index$sofa_total)), " patients have no SOFA over the 24 h from the ungated index")
+  message("Ungated index: ", nrow(ungated_index), " patients (", sum(ungated_index$in_paper_cohort),
+          " in the cohort); VT/PBW there below 6 in ", sum(ungated_index$vtpbw < 6), ", above 8 in ",
+          sum(ungated_index$vtpbw > 8))
+  write_parquet(ungated_index, file.path(output_dir, "analysis_ungated_index.parquet"))
+}
 
 # All IMV timepoints for the included patients, retained for descriptive
 # summaries; no per-timepoint eligibility flags are computed here.
