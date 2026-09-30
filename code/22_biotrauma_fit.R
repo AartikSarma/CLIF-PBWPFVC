@@ -90,6 +90,9 @@
 #   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
 #   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
 #                           (pfvc form, daily grid; section 22f0) -> final/jm_shape_{tag}
+#   PBWPFVC_JM_LME_ONLY     0 | 1   no joint models: the longitudinal submodel alone, by
+#                           maximum likelihood, on the same patients and formula;
+#                           its tables are tagged lmeonly_ (jm_estimates_{..}{form}_lmeonly_{h}_{site})
 #   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs;
 #                           29_run_figure4.R passes 5000 / 1000 / 3)
 #   PBWPFVC_JM_THIN         5   thinning of the stored draws
@@ -188,8 +191,14 @@ stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "ch
 # them: if smaller lungs still diverge where no ventilator is acting, the
 # divergence is the patient rather than the breath.
 HAS_DOSE <- config$cohort == "imv"
-if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "disc_level", "vtpfvc", "pfvc_dose"))
-  stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc or channels for the ", config$cohort, " cohort")
+# disc_level runs in a control too: log PBW/PFVC exists without a ventilator, and the
+# ventilated-minus-control difference of its divergence is the strain-error
+# companion of the PFVC difference (27_control_comparison.R)
+if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "vtpfvc", "pfvc_dose"))
+  stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc, disc_level or channels for the ", config$cohort, " cohort")
+# the form's size exposure: the column whose level and divergence the form reads, and
+# the one the severity anchor modifies in a severity-standardised control
+SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # The survival submodel. Its job is the correction for who leaves the
 # panel (death, extubation, escalation), not the size effect, which the mortality
@@ -289,6 +298,12 @@ SHAPE_ONLY <- identical(Sys.getenv("PBWPFVC_JM_SHAPE_ONLY", "0"), "1")
 SHAPE_SPLIT_DAY <- 3   # early and late divergence meet here: creatinine lags, platelets bottom out about now
 if (SHAPE_ONLY && (MOD_FORM != "pfvc" || JM_GRID != "daily"))
   stop("the shape check reads the pfvc form on the daily grid: set PBWPFVC_JM_MODIFIER=pfvc PBWPFVC_JM_GRID=daily")
+# The longitudinal submodel alone (PBWPFVC_JM_LME_ONLY=1): the model the joint model
+# starts from, fitted by maximum likelihood without the correction for patients who
+# leave the panel. A first read of a form before its MCMC, and the comparison that
+# jm_lme_check_* makes after it. Its fits are never cached as joint-model results.
+LME_ONLY <- identical(Sys.getenv("PBWPFVC_JM_LME_ONLY", "0"), "1")
+if (LME_ONLY && SHAPE_ONLY) stop("PBWPFVC_JM_LME_ONLY and PBWPFVC_JM_SHAPE_ONLY are separate runs: set one")
 message("=== 22_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
         ", MCMC ", N_ITER, "/", N_BURNIN, " x ", N_CHAINS, " chains on ", JM_CORES, " cores ===")
 if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_JM_ITER for any reported fit ***")
@@ -403,6 +418,8 @@ if (nrow(severity_anchor)) {
 # pooling.
 scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = meta$cohort_scale$log_pfvc_sd,
                     mean_log_pfvc = meta$cohort_scale$log_pfvc_mean,
+                    # the same for log PBW/PFVC (ldisc_sd, the disc_level form)
+                    sd_ldisc = meta$cohort_scale$ldisc_sd, mean_ldisc = meta$cohort_scale$ldisc_mean,
                     n_patients = meta$cohort_scale$n_patients, horizon_days = JM_HORIZON, site = site_name)
 # log_pfvc_sd is log_pfvc standardised by those constants
 stopifnot(isTRUE(all.equal(surv_all$log_pfvc_sd, (surv_all$log_pfvc - scale_tbl$mean_log_pfvc) / scale_tbl$sd_log_pfvc)))
@@ -557,11 +574,12 @@ prepare_fit_data <- function(mk, stamp) {
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE) %>%
     note_step("covariates", "SOFA, dose terms and (pressure markers) BMI observed")
   # severity standardisation (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R): the marker's
-  # own anchor, centred at the ventilated cohort's mean, so log_pfvc_sd:vent_day is
-  # the rate at the ventilated severity
+  # own anchor, centred at the ventilated cohort's mean, so the size divergence
+  # (log_pfvc_sd:vent_day, or ldisc_sd:vent_day in the disc_level form) is the rate at
+  # the ventilated severity
   sev_center <- sev_center_for(mk$name)
   if (!is.na(sev_center)) {
-    if (MOD_FORM != "pfvc") stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc form")
+    if (!MOD_FORM %in% c("pfvc", "disc_level")) stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc and disc_level forms")
     ld <- ld %>%
       inner_join(tibble(hospitalization_id = surv_all$hospitalization_id,
                         sev_anchor_c = anchor_of(surv_all, mk$name) - sev_center), by = "hospitalization_id") %>%
@@ -690,7 +708,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   rf <- result_file(mk$name, model, adj_lab)
   # a saved fit is kept: it is refitted only when its files are missing (or with
   # PBWPFVC_JM_FRESH=1)
-  if (!USE_FRESH && !SHAPE_ONLY && file.exists(rf) && file.exists(bundle_file)) {
+  if (!USE_FRESH && !SHAPE_ONLY && !LME_ONLY && file.exists(rf) && file.exists(bundle_file)) {
     r <- readRDS(rf)
     stamp("saved fit kept: ", basename(rf), " (", r$n_iter, "/", r$n_burnin,
           " iterations; delete its jm_result_ and jm_fit_ files to refit)")
@@ -765,7 +783,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     # day per SD of lung size, per extra mL/kg delivered.
     pfvc_dose  = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day",
                    "vtpbw_c:vent_day", "log_pfvc_sd:vtpbw_c", "log_pfvc_sd:vtpbw_c:vent_day"),
-    disc_level = c("l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
+    disc_level = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
     channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: a 3-df natural spline in day on the daily grid (figure 4); linear on the
@@ -775,7 +793,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # the severity terms: the anchor's own level and trend, and its modification of the
   # size level and of the divergence (the three-way term is the test)
   sev_terms <- if (!is.na(sev_center)) c("sev_anchor_c", "sev_anchor_c:vent_day",
-                                         "log_pfvc_sd:sev_anchor_c", "log_pfvc_sd:vent_day:sev_anchor_c")
+                                         paste0(SIZE_EXPOSURE, ":sev_anchor_c"), paste0(SIZE_EXPOSURE, ":vent_day:sev_anchor_c"))
   if (!is.na(sev_center))
     stamp(sprintf("severity-standardised: anchor (%s) centred at the ventilated mean %.2f; this cohort's mean %.2f",
                   anchor_label(mk$name), sev_center, mean(distinct(ld, hospitalization_id, sev_anchor_c)$sev_anchor_c) + sev_center))
@@ -819,6 +837,19 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     lme_fit <- lme(lme_formula, random = random_spec, data = ld,
                    control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200))
     stamp("LME converged")
+  }
+  # PBWPFVC_JM_LME_ONLY: the longitudinal submodel's own estimates, in the estimates
+  # table's columns (sd is the standard error; no R-hat), and no joint model
+  if (LME_ONLY) {
+    coef_table <- if (isTRUE(mk$binary)) summary(lme_fit)$coef_table else summary(lme_fit)$tTable
+    est <- tibble(block = "longitudinal", term = rownames(coef_table),
+                  estimate = unname(coef_table[, 1]), sd = unname(coef_table[, 2])) %>%
+      mutate(lo = estimate - 1.96 * sd, hi = estimate + 1.96 * sd, rhat = NA_real_) %>%
+      bind_cols(counts[rep(1L, nrow(.)), ]) %>%
+      mutate(baseline_form = BASELINE_FORM, horizon_days = JM_HORIZON, site = site_name)
+    return(list(status = "lme_only", reason = NA_character_, counts = counts, entry_steps = entry_steps,
+                estimates = est, lme_formula = deparse1(lme_formula),
+                entry_rule = entry_rule_for(mk), model_spec = model_spec_for(mk), sf_band_rule = SF_BAND_RULE))
   }
 
   # --- survival submodel: cause-specific stratified Cox (death vs extubation),
@@ -953,7 +984,7 @@ run_job <- function(marker, model, adjusted) {
 # as many fits at once as the core budget allows (N_CORES / N_CHAINS). Worker
 # output is forwarded to this console (outfile = ""), so stamps and heartbeats
 # from concurrent fits interleave, each prefixed by its fit tag.
-N_FITS_PAR <- if (SHAPE_ONLY) 1L else max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS, N_FITS_MAX))   # the shape check's LMEs take minutes
+N_FITS_PAR <- if (SHAPE_ONLY || LME_ONLY) 1L else max(1L, min(nrow(jobs), N_CORES %/% N_CHAINS, N_FITS_MAX))   # the shape check's LMEs take minutes
 if (N_FITS_PAR > 1L) {
   message("Running ", nrow(jobs), " fits, ", N_FITS_PAR, " at a time (", N_CHAINS, " chains each)")
   cl <- makeCluster(N_FITS_PAR, type = "PSOCK", outfile = "")
@@ -1019,6 +1050,7 @@ estimates  <- map_dfr(results, "estimates")
 out_tag <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                   if (BASELINE_FORM == "offset") "offset_" else "",
                   if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
+                  if (LME_ONLY) "lmeonly_" else "",
                   h_suffix, "_", site_name)
 
 # The shape check writes its own table and figure, and nothing else: the joint-model

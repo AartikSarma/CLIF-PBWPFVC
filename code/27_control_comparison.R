@@ -73,6 +73,9 @@
 #   jm_hypoxemic_control_did_{form}_{h}_{site}.csv  the same against the hypoxemic control
 #
 # Usage: PBWPFVC_JM_GRID=daily PBWPFVC_JM_HORIZON=7 uvr run code/27_control_comparison.R
+# Other forms and fits: PBWPFVC_JM_MODIFIER=disc_level reads the log PBW/PFVC fits (the
+# strain-error companion); PBWPFVC_JM_LME_ONLY=1 reads 22's longitudinal-only tables
+# (lmeonly_), and writes its own tables tagged the same way.
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -87,7 +90,18 @@ if (config$cohort != "imv")
 base_site <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-stopifnot(MOD_FORM %in% c("pfvc", "channels"))
+stopifnot(MOD_FORM %in% c("pfvc", "channels", "disc_level"))
+# The form's size exposure and its label: log PFVC (pfvc), or log PBW/PFVC
+# (disc_level, the strain-error companion; at a given VT/PBW it is VT/PFVC, which has
+# no control analogue because a control receives no tidal volume).
+SIZE_EXPOSURE <- if (MOD_FORM == "disc_level") "ldisc_sd" else "log_pfvc_sd"
+SIZE_LABEL    <- if (MOD_FORM == "disc_level") "log PBW/PFVC" else "log PFVC"
+SCALE_SD      <- if (MOD_FORM == "disc_level") "sd_ldisc" else "sd_log_pfvc"   # jm_scale_* column
+# PBWPFVC_JM_LME_ONLY=1 reads the longitudinal-submodel-only tables (22's lmeonly_
+# tables) in place of the joint models'. Their estimates carry no R-hat, so
+# both_converged is NA.
+LME_ONLY <- identical(Sys.getenv("PBWPFVC_JM_LME_ONLY", "0"), "1")
+LME_TAG  <- if (LME_ONLY) "lmeonly_" else ""
 final_dir <- final_dir_for("injury")              # the ventilated tables; the controls sit in final/controls/
 okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#000000", "#F0E442")
 
@@ -98,7 +112,7 @@ cohort_folders <- tibble(cohort = c("imv", "nosupport"),
                          arm_pattern = c("^(day0_)?$", "^sevstd_(sf0to315_)?$"))
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
-file_stub <- function(site) paste0(MOD_FORM, "_", h_suffix, "_", site, ".csv")
+file_stub <- function(site) paste0(MOD_FORM, "_", LME_TAG, h_suffix, "_", site, ".csv")
 arms <- pmap_dfr(cohort_folders, function(cohort, cohort_label, site, arm_pattern) {
   folder <- if (cohort == "imv") final_dir else file.path(config$final_root, "controls")
   found <- list.files(folder, pattern = paste0("^jm_estimates_.*", file_stub(site), "$"))
@@ -148,8 +162,8 @@ marker_scale <- function(marker) if_else(marker == "any_pressor", "log-odds of a
 # sev_modification = the control's log_pfvc_sd:vent_day:sev_anchor_c: the change in the
 # divergence per point of the severity anchor (NA in arms without it)
 components <- function(term) vapply(strsplit(term, ":"), function(p) paste(sort(p), collapse = ":"), character(1))
-term_quantity <- c(log_pfvc_sd = "level", "log_pfvc_sd:vent_day" = "divergence",
-                   "log_pfvc_sd:sev_anchor_c:vent_day" = "sev_modification")
+term_quantity <- setNames(c("level", "divergence", "sev_modification"),
+                          components(paste0(SIZE_EXPOSURE, c("", ":vent_day", ":sev_anchor_c:vent_day"))))
 size_terms <- estimates %>%
   filter(model == "main", block == "longitudinal") %>%
   mutate(quantity = unname(term_quantity[components(term)])) %>%
@@ -178,10 +192,10 @@ comparison <- size_terms %>%
   left_join(convergence %>% filter(model == "main") %>% select(arm, marker, adjustment, size_terms_rhat, size_gate, hazard_rhat),
             by = c("arm", "marker", "adjustment")) %>%
   mutate(arm = factor(arm, levels = arms$arm),
-         unit = paste(marker_scale(marker), "per day per SD of log PFVC in this arm's cohort"),
+         unit = paste(marker_scale(marker), "per day per SD of", SIZE_LABEL, "in this arm's cohort"),
          form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
-out_stub <- paste0(MOD_FORM, "_", h_suffix, "_", base_site)
+out_stub <- paste0(MOD_FORM, "_", LME_TAG, h_suffix, "_", base_site)
 write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
 
 # ---- the difference-in-differences: ventilated divergence (patients on IMV at ICU
@@ -206,10 +220,16 @@ write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_
 did_path <- file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv"))
 scale_vent <- file.path(final_dir, paste0("jm_scale_", h_suffix, "_", base_site, ".csv"))
 scale_ctrl <- file.path(config$final_root, "controls", paste0("jm_scale_", h_suffix, "_", base_site, "_nosupport.csv"))
+read_scale_sd <- function(path) {
+  scale_row <- read_csv(path, show_col_types = FALSE)
+  if (!SCALE_SD %in% names(scale_row))
+    stop(basename(path), " has no ", SCALE_SD, " column: it predates the disc_level control; rerun 22_biotrauma_fit.R for that cohort")
+  scale_row[[SCALE_SD]]
+}
 to_vent_sd <- if (file.exists(scale_vent) && file.exists(scale_ctrl))
-  read_csv(scale_vent, show_col_types = FALSE)$sd_log_pfvc / read_csv(scale_ctrl, show_col_types = FALSE)$sd_log_pfvc else NA_real_
+  read_scale_sd(scale_vent) / read_scale_sd(scale_ctrl) else NA_real_
 if (is.na(to_vent_sd)) {
-  message("--- no difference-in-differences: the SD of log PFVC is missing for ",
+  message("--- no difference-in-differences: the SD of ", SIZE_LABEL, " is missing for ",
           paste(c(if (!file.exists(scale_vent)) "the ventilated cohort", if (!file.exists(scale_ctrl)) "the control"), collapse = " and "),
           " (rerun 22_biotrauma_fit.R, e.g. its anchor step, for that cohort)")
   unlink(did_path)
@@ -232,9 +252,13 @@ CONDITIONAL_MARKERS <- "pressor_dose"
 # standard errors take the place of the posterior SDs; the control is put on the
 # ventilated unit in the same way.
 lme_did_against <- function(control_arm) {
-  none <- tibble(marker = character(), adjustment = character())
+  none <- tibble(marker = character(), adjustment = character(),
+                 divergence_lme_ventilated = double(), divergence_lme_control = double(), did_lme_estimate = double(),
+                 did_lme_sd = double(), did_lme_lo = double(), did_lme_hi = double())
+  # an LME-only run's difference-in-differences IS the longitudinal-only one
+  if (LME_ONLY) return(none)
   sides <- if (is.null(lme_check) || !nrow(lme_check)) tibble() else lme_check %>%
-    filter(model == "main", exposure == "log_pfvc_sd", term == "divergence per day",
+    filter(model == "main", exposure == SIZE_EXPOSURE, term == "divergence per day",
            arm %in% c(VENTILATED_DID_ARM, control_arm), !marker %in% CONDITIONAL_MARKERS)
   missing <- setdiff(c(VENTILATED_DID_ARM, control_arm), unique(sides$arm))
   if (length(missing)) {
@@ -274,9 +298,9 @@ did_against <- function(control_arm) {
          did_sd = sqrt(divergence_sd_ventilated^2 + divergence_sd_control^2),
          did_lo = did_estimate - 1.96 * did_sd, did_hi = did_estimate + 1.96 * did_sd,
          p_did_gt0 = pnorm(did_estimate / did_sd),
-         both_converged = size_gate_ventilated & size_gate_control,
+         both_converged = if (LME_ONLY) NA else size_gate_ventilated & size_gate_control,
          control_to_ventilated_sd = to_vent_sd, ventilated_arm = VENTILATED_DID_ARM, control_arm = control_arm,
-         unit = paste(marker_scale(marker), "per day per SD of log PFVC in the ventilated cohort"), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
+         unit = paste(marker_scale(marker), "per day per SD of", SIZE_LABEL, "in the ventilated cohort"), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   select(-size_gate_ventilated, -size_gate_control) %>%
   left_join(lme_did_against(control_arm), by = c("marker", "adjustment"))
 }
@@ -296,7 +320,7 @@ if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
 } else unlink(hypoxemic_did_path)
 if (nrow(did)) {
   write_csv(did, did_path)
-  message("--- difference-in-differences: ventilated at ICU admission minus no-support divergence (log marker, or log-odds for any_pressor, per day per SD of log PFVC)")
+  message("--- difference-in-differences: ventilated at ICU admission minus no-support divergence (log marker, or log-odds for any_pressor, per day per SD of ", SIZE_LABEL, ")")
   print(as.data.frame(did %>% transmute(marker, adjustment, ventilated = signif(divergence_estimate_ventilated, 3),
                                         control = signif(divergence_estimate_control, 3), did = signif(did_estimate, 3),
                                         lo = signif(did_lo, 3), hi = signif(did_hi, 3), p_did_gt0 = signif(p_did_gt0, 3),
@@ -306,8 +330,14 @@ if (nrow(did)) {
   message("--- no marker has both a ventilated ICU-admission fit (day0_) and a severity-standardised control fit: no difference-in-differences")
   unlink(did_path)
 }
+# An LME-only run stops at its tables: the movement panel and the figure read
+# 23_biotrauma_report.R's tables, which only the joint models produce.
+if (LME_ONLY) {
+  message("27_control_comparison (longitudinal submodels only) complete: ", nrow(comparison), " rows -> ", final_dir)
+  quit(save = "no", status = 0)
+}
 
-message("--- divergence per day per SD of log PFVC (log marker units; log-odds for any_pressor), adjusted")
+message("--- divergence per day per SD of ", SIZE_LABEL, " (log marker units; log-odds for any_pressor), adjusted")
 print(as.data.frame(comparison %>% filter(adjustment == "adjusted") %>%
                       transmute(marker, arm, n_patients, n_deaths, divergence = signif(divergence_estimate, 3),
                                 lo = signif(divergence_lo, 3), hi = signif(divergence_hi, 3),
