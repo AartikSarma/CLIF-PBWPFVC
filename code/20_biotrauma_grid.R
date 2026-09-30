@@ -170,6 +170,8 @@ RHAT_GATE <- 1.1   # the standard convergence threshold
 #   pfvc, pfvc_dose  log_pfvc_sd, log_pfvc_sd:vent_day (pfvc_dose's dose-modified
 #                    terms are not size terms)
 #   disc_level       ldisc_sd, ldisc_sd:vent_day
+#   pfvc25           log_pfvc25_sd, log_pfvc25_sd:vent_day (GLI at age 25)
+#   disc25_level     ldisc25_sd, ldisc25_sd:vent_day (GLI at age 25)
 #   vtpfvc           vtpfvc_c, vtpfvc_c:vent_day
 #   channels         ch_height, ch_age, ch_sex, ch_race and each x vent_day
 # The dose-modification forms (not in the paper) have no divergence; their size terms are the
@@ -181,6 +183,8 @@ SIZE_TERMS <- list(
   pfvc       = c("log_pfvc_sd", "log_pfvc_sd:vent_day"),
   pfvc_dose  = c("log_pfvc_sd", "log_pfvc_sd:vent_day"),
   disc_level = c("ldisc_sd", "ldisc_sd:vent_day"),
+  pfvc25       = c("log_pfvc25_sd", "log_pfvc25_sd:vent_day"),
+  disc25_level = c("ldisc25_sd", "ldisc25_sd:vent_day"),
   vtpfvc     = c("vtpfvc_c", "vtpfvc_c:vent_day"),
   channels   = c(CHANNELS, paste0(CHANNELS, ":vent_day")),
   disc       = c("ldisc_c", "l_vtpbw_within:ldisc_c"),

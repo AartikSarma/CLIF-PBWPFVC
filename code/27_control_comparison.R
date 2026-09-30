@@ -91,13 +91,16 @@ if (config$cohort != "imv")
 base_site <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-stopifnot(MOD_FORM %in% c("pfvc", "channels", "disc_level"))
+stopifnot(MOD_FORM %in% c("pfvc", "channels", "disc_level", "pfvc25", "disc25_level"))
 # The form's size exposure and its label: log PFVC (pfvc), or log PBW/PFVC
 # (disc_level, the strain-error companion; at a given VT/PBW it is VT/PFVC, which has
 # no control analogue because a control receives no tidal volume).
-SIZE_EXPOSURE <- if (MOD_FORM == "disc_level") "ldisc_sd" else "log_pfvc_sd"
-SIZE_LABEL    <- if (MOD_FORM == "disc_level") "log PBW/PFVC" else "log PFVC"
-SCALE_SD      <- if (MOD_FORM == "disc_level") "sd_ldisc" else "sd_log_pfvc"   # jm_scale_* column
+# pfvc25 and disc25_level are the same with GLI at age 25 (height, sex and race only)
+SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", pfvc25 = "log_pfvc25_sd", disc25_level = "ldisc25_sd", "log_pfvc_sd")
+SIZE_LABEL    <- switch(MOD_FORM, disc_level = "log PBW/PFVC", pfvc25 = "log PFVC at age 25",
+                        disc25_level = "log PBW/PFVC at age 25", "log PFVC")
+SCALE_SD      <- switch(MOD_FORM, disc_level = "sd_ldisc", pfvc25 = "sd_log_pfvc25", disc25_level = "sd_ldisc25",
+                        "sd_log_pfvc")   # jm_scale_* column
 # PBWPFVC_JM_LME_ONLY=1 reads the longitudinal-submodel-only tables (22's lmeonly_
 # tables) in place of the joint models'. Their estimates carry no R-hat, so
 # both_converged is NA.

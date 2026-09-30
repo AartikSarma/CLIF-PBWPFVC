@@ -189,7 +189,13 @@ MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 # VT/PBW with a different VT/PFVC"; at a given VT/PBW it is the PBW/PFVC
 # discordance contrast scaled by the dose. The hazard carries the index VT/PFVC
 # (percent) in place of log PFVC.
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
+# "pfvc25" and "disc25_level": the pfvc and disc_level forms with GLI evaluated at
+# age 25 (script 03's pfvc_age25): the structural lung size and the strain error
+# with GLI's age decline removed (height, sex and race only). Both run in a control.
+# At a given VT/PBW, log PBW/PFVC at age 25 is log VT/PFVC at age 25 less a
+# constant, so disc25_level is also the VT/PFVC-at-age-25 contrast.
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose",
+                          "pfvc25", "disc25_level"))
 # The control cohorts receive no set tidal volume, so every dose term is dropped
 # and the joint model becomes the PFVC trajectory alone. That is the point of
 # them: if smaller lungs still diverge where no ventilator is acting, the
@@ -202,7 +208,8 @@ if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "vtpfvc", "pfvc_do
   stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc, disc_level or channels for the ", config$cohort, " cohort")
 # the form's size exposure: the column whose level and divergence the form reads, and
 # the one the severity anchor modifies in a severity-standardised control
-SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", "log_pfvc_sd")
+SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", pfvc25 = "log_pfvc25_sd",
+                        disc25_level = "ldisc25_sd", "log_pfvc_sd")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # The survival submodel. Its job is the correction for who leaves the
 # panel (death, extubation, escalation), not the size effect, which the mortality
@@ -326,6 +333,18 @@ if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_
 long_all <- read_parquet(panel_path("long"))
 surv_all <- read_parquet(panel_path("surv"))
 meta     <- readRDS(panel_path("meta"))
+# The age-25 exposures (the pfvc25 and disc25_level forms), built here from the
+# panel's pfvc_age25 and pbw. They are standardised over this panel's patients, not
+# the whole cohort's baseline as log_pfvc_sd is (the panel meta file carries no
+# age-25 scale), so their unit is this panel's SD; jm_scale_* records it, and 27
+# rescales the control onto the ventilated unit with it as for the other forms.
+if (anyNA(surv_all$pfvc_age25) || any(surv_all$pfvc_age25 <= 0))
+  stop("the panel has patients without a positive pfvc_age25: rebuild it with 21_biotrauma_panel.R")
+AGE25_SCALE <- list(log_pfvc25_mean = mean(log(surv_all$pfvc_age25)), log_pfvc25_sd = sd(log(surv_all$pfvc_age25)),
+                    ldisc25_mean = mean(log(surv_all$pbw / surv_all$pfvc_age25)), ldisc25_sd = sd(log(surv_all$pbw / surv_all$pfvc_age25)))
+surv_all <- surv_all %>%
+  mutate(log_pfvc25_sd = (log(pfvc_age25) - AGE25_SCALE$log_pfvc25_mean) / AGE25_SCALE$log_pfvc25_sd,
+         ldisc25_sd    = (log(pbw / pfvc_age25) - AGE25_SCALE$ldisc25_mean) / AGE25_SCALE$ldisc25_sd)
 if (!identical(meta$clock, JM_CLOCK) || is.null(meta$cohort_scale))
   stop(basename(panel_path("meta")), " was not built on the ", JM_CLOCK, " clock by the current 21_biotrauma_panel.R: rebuild the panel")
 message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients (", JM_CLOCK, " clock)")
@@ -434,6 +453,8 @@ scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = meta$cohort_scale$log_
                     mean_log_pfvc = meta$cohort_scale$log_pfvc_mean,
                     # the same for log PBW/PFVC (ldisc_sd, the disc_level form)
                     sd_ldisc = meta$cohort_scale$ldisc_sd, mean_ldisc = meta$cohort_scale$ldisc_mean,
+                    # the age-25 exposures, over this panel's patients (above)
+                    sd_log_pfvc25 = AGE25_SCALE$log_pfvc25_sd, sd_ldisc25 = AGE25_SCALE$ldisc25_sd,
                     n_patients = meta$cohort_scale$n_patients, horizon_days = JM_HORIZON, site = site_name)
 # log_pfvc_sd is log_pfvc standardised by those constants
 stopifnot(isTRUE(all.equal(surv_all$log_pfvc_sd, (surv_all$log_pfvc - scale_tbl$mean_log_pfvc) / scale_tbl$sd_log_pfvc)))
@@ -579,7 +600,7 @@ prepare_fit_data <- function(mk, stamp) {
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, vtpfvc_pt_mean, vtpbw_idx,
-                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
+                                   ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, log_pfvc25_sd, ldisc25_sd, vtpfvc_c, vtpfvc_idx,
                                    all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa),
@@ -593,7 +614,8 @@ prepare_fit_data <- function(mk, stamp) {
   # the ventilated severity
   sev_center <- sev_center_for(mk$name)
   if (!is.na(sev_center)) {
-    if (!MOD_FORM %in% c("pfvc", "disc_level")) stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc and disc_level forms")
+    if (!MOD_FORM %in% c("pfvc", "disc_level", "pfvc25", "disc25_level"))
+      stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc, disc_level, pfvc25 and disc25_level forms")
     ld <- ld %>%
       inner_join(tibble(hospitalization_id = surv_all$hospitalization_id,
                         sev_anchor_c = anchor_of(surv_all, mk$name) - sev_center), by = "hospitalization_id") %>%
@@ -754,7 +776,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_idx"), "ldisc_c",
-                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", CHANNELS, CUM_TERM,
+                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", "log_pfvc25_sd", "ldisc25_sd", CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", "sev_anchor_c", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10"), names(ld))
@@ -799,6 +821,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     pfvc_dose  = c("l_vtpbw_within", "log_pfvc_sd", "log_pfvc_sd:vent_day",
                    "vtpbw_c:vent_day", "log_pfvc_sd:vtpbw_c", "log_pfvc_sd:vtpbw_c:vent_day"),
     disc_level = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
+    pfvc25       = c(if (HAS_DOSE) "l_vtpbw_within", "log_pfvc25_sd", "log_pfvc25_sd:vent_day"),
+    disc25_level = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc25_sd", "ldisc25_sd:vent_day"),
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
     channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: a 3-df natural spline in day on the daily grid (figure 4); linear on the
