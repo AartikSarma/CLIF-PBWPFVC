@@ -57,6 +57,10 @@
 #    reference falls in the placebo cloud, not GLI's percentile alone: the ratio is
 #    mostly age, so if age alone lands in the tail the ratio will too.
 #    The statistic is |z| of the difference; random directions have no sign.
+#    The ratio carries almost no height (the two formulas' height functions nearly
+#    cancel), so it cannot compete on the height axis. A second cloud drops log height
+#    from the inputs, and the height-free references (the ratio, its projection, the
+#    age, sex and race pieces) are ranked in it as well: the strain-error question.
 #    The GLI age piece fixes age's shape, so one more reference frees it: the 4-df
 #    age spline in each cohort, its four ventilated-minus-control differences tested
 #    jointly (Wald, 4 df). It asks whether ventilation changes age's mortality curve in
@@ -414,6 +418,28 @@ placebo_directions <- matrix(rnorm(PLACEBO_N * ncol(whitened)), nrow = ncol(whit
 placebo_directions <- sweep(placebo_directions, 2, sqrt(colSums(placebo_directions^2)), "/")   # unit vectors
 placebo_indices <- map(seq_len(PLACEBO_N), ~ as.vector(whitened %*% placebo_directions[, .x]))
 names(placebo_indices) <- sprintf("placebo %03d", seq_len(PLACEBO_N))
+# A second cloud without height. log PBW - log PFVC nearly cancels height (Devine's
+# and GLI's height functions almost coincide), so the ratio has almost no height in it,
+# and it does not compete on the height axis, where lung size carries a strong
+# ventilation-specific signal. The strain-error question is whether the ratio stands
+# out among indices of the same height-free inputs (age spline, sex, race), so the
+# whitening, the directions and the ranking are repeated without log height, for the
+# references that carry no height by construction.
+height_free_matrix <- input_matrix[, colnames(input_matrix) != "log_height"]
+height_free_centred <- scale(height_free_matrix, center = TRUE, scale = FALSE)
+eigen_height_free <- eigen(cov(height_free_centred), symmetric = TRUE)
+whitened_height_free <- height_free_centred %*% eigen_height_free$vectors %*% diag(1 / sqrt(eigen_height_free$values))
+set.seed(PLACEBO_SEED + 1)
+height_free_directions <- matrix(rnorm(PLACEBO_N * ncol(whitened_height_free)), nrow = ncol(whitened_height_free))
+height_free_directions <- sweep(height_free_directions, 2, sqrt(colSums(height_free_directions^2)), "/")
+height_free_indices <- map(seq_len(PLACEBO_N), ~ as.vector(whitened_height_free %*% height_free_directions[, .x]))
+names(height_free_indices) <- sprintf("height-free placebo %03d", seq_len(PLACEBO_N))
+HEIGHT_FREE_REFERENCES <- c("log PBW/PFVC (GLI and Devine)", "log PBW/PFVC projected on the inputs",
+                            "GLI age piece", "GLI sex piece", "GLI race piece")
+message("\nThe ratio's height content: correlation of log PBW/PFVC with log height ",
+        signif(cor(both_cohorts$log_ratio, log(both_cohorts$height_cm)), 3), "; R2 of log PBW/PFVC on the height-free inputs ",
+        signif(summary(lm(both_cohorts$log_ratio ~ height_free_matrix))$r.squared, 3), " and on all inputs ",
+        signif(summary(lm(both_cohorts$log_ratio ~ input_matrix))$r.squared, 3))
 # the in-hospital contrast (no dose) of one index, in the patients `rows` selects
 index_contrast <- function(index_values, rows = rep(TRUE, nrow(both_cohorts))) {
   dat <- both_cohorts %>% mutate(index = index_values) %>% filter(rows)
@@ -434,27 +460,37 @@ placebo_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(eligible 
 placebo_abs_z <- list()
 placebo_results <- imap_dfr(placebo_populations, function(label, key) {
   rows <- if (key == "eligible") both_cohorts$intubation_eligible else rep(TRUE, nrow(both_cohorts))
-  message("\nPlacebo formulas, ", label, ": ", PLACEBO_N, " random directions and ", length(reference_indices), " references ...")
-  results <- imap_dfr(c(reference_indices, placebo_indices), ~ index_contrast(.x, rows) %>% mutate(index = .y)) %>%
-    mutate(kind = if_else(index %in% names(reference_indices), "reference", "placebo"), population = label)
-  abs_z <- abs(results$z[results$kind == "placebo"])
+  message("\nPlacebo formulas, ", label, ": ", PLACEBO_N, " random directions (all inputs), ", PLACEBO_N,
+          " without height, and ", length(reference_indices), " references ...")
+  reference_rows <- imap_dfr(reference_indices, ~ index_contrast(.x, rows) %>% mutate(index = .y))
+  cloud_rows <- imap_dfr(placebo_indices, ~ index_contrast(.x, rows) %>% mutate(index = .y))
+  height_free_rows <- imap_dfr(height_free_indices, ~ index_contrast(.x, rows) %>% mutate(index = .y))
+  abs_z <- abs(cloud_rows$z); abs_z_height_free <- abs(height_free_rows$z)
   placebo_abs_z[[label]] <<- abs_z
-  results <- results %>%
-    mutate(percentile_abs_z_among_placebos = if_else(kind == "reference", map_dbl(abs(z), ~ mean(abs_z < .x, na.rm = TRUE)), NA_real_))
+  results <- bind_rows(
+    reference_rows %>% mutate(kind = "reference", cloud = "all inputs",
+                              percentile_abs_z_among_placebos = map_dbl(abs(z), ~ mean(abs_z < .x, na.rm = TRUE))),
+    reference_rows %>% filter(index %in% HEIGHT_FREE_REFERENCES) %>%
+      mutate(kind = "reference", cloud = "without height",
+             percentile_abs_z_among_placebos = map_dbl(abs(z), ~ mean(abs_z_height_free < .x, na.rm = TRUE))),
+    cloud_rows %>% mutate(kind = "placebo", cloud = "all inputs"),
+    height_free_rows %>% mutate(kind = "placebo", cloud = "without height")) %>%
+    mutate(population = label)
   message("Reference indices against the placebos (in-hospital, severity only, per SD of the index; the ratio's",
           " projection on the inputs has R2 ", signif(summary(ratio_projection)$r.squared, 3), "):")
   print(as.data.frame(results %>% filter(kind == "reference") %>%
-                        select(index, ventilated, control, difference, difference_se, z, percentile_abs_z_among_placebos,
+                        select(index, cloud, ventilated, control, difference, difference_se, z, percentile_abs_z_among_placebos,
                                n_ventilated, deaths_ventilated, n_control, deaths_control) %>%
                         mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
-  message("Placebo |z|: median ", signif(median(abs_z, na.rm = TRUE), 3), ", 95th percentile ",
-          signif(quantile(abs_z, 0.95, na.rm = TRUE), 3))
+  message("Placebo |z|, all inputs: median ", signif(median(abs_z, na.rm = TRUE), 3), ", 95th percentile ",
+          signif(quantile(abs_z, 0.95, na.rm = TRUE), 3), "; without height: median ",
+          signif(median(abs_z_height_free, na.rm = TRUE), 3), ", 95th percentile ", signif(quantile(abs_z_height_free, 0.95, na.rm = TRUE), 3))
   results
 }) %>%
   mutate(ratio_projection_r2 = summary(ratio_projection)$r.squared,
          scale = "log OR of in-hospital death per SD of the index (SD over both cohorts, everyone); severity only",
          site = site_name) %>%
-  relocate(kind, index, population)
+  relocate(kind, index, population, cloud)
 
 # =============================================================================
 # 4. Flexible age, in everyone and in the intubation-eligible population
