@@ -50,6 +50,9 @@
 #                                       adjustment (column exposure)
 #   age_setting_tertiles_{site}.csv     each exposure's gradient within groups of the setting
 #   age_setting_settings_{site}.csv     the settings' distribution and missingness
+#   age_setting_peep_volume_{site}.csv  PEEP as volume (PEEP / specific elastance) in the
+#                                       plateau-measured patients: the interactions, and
+#                                       dynamic against total strain (section at the end)
 # Usage: uvr run code/supplement/xsec_age_ventilator_settings.R
 # =============================================================================
 
@@ -70,7 +73,7 @@ MIN_EVENTS <- 10L   # minimum deaths per model: the CLIF minimum-count standard
 cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet"),
                        col_select = c("hospitalization_id", "age_at_admission", "sex_category", "race_category",
                                       "pfvc", "pfvc_age25", "pbw", "vtpbw", "sf_ratio", "sofa_total", "resp_rate_set", "peep_set",
-                                      "deceased", "surv_time", "mortality_event_60"))
+                                      "deceased", "surv_time", "mortality_event_60", "tidal_volume_set", "dp", "ers_pfvc"))
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable, so death is simulated
 # independently of every exposure (35% by day 60, time log-normal with median 9 days;
 # a simulated death is in hospital). The run exercises the machinery and can show no
@@ -197,7 +200,89 @@ print(as.data.frame(tertile_rows %>% filter(grepl("^in-hospital", outcome), adju
                       select(setting, tertile, setting_range, n_patients, estimate, lo, hi) %>%
                       mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
 
+# =============================================================================
+# PEEP as volume, in the plateau-measured patients
+# =============================================================================
+# The volume PEEP adds is PEEP x Crs, and as a fraction of predicted lung size it is
+# PEEP / (Ers x PFVC): PEEP over specific elastance. Specific elastance falls steeply
+# with age (xsec_crs_channels.R), so the same PEEP in cmH2O raises an older patient's
+# end-expiratory volume by a larger fraction, and leaves less of the usable range for
+# the breath. If that is the mechanism, the age x PEEP interaction above should be
+# carried by the PEEP volume fraction rather than by PEEP in cmH2O. In the patients
+# with a plateau pressure (driving pressure at least DP_FLOOR cmH2O, as compliance
+# from a smaller driving pressure is not physiologic), per exposure:
+#   PEEP in cmH2O          the interaction above, in this subset
+#   PEEP volume fraction   PEEP / specific elastance, the fraction of PFVC PEEP adds
+#   both                   which of the two carries the interaction
+# and, for the whole breath, a head-to-head of dynamic strain (VT / PFVC) against total
+# strain ((VT + PEEP x Crs) / PFVC), each on the log scale, by AIC (below 0 favours
+# total strain).
+# Caveats: Crs is measured with the disease, so it carries severity; the volume assumes
+# a linear pressure-volume relation at the set PEEP (no recruitment); and PFVC is in
+# both the volume fraction and the size exposures, so their interaction is partly
+# arithmetic (the ratio problem). The subset is selected on a recorded plateau.
+DP_FLOOR <- 5
+peep_data <- cohort %>%
+  filter(!is.na(dp), dp >= DP_FLOOR, !is.na(ers_pfvc), ers_pfvc > 0, !is.na(tidal_volume_set), tidal_volume_set > 0) %>%
+  mutate(peep_fraction = peep_set / ers_pfvc,                            # fraction of PFVC added by PEEP
+         dynamic_strain = tidal_volume_set / (1000 * pfvc),
+         log_dynamic_strain = log(dynamic_strain),
+         log_total_strain = log(dynamic_strain + peep_fraction),
+         peep_z = as.numeric(scale(peep_set)), peep_fraction_z = as.numeric(scale(peep_fraction)),
+         sf_z = as.numeric(scale(sf_ratio)), sofa_z = as.numeric(scale(sofa_total)))
+message("\nPEEP as volume: ", nrow(peep_data), " of ", nrow(cohort), " patients with a plateau (driving pressure >= ", DP_FLOOR,
+        "); PEEP volume fraction median ", signif(median(peep_data$peep_fraction), 3), " of PFVC (IQR ",
+        paste(signif(quantile(peep_data$peep_fraction, c(0.25, 0.75)), 3), collapse = " to "), ")")
+PEEP_FORMS <- list(`PEEP (cmH2O)` = "peep_z", `PEEP volume fraction` = "peep_fraction_z", both = c("peep_z", "peep_fraction_z"))
+PEEP_LABELS <- c(peep_z = "PEEP (cmH2O)", peep_fraction_z = "PEEP volume fraction")
+peep_volume_rows <- if (sum(peep_data$deceased == 1) < MIN_EVENTS) {
+  message("  fewer than ", MIN_EVENTS, " deaths among the plateau-measured patients: PEEP as volume skipped")
+  tibble()
+} else bind_rows(
+  expand_grid(outcome_key = names(OUTCOMES), exposure = c("age_decline", "log_pfvc", "log_pfvc25"),
+              peep_form = names(PEEP_FORMS), adjustment = names(ADJUSTMENTS)) %>%
+    pmap_dfr(function(outcome_key, exposure, peep_form, adjustment) {
+      settings <- PEEP_FORMS[[peep_form]]
+      # fitted on the exposure in SD units (a log exposure's small SD beside two
+      # correlated PEEP terms stalls the Cox fit), reported per log unit
+      exposure_sd <- sd(peep_data[[exposure]])
+      fit_data <- peep_data %>% mutate(exposure_scaled = .data[[exposure]] / exposure_sd)
+      rhs <- paste(c("sf_z", "sofa_z", "vtpbw", settings, "exposure_scaled", paste0("exposure_scaled:", settings),
+                     if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]]), collapse = " + ")
+      fit <- fit_outcome(outcome_key, rhs, fit_data)
+      b <- coef(fit); V <- vcov(fit)
+      terms <- setNames(map_chr(settings, ~ coefficient_named(b, c("exposure_scaled", .x))),
+                        paste("interaction: exposure x", PEEP_LABELS[settings]))
+      tibble(analysis = "interaction", outcome = OUTCOMES[[outcome_key]], exposure = EXPOSURES[[exposure]],
+             peep_in_model = peep_form, adjustment = adjustment, quantity = names(terms),
+             estimate = unname(b[terms]) / exposure_sd, se = unname(sqrt(diag(V)[terms])) / exposure_sd)
+    }),
+  expand_grid(outcome_key = names(OUTCOMES), adjustment = names(ADJUSTMENTS)) %>%
+    pmap_dfr(function(outcome_key, adjustment) {
+      fit_for <- function(strain) fit_outcome(outcome_key, paste(c("sf_z", "sofa_z", strain,
+        if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]]), collapse = " + "), peep_data)
+      dynamic_fit <- fit_for("log_dynamic_strain"); total_fit <- fit_for("log_total_strain")
+      tibble(analysis = "strain head-to-head", outcome = OUTCOMES[[outcome_key]], adjustment = adjustment,
+             quantity = c("log dynamic strain (VT / PFVC)", "log total strain ((VT + PEEP x Crs) / PFVC)",
+                          "AIC, total minus dynamic (below 0 favours total strain)"),
+             estimate = c(coef(dynamic_fit)[["log_dynamic_strain"]], coef(total_fit)[["log_total_strain"]],
+                          AIC(total_fit) - AIC(dynamic_fit)),
+             se = c(sqrt(vcov(dynamic_fit)["log_dynamic_strain", "log_dynamic_strain"]),
+                    sqrt(vcov(total_fit)["log_total_strain", "log_total_strain"]), NA_real_))
+    })) %>%
+  mutate(lo = estimate - 1.96 * se, hi = estimate + 1.96 * se, p = 2 * pnorm(-abs(estimate / se)),
+         n_patients = nrow(peep_data), n_deaths_in_hospital = sum(peep_data$deceased == 1),
+         peep_fraction_median = median(peep_data$peep_fraction), dp_floor = DP_FLOOR, site = site_name)
+if (nrow(peep_volume_rows)) {
+  message("PEEP as volume, in-hospital, adjusted (interactions per SD of each PEEP form; strain per log unit):")
+  print(as.data.frame(peep_volume_rows %>% filter(grepl("^in-hospital", outcome), adjustment == "adjusted") %>%
+                        select(analysis, exposure, peep_in_model, quantity, estimate, lo, hi, p) %>%
+                        mutate(exposure = substr(exposure, 1, 16), across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
+}
+
 write_csv(interaction_rows, file.path(final_dir, paste0("age_setting_interaction_", site_name, ".csv")))
 write_csv(tertile_rows, file.path(final_dir, paste0("age_setting_tertiles_", site_name, ".csv")))
 write_csv(settings_summary, file.path(final_dir, paste0("age_setting_settings_", site_name, ".csv")))
-message("\nWrote age_setting_{interaction,tertiles,settings}_", site_name, ".csv to ", final_dir)
+if (nrow(peep_volume_rows))
+  write_csv(peep_volume_rows, file.path(final_dir, paste0("age_setting_peep_volume_", site_name, ".csv")))
+message("\nWrote age_setting_{interaction,tertiles,settings,peep_volume}_", site_name, ".csv to ", final_dir)
