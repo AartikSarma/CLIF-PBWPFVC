@@ -62,10 +62,13 @@
 #    jointly (Wald, 4 df). It asks whether ventilation changes age's mortality curve in
 #    any shape; its p is reported, with the equivalent |z| only for rough placement.
 #
-# 4. Flexible age in everyone and in full-code patients, with its curve (section 4
-#    below): goals of care can reshape the control's age curve without a ventilator,
-#    so the test, the curve and the named references are repeated in patients who
-#    are full code at the index. Needs the optional clif_code_status table.
+# 4. Flexible age with its curve (section 4 below), in everyone and in the
+#    intubation-eligible population. Goals of care act on the control only: a
+#    ventilated patient's intubation shows intubation was within their goals, while a
+#    control under a do-not-intubate order can only die unintubated. That population
+#    keeps every ventilated patient and drops the controls with a documented
+#    limitation (no record stays in); sections 2 and 4 are repeated in it. Needs the
+#    optional clif_code_status table.
 #
 # The cohorts are xsec_mortality_channel_equality.R's (copied from it, same
 # synthetic seed): the ventilated arm on IMV at ICU admission (icu_day0), gated at
@@ -83,8 +86,8 @@
 #   strain_invariance_placebo_{site}.csv    every index: the two cohorts' coefficients,
 #                                           the difference, its z, and (references) the
 #                                           percentile of |z| among the placebos; the
-#                                           flexible-age tests; the references in
-#                                           full-code patients (column population)
+#                                           flexible-age tests; the references in the
+#                                           intubation-eligible population (column population)
 #   strain_invariance_age_curve_{site}.csv  each cohort's age curve and their
 #                                           difference, relative to age 60, by population
 #   strain_invariance_code_status_{site}.csv  patients and deaths by code status at the
@@ -233,6 +236,73 @@ fit_term <- function(dat, outcome_key, term, extra = character(0)) {
 }
 
 # =============================================================================
+# Code status, and the intubation-eligible population
+# =============================================================================
+# Goals of care act on one side of the contrast only. A ventilated patient was
+# intubated, which shows that intubation was within their goals at the index, whatever
+# the chart records. A control patient under a do-not-intubate order can only die
+# unintubated, and such patients are older, so they steepen the control's age and
+# PBW/PFVC gradients without any ventilator. The comparison population is therefore
+# every ventilated patient against the control patients with no documented limitation
+# (a status other than Full or Presume Full, recorded between hospital admission and
+# CODE_STATUS_WINDOW_H hours after the index). A control with no record stays in, as
+# the default in practice is full code. Restricting the ventilated side instead would
+# drop the patients whose limitation is written in the hours after intubation, most of
+# whom die, and would select on the outcome.
+# Code status is an optional CLIF table (clif_code_status, patient-level, mapped
+# through clif_hospitalization, both read from config$tables_path, as
+# xsec_pfvc_age_control.R reads them); without it the population is skipped and
+# announced.
+CODE_STATUS_WINDOW_H <- 24
+FULL_CODE_CATEGORIES <- c("full", "presume full")
+code_status_file <- file.path(path.expand(config$tables_path), paste0("clif_code_status.", config$file_type))
+HAS_CODE_STATUS <- file.exists(code_status_file)
+if (HAS_CODE_STATUS) {
+  read_clif_table <- function(table_name, columns) {
+    path <- file.path(path.expand(config$tables_path), paste0("clif_", table_name, ".", config$file_type))
+    switch(config$file_type,
+           parquet = read_parquet(path, col_select = all_of(columns)),
+           csv     = readr::read_csv(path, col_select = all_of(columns), show_col_types = FALSE),
+           fst     = fst::read_fst(path, columns = columns))
+  }
+  # the raw tables come from config$tables_path, which a PBWPFVC_SITE_NAME override
+  # alone does not change: if they hold none of these hospitalizations they are
+  # another site's tables, and the population would be silently wrong
+  site_hospitalizations <- read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
+    filter(hospitalization_id %in% both_cohorts$hospitalization_id)
+  if (nrow(site_hospitalizations) == 0)
+    stop("clif_hospitalization at ", config$tables_path, " holds none of this site's ", nrow(both_cohorts),
+         " cohort hospitalizations: config$tables_path points at another site's tables. ",
+         "Set PBWPFVC_TABLES_PATH (or config.json) to ", site_name, "'s CLIF tables.")
+  # a status counts only from this hospitalization's admission to CODE_STATUS_WINDOW_H
+  # after the index (the table is patient-level; orders are often written hours after
+  # ICU admission); the last one in that window is the status at the index. Keyed by
+  # cohort too: a hospitalization can hold a no-support index and a ventilated one.
+  status_at_index <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
+    inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
+    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, index_dttm),
+               by = "hospitalization_id", relationship = "many-to-many") %>%
+    filter(start_dttm >= admission_dttm, start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
+    group_by(cohort, hospitalization_id) %>% slice_max(start_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
+    transmute(cohort, hospitalization_id,
+              code_status_at_index = if_else(tolower(code_status_category) %in% FULL_CODE_CATEGORIES, "full code", "limited or other"))
+  both_cohorts <- both_cohorts %>% left_join(status_at_index, by = c("cohort", "hospitalization_id")) %>%
+    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"))
+  code_status_counts <- both_cohorts %>% group_by(cohort, code_status_at_index) %>%
+    summarise(n_patients = n(), n_deaths = sum(deceased == 1), .groups = "drop") %>%
+    mutate(in_eligible_population = cohort == "Ventilated" | code_status_at_index != "limited or other", site = site_name)
+  message("\nCode status at the index (last status up to ", CODE_STATUS_WINDOW_H,
+          " h after it); the intubation-eligible population drops only controls with a documented limitation:")
+  print(as.data.frame(code_status_counts), row.names = FALSE)
+} else {
+  message("\n*** No code_status table at ", config$tables_path, ": the intubation-eligible population is skipped. ***")
+  both_cohorts <- both_cohorts %>% mutate(code_status_at_index = "no record")
+  code_status_counts <- NULL
+}
+both_cohorts <- both_cohorts %>% mutate(intubation_eligible = cohort == "Ventilated" | code_status_at_index != "limited or other")
+ELIGIBLE_LABEL <- "intubation-eligible (every ventilated patient; controls without a documented limitation)"
+
+# =============================================================================
 # 1. The site's dosing rule, before the VT/PBW gate
 # =============================================================================
 pre_gate <- read_parquet(file.path(config$output_dir, "analysis_all_eligible_timepoints.parquet"),
@@ -269,9 +339,11 @@ print(as.data.frame(dosing %>% select(population, n_patients, slope_vt_on_pbw, s
 # =============================================================================
 # 2. The ventilation contrast
 # =============================================================================
-POPULATIONS <- c(everyone = "everyone", hypoxemic = "hypoxemic at the index (SF < 315)")
+POPULATIONS <- c(everyone = "everyone", hypoxemic = "hypoxemic at the index (SF < 315)",
+                 if (HAS_CODE_STATUS) c(eligible = ELIGIBLE_LABEL))
 population_data <- function(population, cohort_now) both_cohorts %>%
-  filter(cohort == cohort_now, if (population == "hypoxemic") hypoxemic else TRUE)
+  filter(cohort == cohort_now,
+         if (population == "hypoxemic") hypoxemic else if (population == "eligible") intubation_eligible else TRUE)
 EXPOSURES <- c(log_ratio = "log PBW/PFVC", log_pfvc = "log PFVC")
 DOSES <- c(no_dose = "no dose", fixed_vtpbw = "at fixed VT/PBW")
 contrast_grid <- expand_grid(population = names(POPULATIONS), outcome_key = names(OUTCOMES), exposure = names(EXPOSURES))
@@ -375,7 +447,7 @@ message("Placebo |z|: median ", signif(median(placebo_abs_z, na.rm = TRUE), 3), 
         signif(quantile(placebo_abs_z, 0.95, na.rm = TRUE), 3))
 
 # =============================================================================
-# 4. Flexible age, in everyone and in full-code patients
+# 4. Flexible age, in everyone and in the intubation-eligible population
 # =============================================================================
 # The GLI age piece gives age one shape (GLI's curve) and one coefficient; ventilation
 # could change age's mortality curve in another shape (flat, then steep in the
@@ -389,20 +461,13 @@ message("Placebo |z|: median ", signif(median(placebo_abs_z, na.rm = TRUE), 3), 
 # in-hospital death by age relative to age CURVE_REFERENCE_AGE, and their difference,
 # at the cohort's mean severity.
 #
-# Goals of care can reshape the control's age curve without any ventilator: an older
-# control patient under a do-not-intubate order dies unintubated, where a younger one
-# is intubated and leaves the control. The test and the curve are therefore repeated
-# in patients who are full code at the index (the last code status recorded up to
-# CODE_STATUS_WINDOW_H hours after it is Full or Presume Full), with the named
-# reference indices beside them. A difference that collapses among full-code patients
-# is do-not-intubate selection, not ventilation. Code status is an optional CLIF table
-# (clif_code_status, patient-level, mapped through clif_hospitalization, both read
-# from config$tables_path, as xsec_pfvc_age_control.R reads them); without it the
-# full-code population is skipped and announced.
+# Goals of care can reshape the control's age curve without any ventilator (the
+# section "Code status" above), so the test, the curve and the named reference
+# indices are repeated in the intubation-eligible population: every ventilated
+# patient, and the controls without a documented limitation. A difference that
+# collapses there is do-not-intubate selection, not ventilation.
 CURVE_AGES <- seq(30, 90, by = 5)
 CURVE_REFERENCE_AGE <- 60
-CODE_STATUS_WINDOW_H <- 24
-FULL_CODE_CATEGORIES <- c("full", "presume full")
 age_spline_terms <- paste0("age_spline_", 1:4)
 age_spline_data <- both_cohorts %>% bind_cols(as_tibble(input_matrix[, age_spline_terms]))
 # the spline's rows at each curve age, less its row at the reference age
@@ -440,57 +505,9 @@ flexible_age_for <- function(rows, population) {
   list(test = test_row, curve = curve)
 }
 
-# code status at the index, per patient and cohort
-code_status_file <- file.path(path.expand(config$tables_path), paste0("clif_code_status.", config$file_type))
-HAS_CODE_STATUS <- file.exists(code_status_file)
-if (HAS_CODE_STATUS) {
-  read_clif_table <- function(table_name, columns) {
-    path <- file.path(path.expand(config$tables_path), paste0("clif_", table_name, ".", config$file_type))
-    switch(config$file_type,
-           parquet = read_parquet(path, col_select = all_of(columns)),
-           csv     = readr::read_csv(path, col_select = all_of(columns), show_col_types = FALSE),
-           fst     = fst::read_fst(path, columns = columns))
-  }
-  # the raw tables come from config$tables_path, which a PBWPFVC_SITE_NAME override
-  # alone does not change: if they hold none of these hospitalizations they are
-  # another site's tables, and the full-code population would be silently empty
-  site_hospitalizations <- read_clif_table("hospitalization", c("patient_id", "hospitalization_id")) %>%
-    filter(hospitalization_id %in% both_cohorts$hospitalization_id)
-  if (nrow(site_hospitalizations) == 0)
-    stop("clif_hospitalization at ", config$tables_path, " holds none of this site's ", nrow(both_cohorts),
-         " cohort hospitalizations: config$tables_path points at another site's tables. ",
-         "Set PBWPFVC_TABLES_PATH (or config.json) to ", site_name, "'s CLIF tables.")
-  # a status counts only from this hospitalization's admission to CODE_STATUS_WINDOW_H
-  # after the index (the table is patient-level; orders are often written hours after
-  # ICU admission); the last one in that window is the status at the index. Keyed by
-  # cohort too: a hospitalization can hold a no-support index and a ventilated one.
-  status_at_index <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
-    inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
-    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, index_dttm),
-               by = "hospitalization_id", relationship = "many-to-many") %>%
-    filter(start_dttm >= admission_dttm, start_dttm <= index_dttm + CODE_STATUS_WINDOW_H * 3600) %>%
-    group_by(cohort, hospitalization_id) %>% slice_max(start_dttm, n = 1, with_ties = FALSE) %>% ungroup() %>%
-    transmute(cohort, hospitalization_id,
-              code_status_at_index = if_else(tolower(code_status_category) %in% FULL_CODE_CATEGORIES, "full code", "limited or other"))
-  both_cohorts <- both_cohorts %>% left_join(status_at_index, by = c("cohort", "hospitalization_id")) %>%
-    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"))
-  age_spline_data <- age_spline_data %>% left_join(status_at_index, by = c("cohort", "hospitalization_id")) %>%
-    mutate(code_status_at_index = coalesce(code_status_at_index, "no record"))
-  code_status_counts <- both_cohorts %>% count(cohort, code_status_at_index, name = "n_patients") %>%
-    left_join(both_cohorts %>% group_by(cohort, code_status_at_index) %>% summarise(n_deaths = sum(deceased == 1), .groups = "drop"),
-              by = c("cohort", "code_status_at_index")) %>% mutate(site = site_name)
-  message("\nCode status at the index (last status up to ", CODE_STATUS_WINDOW_H, " h after it):")
-  print(as.data.frame(code_status_counts), row.names = FALSE)
-} else {
-  message("\n*** No code_status table at ", config$tables_path, ": the full-code population is skipped. ***")
-  both_cohorts <- both_cohorts %>% mutate(code_status_at_index = "no record")
-  age_spline_data <- age_spline_data %>% mutate(code_status_at_index = "no record")
-  code_status_counts <- NULL
-}
-
-age_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(full_code = "full code at the index"))
+age_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(eligible = ELIGIBLE_LABEL))
 flexible_age <- imap(age_populations, function(label, key)
-  flexible_age_for(if (key == "full_code") age_spline_data$code_status_at_index == "full code" else rep(TRUE, nrow(age_spline_data)), label)) %>%
+  flexible_age_for(if (key == "eligible") age_spline_data$intubation_eligible else rep(TRUE, nrow(age_spline_data)), label)) %>%
   compact()
 age_tests <- map_dfr(flexible_age, "test") %>%
   mutate(percentile_abs_z_among_placebos = if_else(population == "everyone",
@@ -509,21 +526,20 @@ print(as.data.frame(age_curve %>% filter(quantity == DIFFERENCE) %>%
                       transmute(population, age, difference = signif(log_odds, 3), lo = signif(lo, 3), hi = signif(hi, 3)) %>%
                       pivot_wider(names_from = population, values_from = c(difference, lo, hi))), row.names = FALSE)
 
-# the named reference indices in full-code patients (no placebos: their cloud is
-# everyone's)
-full_code_references <- if (HAS_CODE_STATUS) {
-  full_code_rows <- both_cohorts$code_status_at_index == "full code"
-  imap_dfr(reference_indices, ~ index_contrast(.x, full_code_rows) %>% mutate(index = .y)) %>%
-    mutate(kind = "reference", population = "full code at the index",
+# the named reference indices in the intubation-eligible population (no placebos:
+# their cloud is everyone's)
+eligible_references <- if (HAS_CODE_STATUS) {
+  imap_dfr(reference_indices, ~ index_contrast(.x, both_cohorts$intubation_eligible) %>% mutate(index = .y)) %>%
+    mutate(kind = "reference", population = ELIGIBLE_LABEL,
            scale = "log OR of in-hospital death per SD of the index (SD over both cohorts, everyone); severity only")
 } else NULL
-if (!is.null(full_code_references)) {
-  message("\nReference indices in full-code patients (in-hospital, severity only, per SD of the index):")
-  print(as.data.frame(full_code_references %>% select(index, ventilated, control, difference, difference_se, z,
+if (!is.null(eligible_references)) {
+  message("\nReference indices in the intubation-eligible population (in-hospital, severity only, per SD of the index):")
+  print(as.data.frame(eligible_references %>% select(index, ventilated, control, difference, difference_se, z,
                                                       n_ventilated, deaths_ventilated, n_control, deaths_control) %>%
                         mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
 }
-placebo_results <- bind_rows(placebo_results, full_code_references, age_tests) %>%
+placebo_results <- bind_rows(placebo_results, eligible_references, age_tests) %>%
   mutate(ratio_projection_r2 = summary(ratio_projection)$r.squared, site = site_name) %>%
   relocate(kind, index, population)
 
