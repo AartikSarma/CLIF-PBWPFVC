@@ -39,8 +39,11 @@
 # patients later, so they bound the gate's total effect rather than isolate it.
 #
 # If the gate and the adjustment are harmless on this path, every design gives the
-# reference's slope. A slope that moves away from the reference, positive for the
-# ratio or negative for log PFVC, is the bias the gate adds. Every design's change
+# reference's slope. A slope that moves away from the reference is the bias the gate
+# adds: negative for log PFVC, and for the ratio positive unadjusted but NEGATIVE
+# adjusted. Across demographics a high ratio means a small lung (older, female,
+# shorter), but within sex, age and race the ratio rises with height (Devine's height
+# elasticity exceeds GLI's), so adjusted it tracks log PFVC. Every design's change
 # from the reference has a patient bootstrap interval: the designs share patients,
 # so their standard errors cannot be differenced. Only the VT/PBW gate is tested: every
 # design keeps the hypoxemia gate (SF < 315), which illness and lung size also move.
