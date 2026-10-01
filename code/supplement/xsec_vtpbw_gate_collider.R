@@ -1,6 +1,6 @@
 # =============================================================================
 # Supplement (cross-sectional): does the VT/PBW 6-8 gate make predicted lung size
-# look sicker than it is?
+# look sicker, or more lethal, than it is?
 # =============================================================================
 # Clinicians set VT/PBW, and two things push it. Illness pushes it down: SOFA is
 # highest at 6 mL/kg and falls to about 7.3. Predicted lung size pushes it up: the
@@ -55,6 +55,19 @@
 # it. If the non-respiratory rest carries it, the selection is general illness,
 # which the models' SOFA term absorbs.
 #
+# Mortality. The SOFA check shows the gate creates an association; whether it moves
+# the paper's result depends on how much of it survives severity adjustment. The same
+# six designs are fitted with in-hospital death (logistic, 04's outcome), once with no
+# severity term and once with 04's SOFA and SF ratio. With severity, adjusted, the
+# last design is 04's own model (VT/PBW + the size term). Read the change from the
+# reference with one asymmetry in mind. Unlike SOFA over the first 24 h, death can
+# follow from the dose itself, and in the reference (no VT/PBW term, any VT/PBW) a
+# small predicted lung also carries the higher VT/PBW that dosing habit gives it. The
+# gate and the VT/PBW term remove that harmful path, which moves the log PFVC
+# coefficient toward zero, while the collider moves it away from zero. A change away
+# from zero (more negative for log PFVC) is therefore a lower bound on the collider's
+# bias; a change toward zero or none cannot separate the two.
+#
 # Exposures: the PBW/PFVC ratio and log PFVC (04's primary size term), each per SD of
 # the ungated sample, so all designs share one scale (the SD is written beside the
 # estimate). Every model is fitted unadjusted and adjusted for ns(age10, 4), sex and
@@ -74,17 +87,24 @@
 #   vtpbw_gate_collider_estimates_{site}.csv  the size term's SOFA slope under each
 #                                             design, with its bootstrap change from
 #                                             the reference
-#   vtpbw_gate_collider_arms_{site}.csv       VT/PBW on the size term and SOFA
+#   vtpbw_gate_collider_mortality_{site}.csv  the same for in-hospital death (log-odds
+#                                             per SD), with and without severity, and
+#                                             the deaths in each design's sample
+#   vtpbw_gate_collider_arms_{site}.csv      VT/PBW on the size term and SOFA
 #                                             (both arms, and R-squared)
 #   vtpbw_gate_collider_bins_{site}.csv       at the ungated index, by 0.5 mL/kg
 #                                             VT/PBW bin [lower, upper): counts, how
 #                                             many are in the paper's cohort, and the
 #                                             mean and SD of the ratio, log PFVC and
-#                                             SOFA
+#                                             SOFA, and deaths
 #   vtpbw_gate_collider_gate_{site}.csv       the gate's counts: VT/PBW below, in and
 #                                             above the band at the ungated index, by
 #                                             membership of the paper's cohort
-#   vtpbw_gate_collider_{site}.pdf            the slopes by design
+#   vtpbw_gate_collider_{site}.pdf            the SOFA slopes by design
+#   vtpbw_gate_collider_mortality_{site}.pdf  the mortality coefficients by design
+#
+# Runtime: each bootstrap draw refits 120 models (48 of them logistic), so at a site
+# of 16,000 patients the 500 draws take on the order of 15-30 minutes.
 #
 # Needs scripts 01-03 (the ventilated cohort; 03 writes analysis_ungated_index).
 # Usage: uvr run code/supplement/xsec_vtpbw_gate_collider.R
@@ -109,10 +129,11 @@ prepare <- function(frame) {
            race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
            age10 = age_at_admission / 10,
            log_pfvc = log(pfvc),
-           sofa_nonresp = sofa_total - sofa_resp)
+           sofa_nonresp = sofa_total - sofa_resp,
+           sf10 = sf_ratio / 10)
 }
 FRAME_COLUMNS <- c("hospitalization_id", "vtpbw", "pbwpfvc", "pfvc", "age_at_admission", "sex_category",
-                   "race_category", "sofa_total", "sofa_resp")
+                   "race_category", "sofa_total", "sofa_resp", "sf_ratio", "deceased")
 ungated <- read_parquet(file.path(output_dir, "analysis_ungated_index.parquet")) %>%
   select(all_of(FRAME_COLUMNS), in_paper_cohort) %>%
   prepare() %>%
@@ -126,6 +147,28 @@ if (!all(paper$hospitalization_id %in% ungated$hospitalization_id))
 message("=== xsec_vtpbw_gate_collider: ", site_name, ", ", nrow(ungated), " patients at the ungated index, ",
         sum(ungated$index_in_band), " with VT/PBW ", VTPBW_BAND[1], "-", VTPBW_BAND[2], " there; ",
         nrow(paper), " in the paper's cohort")
+
+# Synthetic CLIF's mortality is unreliable (2 deaths in the synthetic cohort). At a
+# synthetic site only, death is drawn at 35%, independently of every exposure, one
+# draw per patient shared by both frames, as 10_panel_common.R does for survival: it
+# tests the plumbing and has no effect to find. It never runs at a real site.
+if (grepl("^synthetic_clif", site_name)) {
+  message("*** SYNTHETIC SITE: simulated in-hospital death (plumbing only; synthetic CLIF mortality is unreliable). ***")
+  set.seed(20261001)
+  simulated_death <- setNames(rbinom(nrow(ungated), 1L, 0.35), ungated$hospitalization_id)
+  ungated$deceased <- unname(simulated_death[ungated$hospitalization_id])
+  paper$deceased   <- unname(simulated_death[paper$hospitalization_id])
+  set.seed(20260930)
+}
+# The mortality models need deaths and survivors enough to estimate them in every
+# design's sample; below 04's minimum (10) they are not fitted, as in 04.
+MIN_MORTALITY_EVENTS <- 10
+smallest_mortality_cell <- min(sapply(list(ungated, filter(ungated, index_in_band), paper),
+                                      function(frame) min(sum(frame$deceased == 1), sum(frame$deceased == 0))))
+fit_mortality <- smallest_mortality_cell >= MIN_MORTALITY_EVENTS
+if (!fit_mortality)
+  message("Skipping the mortality models: one design's sample has only ", smallest_mortality_cell,
+          " deaths or survivors, fewer than ", MIN_MORTALITY_EVENTS)
 
 EXPOSURES <- c("PBW/PFVC" = "pbwpfvc", "log PFVC" = "log_pfvc")
 OUTCOMES  <- c("SOFA" = "sofa_total", "Respiratory SOFA" = "sofa_resp", "Non-respiratory SOFA" = "sofa_nonresp")
@@ -148,48 +191,71 @@ DESIGNS <- tribble(
   "index 6-8 + VT/PBW",     "index_in_band",  "+ vtpbw",
   "paper cohort",           "paper",          "",
   "paper cohort + VT/PBW",  "paper",          "+ vtpbw")
-MODELS <- expand_grid(DESIGNS, exposure = names(EXPOSURES), outcome = names(OUTCOMES),
-                      adjustment = names(ADJUSTMENTS)) %>%
+# SOFA outcomes: linear, no severity term (SOFA is the outcome). In-hospital death:
+# logistic, with and without 04's severity terms (SOFA and SF ratio), so the table
+# shows the gate's bias before severity adjustment and what is left after it. With
+# severity, adjusted, the "paper cohort + VT/PBW" design is 04's own mortality model
+# for VT/PBW + the size term.
+SEVERITIES <- c(none = "", "SOFA + SF" = "+ sofa_total + sf10")
+MODELS <- bind_rows(
+  expand_grid(DESIGNS, exposure = names(EXPOSURES), outcome = names(OUTCOMES), severity = "none",
+              adjustment = names(ADJUSTMENTS)) %>%
+    mutate(response = OUTCOMES[outcome], family = "gaussian"),
+  if (fit_mortality)
+    expand_grid(DESIGNS, exposure = names(EXPOSURES), outcome = "In-hospital death", severity = names(SEVERITIES),
+                adjustment = names(ADJUSTMENTS)) %>%
+      mutate(response = "deceased", family = "binomial")) %>%
   mutate(size_term = paste0(EXPOSURES[exposure], "_sd"),
-         formula = paste(OUTCOMES[outcome], "~", size_term, vtpbw_term, ADJUSTMENTS[adjustment]))
+         formula = paste(response, "~", size_term, vtpbw_term, SEVERITIES[severity], ADJUSTMENTS[adjustment]))
+MODEL_KEY <- c("exposure", "outcome", "severity", "adjustment")
 
-# the size term's slope in every model, for one set of patients (a bootstrap draw
-# repeats a patient in both frames)
+# the size term's coefficient in every model, for one set of patients (a bootstrap
+# draw repeats a patient in both frames); SOFA points or log-odds of death per SD
 fit_all <- function(patient_ids) {
   ungated_rows <- ungated[match(patient_ids, ungated$hospitalization_id), ]
   paper_rows   <- paper[na.omit(match(patient_ids, paper$hospitalization_id)), ]
   samples <- list(ungated = ungated_rows, index_in_band = filter(ungated_rows, index_in_band), paper = paper_rows)
-  pmap_dfr(MODELS, function(keep, formula, size_term, ...) {
-    coefficients <- summary(lm(as.formula(formula), data = samples[[keep]]))$coefficients
+  pmap_dfr(MODELS, function(keep, formula, size_term, family, ...) {
+    model <- if (family == "binomial") glm(as.formula(formula), data = samples[[keep]], family = binomial)
+             else lm(as.formula(formula), data = samples[[keep]])
+    if (family == "binomial" && !model$converged) stop("Did not converge: ", formula, " (", keep, ")")
+    coefficients <- summary(model)$coefficients
     tibble(estimate = coefficients[size_term, 1], se = coefficients[size_term, 2], n = nrow(samples[[keep]]))
-  }) %>% bind_cols(MODELS %>% select(design, exposure, outcome, adjustment), .)
+  }) %>% bind_cols(MODELS %>% select(design, all_of(MODEL_KEY)), .)
 }
 estimates <- fit_all(ungated$hospitalization_id)
 
 # --- each design's change from the reference, by patient bootstrap
 change_from_reference <- function(fits) {
   fits %>%
-    group_by(exposure, outcome, adjustment) %>%
+    group_by(across(all_of(MODEL_KEY))) %>%
     mutate(change = estimate - estimate[design == "none"]) %>%
     ungroup() %>%
-    select(design, exposure, outcome, adjustment, change)
+    select(design, all_of(MODEL_KEY), change)
 }
-message("Bootstrap: ", BOOTSTRAP_REPS, " resamples of ", nrow(ungated), " patients")
+message("Bootstrap: ", BOOTSTRAP_REPS, " resamples of ", nrow(ungated), " patients, ", nrow(MODELS), " models each")
 bootstrap_changes <- map_dfr(seq_len(BOOTSTRAP_REPS), function(rep) {
   change_from_reference(fit_all(sample(ungated$hospitalization_id, replace = TRUE))) %>% mutate(rep = rep)
 })
 change_summary <- bootstrap_changes %>%
-  group_by(design, exposure, outcome, adjustment) %>%
+  group_by(design, across(all_of(MODEL_KEY))) %>%
   summarise(change_se = sd(change), change_lo = quantile(change, 0.025), change_hi = quantile(change, 0.975),
             .groups = "drop")
 estimates <- estimates %>%
-  left_join(change_from_reference(estimates), by = c("design", "exposure", "outcome", "adjustment")) %>%
-  left_join(change_summary, by = c("design", "exposure", "outcome", "adjustment")) %>%
+  left_join(change_from_reference(estimates), by = c("design", MODEL_KEY)) %>%
+  left_join(change_summary, by = c("design", MODEL_KEY)) %>%
   mutate(across(starts_with("change"), ~ if_else(design == "none", NA_real_, .x)),
          exposure_sd = exposure_sd[exposure], site = site_name, .before = 1) %>%
   mutate(design = factor(design, levels = DESIGNS$design)) %>%
-  arrange(exposure, outcome, adjustment, design)
-write_csv(estimates, file.path(final_dir, paste0("vtpbw_gate_collider_estimates_", site_name, ".csv")))
+  arrange(exposure, outcome, severity, adjustment, design)
+sofa_estimates      <- estimates %>% filter(outcome != "In-hospital death") %>% select(-severity)
+deaths_by_sample <- c(ungated = sum(ungated$deceased), index_in_band = sum(ungated$deceased[ungated$index_in_band]),
+                      paper = sum(paper$deceased))
+mortality_estimates <- estimates %>% filter(outcome == "In-hospital death") %>%
+  mutate(deaths = unname(deaths_by_sample[DESIGNS$keep[match(design, DESIGNS$design)]]), .after = n)
+write_csv(sofa_estimates, file.path(final_dir, paste0("vtpbw_gate_collider_estimates_", site_name, ".csv")))
+if (fit_mortality)
+  write_csv(mortality_estimates, file.path(final_dir, paste0("vtpbw_gate_collider_mortality_", site_name, ".csv")))
 
 # --- the collider's two arms, in every patient: VT/PBW on the size term and on SOFA
 arms <- expand_grid(exposure = names(EXPOSURES), outcome = names(OUTCOMES), adjustment = names(ADJUSTMENTS)) %>%
@@ -216,6 +282,7 @@ bins <- ungated %>%
   summarise(n = n(), n_paper_cohort = sum(in_paper_cohort),
             across(c(pbwpfvc, log_pfvc, sofa_total, sofa_resp, sofa_nonresp),
                    list(mean = mean, sd = sd), .names = "{.col}_{.fn}"),
+            deaths = sum(deceased),
             .groups = "drop") %>%
   mutate(vtpbw_bin_upper = vtpbw_bin_lower + VTPBW_BIN_WIDTH, .after = vtpbw_bin_lower) %>%
   mutate(site = site_name, .before = 1)
@@ -229,22 +296,33 @@ gate <- ungated %>%
   mutate(site = site_name, .before = 1)
 write_csv(gate, file.path(final_dir, paste0("vtpbw_gate_collider_gate_", site_name, ".csv")))
 
-# --- figure: the size term's SOFA slope under each design
+# --- figures: the size term's coefficient under each design, SOFA and death
 ADJUSTMENT_COLOURS <- c(unadjusted = "#E69F00", adjusted = "#0072B2")    # Okabe-Ito
-collider_plot <- estimates %>%
-  mutate(design = fct_rev(design)) %>%
-  ggplot(aes(estimate, design, colour = adjustment)) +
-  geom_vline(data = estimates %>% filter(design == "none"),
-             aes(xintercept = estimate, colour = adjustment), linetype = "dashed", linewidth = 0.3) +
-  geom_pointrange(aes(xmin = estimate - 1.96 * se, xmax = estimate + 1.96 * se),
-                  position = position_dodge(width = 0.5), size = 0.25) +
-  facet_grid(exposure ~ outcome, scales = "free_x") +
-  scale_colour_manual(values = ADJUSTMENT_COLOURS, name = NULL) +
-  labs(x = "SOFA points per SD of the size term (dashed: every patient, no VT/PBW term)", y = NULL,
-       title = paste0("Does the VT/PBW gate bend the size-SOFA association? (", site_name, ")")) +
-  theme_minimal(base_size = 9) + theme(legend.position = "bottom")
-ggsave(file.path(final_dir, paste0("vtpbw_gate_collider_", site_name, ".pdf")), collider_plot, width = 9, height = 5)
+design_plot <- function(fits, column_facet, x_label, title) {
+  fits %>%
+    mutate(design = fct_rev(design)) %>%
+    ggplot(aes(estimate, design, colour = adjustment)) +
+    geom_vline(data = fits %>% filter(design == "none"),
+               aes(xintercept = estimate, colour = adjustment), linetype = "dashed", linewidth = 0.3) +
+    geom_pointrange(aes(xmin = estimate - 1.96 * se, xmax = estimate + 1.96 * se),
+                    position = position_dodge(width = 0.5), size = 0.25) +
+    facet_grid(rows = vars(exposure), cols = vars({{ column_facet }}), scales = "free_x") +
+    scale_colour_manual(values = ADJUSTMENT_COLOURS, name = NULL) +
+    labs(x = x_label, y = NULL, title = title) +
+    theme_minimal(base_size = 9) + theme(legend.position = "bottom")
+}
+ggsave(file.path(final_dir, paste0("vtpbw_gate_collider_", site_name, ".pdf")),
+       design_plot(sofa_estimates, outcome,
+                   "SOFA points per SD of the size term (dashed: every patient, no VT/PBW term)",
+                   paste0("Does the VT/PBW gate bend the size-SOFA association? (", site_name, ")")),
+       width = 9, height = 5)
+if (fit_mortality)
+  ggsave(file.path(final_dir, paste0("vtpbw_gate_collider_mortality_", site_name, ".pdf")),
+       design_plot(mortality_estimates %>% mutate(severity = paste("severity:", severity)), severity,
+                   "Log-odds of in-hospital death per SD of the size term (dashed: every patient, no VT/PBW term)",
+                   paste0("Does the VT/PBW gate bend the size-mortality association? (", site_name, ")")),
+       width = 8, height = 5)
 
 message("Wrote vtpbw_gate_collider_* to ", final_dir)
-print(estimates %>% filter(outcome == "SOFA") %>%
-        select(exposure, adjustment, design, estimate, change, change_lo, change_hi, n), n = Inf)
+print(estimates %>% filter(outcome %in% c("SOFA", "In-hospital death")) %>%
+        select(exposure, outcome, severity, adjustment, design, estimate, change, change_lo, change_hi, n), n = Inf)

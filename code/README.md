@@ -97,8 +97,8 @@ to change; that stops once sites have returned `final/` folders.
   illness, so selecting on it or adjusting for it can link the two. On an index chosen
   without the gate (03's `analysis_ungated_index`), it compares the size term's SOFA
   slope with and without the gate and the VT/PBW term, with bootstrap intervals for
-  the change, split into respiratory and other SOFA. It uses no outcome model. Not in
-  the runner.
+  the change, split into respiratory and other SOFA, and then asks the same of
+  in-hospital death, with and without 04's severity terms. Not in the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises

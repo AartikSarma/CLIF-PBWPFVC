@@ -1004,7 +1004,7 @@ if (config$cohort == "imv") {
     index_tiers() %>%
     bind_rows() %>%
     select(hospitalization_id, patient_id, recorded_dttm, vtpbw, vtpfvc, pbw, pfvc, pbwpfvc,
-           height_cm, age_at_admission, sex_category, race_category, sf_ratio, dp) %>%
+           height_cm, age_at_admission, sex_category, race_category, sf_ratio, dp, deceased) %>%
     mutate(in_paper_cohort = hospitalization_id %in% eligible_patients)
   ungated_index <- ungated_index %>% left_join(score_sofa(ungated_index), by = "hospitalization_id")
   if (any(is.na(ungated_index$sofa_total)))
