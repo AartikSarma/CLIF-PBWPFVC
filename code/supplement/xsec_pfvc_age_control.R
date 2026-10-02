@@ -70,6 +70,13 @@
 # model that warns (non-convergence, separation) stops the script: no model is
 # silently replaced by a simpler one.
 #
+# Ungated (PBWPFVC_VTPBW_GATE=0): the ventilated arm comes from script 03's
+# analysis_cross_sectional_ungated, the cohort without the VT/PBW 6-8 gate, and every
+# table goes to final/ungated/supplement/ under the same name.
+# PBWPFVC_DID_VTPBW=0 drops VT/PBW from the ventilated arm's models (tables in a
+# novtpbw/ subfolder): VT/PBW is a collider of predicted size and illness
+# (supplement/xsec_vtpbw_gate_collider.R).
+#
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03, ventilated)
 #          intermediate/controls/nosupport/analysis_cross_sectional.parquet
 #          (script 03 run with PBWPFVC_COHORT=nosupport)
@@ -136,6 +143,12 @@ source("utils/config.R")
 if (config$cohort != "imv") stop("xsec_pfvc_age_control.R reads both cohorts itself: unset PBWPFVC_COHORT")
 site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
+# PBWPFVC_DID_VTPBW=0 drops VT/PBW from the ventilated arm's models. VT/PBW rises with
+# predicted size and falls with illness, so holding it fixed links the two
+# (supplement/xsec_vtpbw_gate_collider.R). Its tables keep their names in a novtpbw/
+# subfolder, which the pooling (non-recursive) never reads beside the main tables.
+VENT_VTPBW <- identical(Sys.getenv("PBWPFVC_DID_VTPBW", "1"), "1")
+if (!VENT_VTPBW) { final_dir <- file.path(final_dir, "novtpbw"); dir.create(final_dir, showWarnings = FALSE) }
 source(here::here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, channels_equal_p()
 
 AGE_CURVE_GRID <- seq(20, 90, by = 10)
@@ -158,15 +171,23 @@ control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
 # the ventilated arm: patients on invasive ventilation at ICU admission (icu_day0)
-ventilated_cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
-  select(all_of(cohort_columns), vtpbw, icu_day0)
+# the ungated cohort's table with PBWPFVC_VTPBW_GATE=0 (utils/config.R, script 03)
+ventilated_cohort <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
+  select(all_of(cohort_columns), vtpbw, icu_day0, patient_id)
 ventilated <- ventilated_cohort %>% filter(icu_day0) %>% select(-icu_day0) %>%
   mutate(cohort = "Ventilated", escalation_dttm = as.POSIXct(NA))
 message("Ventilated arm: ", nrow(ventilated), " of ", nrow(ventilated_cohort),
         " ventilated-cohort patients on invasive ventilation at ICU admission (icu_day0)")
 no_support <- read_parquet(control_file) %>%
-  select(all_of(cohort_columns), escalation_dttm) %>%
+  select(all_of(cohort_columns), escalation_dttm, patient_id) %>%
   mutate(cohort = "No support", vtpbw = NA_real_)
+# No patient in both arms. Script 03 removed the gated ventilated arm's patients from the
+# control; the ungated arm (PBWPFVC_VTPBW_GATE=0) is larger, so the same rule (by
+# patient_id, any hospitalization) is applied again here. On the gated arm it drops no one.
+shared_patients <- intersect(no_support$patient_id, ventilated$patient_id)
+message("Controls also in the ventilated arm, dropped: ", length(shared_patients))
+no_support <- no_support %>% filter(!patient_id %in% shared_patients) %>% select(-patient_id)
+ventilated <- ventilated %>% select(-patient_id)
 # The control's first invasive ventilation after the index, from its own respiratory
 # support table: escalation_dttm (script 03) is the first advanced support of any
 # kind, and only invasive ventilation delivers a PBW-scaled tidal volume. A patient
@@ -409,7 +430,7 @@ separated <- function(fit) inherits(fit, "separation")
 ADJUSTMENTS <- c(adjusted = "sex_category + race_category", unadjusted = NA_character_)
 fit_cohort <- function(cohort_data, adjustment) {
   is_ventilated <- cohort_data$cohort[1] == "Ventilated"
-  rhs <- c(if (is_ventilated) "vtpbw", "sf_z", "sofa_z", "ns(age_at_admission, 4)",
+  rhs <- c(if (is_ventilated && VENT_VTPBW) "vtpbw", "sf_z", "sofa_z", "ns(age_at_admission, 4)",
            if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]])
   without_pfvc_fit <- fit_strict(glm(as.formula(paste("deceased ~", paste(rhs, collapse = " + "))),
                                      family = binomial, data = cohort_data))
@@ -518,7 +539,7 @@ fit_pfvc <- function(cohort_data, outcome_key, model, adjustment, severity) {
     return(tibble(term = "pfvc", log_ratio = NA_real_, se = NA_real_, n_patients = 0L,
                   n_deaths = 0L, note = "skipped: no patients in this population"))
   is_ventilated <- cohort_data$cohort[1] == "Ventilated"
-  rhs <- paste(c(if (is_ventilated) "vtpbw", severity_rhs[[severity]], "ns(age_at_admission, 4)",
+  rhs <- paste(c(if (is_ventilated && VENT_VTPBW) "vtpbw", severity_rhs[[severity]], "ns(age_at_admission, 4)",
                  if (!is.na(ADJUSTMENTS[[adjustment]])) ADJUSTMENTS[[adjustment]], "log_pfvc_z"), collapse = " + ")
   dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
   events <- sum(dat$event == 1)
@@ -785,7 +806,7 @@ fit_channels <- function(frame, population, cohort_now, outcome_key, model) {
   cohort_data <- frame %>% filter(cohort == cohort_now, .data[[paste0("population_", population)]])
   dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
   if (sum(dat$event == 1) < MIN_EVENTS) return(NULL)
-  base_terms <- c(if (cohort_now == "Ventilated") "vtpbw", "sf_z", "sofa_z")
+  base_terms <- c(if (cohort_now == "Ventilated" && VENT_VTPBW) "vtpbw", "sf_z", "sofa_z")
   fit_one <- function(terms) {
     rhs <- paste(c(terms, base_terms), collapse = " + ")
     if (model == "logistic") fit_strict(glm(as.formula(paste("deceased ~", rhs)), family = binomial, data = dat)) else

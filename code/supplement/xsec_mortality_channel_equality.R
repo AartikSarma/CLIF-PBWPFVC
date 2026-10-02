@@ -57,6 +57,13 @@
 #     the output row, and a model with fewer than MIN_EVENTS deaths is skipped with a note.
 #     No model is replaced by a simpler one.
 #
+# Ungated (PBWPFVC_VTPBW_GATE=0): the ventilated arm comes from script 03's
+# analysis_cross_sectional_ungated, the cohort without the VT/PBW 6-8 gate, and every
+# table goes to final/ungated/supplement/ under the same name.
+# PBWPFVC_DID_VTPBW=0 drops VT/PBW from the ventilated arm's models (tables in a
+# novtpbw/ subfolder): VT/PBW is a collider of predicted size and illness
+# (supplement/xsec_vtpbw_gate_collider.R).
+#
 # Inputs : intermediate/analysis_cross_sectional.parquet (script 03, ventilated)
 #          intermediate/controls/nosupport/analysis_cross_sectional.parquet
 #          intermediate/controls/nosupport/resp_support_waterfall_clean.parquet
@@ -89,6 +96,12 @@ source("utils/config.R")
 if (config$cohort != "imv") stop("xsec_mortality_channel_equality.R reads both cohorts itself: unset PBWPFVC_COHORT")
 site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
+# PBWPFVC_DID_VTPBW=0 drops VT/PBW from the ventilated arm's models. VT/PBW rises with
+# predicted size and falls with illness, so holding it fixed links the two
+# (supplement/xsec_vtpbw_gate_collider.R). Its tables keep their names in a novtpbw/
+# subfolder, which the pooling (non-recursive) never reads beside the main tables.
+VENT_VTPBW <- identical(Sys.getenv("PBWPFVC_DID_VTPBW", "1"), "1")
+if (!VENT_VTPBW) { final_dir <- file.path(final_dir, "novtpbw"); dir.create(final_dir, showWarnings = FALSE) }
 source(here::here("code", "20_biotrauma_grid.R"))   # pfvc_channels()
 
 MIN_EVENTS <- 10L               # minimum deaths per model: the CLIF minimum-count standard
@@ -106,15 +119,23 @@ control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
 # the ventilated arm: patients on invasive ventilation at ICU admission (icu_day0)
-ventilated_cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
-  select(all_of(cohort_columns), vtpbw, icu_day0)
+# the ungated cohort's table with PBWPFVC_VTPBW_GATE=0 (utils/config.R, script 03)
+ventilated_cohort <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
+  select(all_of(cohort_columns), vtpbw, icu_day0, patient_id)
 ventilated <- ventilated_cohort %>% filter(icu_day0) %>% select(-icu_day0) %>%
   mutate(cohort = "Ventilated", escalation_dttm = as.POSIXct(NA))
 message("Ventilated arm: ", nrow(ventilated), " of ", nrow(ventilated_cohort),
         " ventilated-cohort patients on invasive ventilation at ICU admission (icu_day0)")
 no_support <- read_parquet(control_file) %>%
-  select(all_of(cohort_columns), escalation_dttm) %>%
+  select(all_of(cohort_columns), escalation_dttm, patient_id) %>%
   mutate(cohort = "No support", vtpbw = NA_real_)
+# No patient in both arms. Script 03 removed the gated ventilated arm's patients from the
+# control; the ungated arm (PBWPFVC_VTPBW_GATE=0) is larger, so the same rule (by
+# patient_id, any hospitalization) is applied again here. On the gated arm it drops no one.
+shared_patients <- intersect(no_support$patient_id, ventilated$patient_id)
+message("Controls also in the ventilated arm, dropped: ", length(shared_patients))
+no_support <- no_support %>% filter(!patient_id %in% shared_patients) %>% select(-patient_id)
+ventilated <- ventilated %>% select(-patient_id)
 # the control's first invasive ventilation after the index (device "imv" or a set
 # tidal volume, as 03's escalation rule): only invasive ventilation delivers a
 # PBW-scaled tidal volume
@@ -259,7 +280,7 @@ fit_cohort <- function(cohort_now, outcome_key, model) {
   events <- sum(dat$event == 1)
   row_head <- tibble(cohort = cohort_now, outcome_key = outcome_key, n_patients = nrow(dat), n_deaths = events)
   if (events < MIN_EVENTS) return(list(head = row_head, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
-  base_rhs <- c(if (cohort_now == "Ventilated") "vtpbw", "sf_z", "sofa_z", "ns(age_at_admission, 4)")
+  base_rhs <- c(if (cohort_now == "Ventilated" && VENT_VTPBW) "vtpbw", "sf_z", "sofa_z", "ns(age_at_admission, 4)")
   fit_one <- function(terms) {
     rhs <- paste(c(base_rhs, terms), collapse = " + ")
     fit_or_separation(if (model == "logistic")

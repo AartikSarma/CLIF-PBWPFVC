@@ -80,6 +80,10 @@
 # synthetic seed): the ventilated arm on IMV at ICU admission (icu_day0), gated at
 # VT/PBW 6-8 and SF < 315 by script 03, and the no-support control.
 #
+# Ungated (PBWPFVC_VTPBW_GATE=0): the ventilated arm comes from script 03's
+# analysis_cross_sectional_ungated, the cohort without the VT/PBW 6-8 gate, and every
+# table goes to final/ungated/supplement/ under the same name.
+#
 # Inputs : intermediate/analysis_cross_sectional.parquet, analysis_all_eligible_timepoints.parquet
 #          (script 03, ventilated), intermediate/controls/nosupport/analysis_cross_sectional.parquet
 #          and resp_support_waterfall_clean.parquet (scripts 01-03, PBWPFVC_COHORT=nosupport)
@@ -134,15 +138,23 @@ control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_
 if (!file.exists(control_file))
   stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
 # the ventilated arm: patients on invasive ventilation at ICU admission (icu_day0)
-ventilated_cohort <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
-  select(all_of(cohort_columns), vtpbw, icu_day0)
+# the ungated cohort's table with PBWPFVC_VTPBW_GATE=0 (utils/config.R, script 03)
+ventilated_cohort <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
+  select(all_of(cohort_columns), vtpbw, icu_day0, patient_id)
 ventilated <- ventilated_cohort %>% filter(icu_day0) %>% select(-icu_day0) %>%
   mutate(cohort = "Ventilated", escalation_dttm = as.POSIXct(NA))
 message("Ventilated arm: ", nrow(ventilated), " of ", nrow(ventilated_cohort),
         " ventilated-cohort patients on invasive ventilation at ICU admission (icu_day0)")
 no_support <- read_parquet(control_file) %>%
-  select(all_of(cohort_columns), escalation_dttm) %>%
+  select(all_of(cohort_columns), escalation_dttm, patient_id) %>%
   mutate(cohort = "No support", vtpbw = NA_real_)
+# No patient in both arms. Script 03 removed the gated ventilated arm's patients from the
+# control; the ungated arm (PBWPFVC_VTPBW_GATE=0) is larger, so the same rule (by
+# patient_id, any hospitalization) is applied again here. On the gated arm it drops no one.
+shared_patients <- intersect(no_support$patient_id, ventilated$patient_id)
+message("Controls also in the ventilated arm, dropped: ", length(shared_patients))
+no_support <- no_support %>% filter(!patient_id %in% shared_patients) %>% select(-patient_id)
+ventilated <- ventilated %>% select(-patient_id)
 # the control's first invasive ventilation after the index (device "imv" or a set
 # tidal volume, as 03's escalation rule)
 control_imv <- read_parquet(file.path(config$output_dir, "controls", "nosupport", "resp_support_waterfall_clean.parquet"),
