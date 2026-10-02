@@ -52,8 +52,10 @@
 # component carries the association, the selection is titration to oxygenation or
 # mechanics, which predicted lung size itself moves (a small lung has a higher
 # driving pressure at a given VT/PBW), and adjusting for severity will not remove
-# it. If the non-respiratory rest carries it, the selection is general illness,
-# which the models' SOFA term absorbs.
+# it. If the non-respiratory rest carries it, the selection is general illness, which
+# the models' SOFA term absorbs only as far as SOFA measures that illness. The
+# mortality section tests how far that is: at MIMIC the gate's bias on death was the
+# same with and without SOFA and SF in the model.
 #
 # Mortality. The SOFA check shows the gate creates an association; whether it moves
 # the paper's result depends on how much of it survives severity adjustment. The same
