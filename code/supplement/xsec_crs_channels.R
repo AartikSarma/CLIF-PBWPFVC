@@ -53,6 +53,9 @@
 # 4. The figure's model on the log scale: log Crs on log PFVC with ns(age, 4), sex and
 #    race, the height-identified exponent.
 #
+# 5. Placebo formulas: log Crs on GLI's indices, on PBW and on 500 random weightings
+#    of the same inputs, beside the best weighting the inputs allow (section 5 below).
+#
 # Covariates in every model: log SF, SOFA, PEEP (compliance depends on the volume
 # PEEP holds), BMI (Crs includes the chest wall; BMI enters because the outcome is
 # a pressure-derived measure). Sample: the plateau-measured index timepoint
@@ -68,6 +71,9 @@
 #                                       the specific-elastance rows carry their own
 #                                       null (0) and the spread of log(Ers x size)
 #   crs_channels_tests_{site}.csv       Wald tests of the channels, AIC head-to-head
+#   crs_channels_placebo_{site}.csv     section 5: GLI's indices, PBW, PFVC at 25, the
+#                                       oracle and 500 placebo formulas, each by
+#                                       partial R2 for log Crs
 #   crs_channels_{site}.pdf             channel exponents, head-to-head, height
 #                                       elasticity by sex
 # Usage: uvr run code/supplement/xsec_crs_channels.R
@@ -249,6 +255,75 @@ message("\nTests:")
 print(as.data.frame(tests %>% mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 write_csv(estimates, file.path(final_dir, paste0("crs_channels_estimates_", site_name, ".csv")))
 write_csv(tests, file.path(final_dir, paste0("crs_channels_tests_", site_name, ".csv")))
+
+# =============================================================================
+# 5. Placebo formulas: does GLI's weighting of the inputs predict compliance better
+#    than other weightings of the same inputs?
+# =============================================================================
+# log Crs on one index plus COVARIATES (no demographics: they would absorb every
+# index), for GLI's indices, for PBW and PFVC at age 25, for PLACEBO_N random
+# weightings of the same inputs (placebo_formulas(), 20_biotrauma_grid.R), and for
+# the best weighting the inputs allow: the oracle index, the inputs' fitted
+# contribution in log Crs ~ inputs + COVARIATES, fitted on these same patients (so
+# slightly flattered). Each index is per SD; read by its partial R2 for log Crs:
+#   share of the oracle   the index's partial R2 over the oracle's: how much of the
+#                         compliance the inputs can explain this weighting captures
+#   percentile            its |z| among the placebos
+#   residual              its z minus the z the placebos' age and height loadings
+#                         predict: whether GLI's weighting does better than random
+#                         weightings with the same age and height content, i.e.
+#                         whether its sex and race terms (and the shape of its age
+#                         and height terms) earn their place
+# Stated before the data: compliance scales with lung size, so GLI log PFVC should
+# sit in the top of the cloud, near the oracle, above log PBW (the head-to-head of
+# section 2), and above the placebos with its loadings.
+PLACEBO_N <- 500
+placebo_inputs <- function(d) {
+  m <- cbind(ns(d$age10, df = 4), female = as.numeric(d$sex_category == "Female"),
+             black = as.numeric(d$race_category == "BLACK"), other = as.numeric(d$race_category == "OTHER"),
+             log_height = log(d$height_cm))
+  colnames(m)[1:4] <- paste0("age_spline_", 1:4)
+  m
+}
+standardise <- function(x) (x - mean(x)) / sd(x)
+oracle_inputs <- placebo_inputs(mechanics_all)
+oracle_fit <- fit_strict(lm(as.formula(paste("log_crs ~ oracle_inputs +", COVARIATES)), data = mechanics_all))
+oracle_index <- standardise(as.vector(oracle_inputs %*% coef(oracle_fit)[paste0("oracle_inputs", colnames(oracle_inputs))]))
+crs_indices <- cbind(placebo_references(mechanics_all),
+                     `log PBW (Devine)` = standardise(mechanics_all$log_pbw),
+                     `log PFVC at age 25` = standardise(mechanics_all$log_pfvc25),
+                     `oracle (best weighting of the inputs)` = oracle_index,
+                     placebo_formulas(mechanics_all, PLACEBO_N)$indices(mechanics_all))
+crs_placebo <- map_dfr(colnames(crs_indices), function(index_name) {
+  index_value <- crs_indices[, index_name]
+  fit <- fit_strict(lm(as.formula(paste("log_crs ~ index_value +", COVARIATES)), data = mechanics_all))
+  b <- coef(summary(fit))["index_value", ]
+  tibble(index = index_name, estimate = b[["Estimate"]], se = b[["Std. Error"]], z = b[["t value"]],
+         partial_r2 = b[["t value"]]^2 / (b[["t value"]]^2 + df.residual(fit)),
+         cor_age = cor(index_value, mechanics_all$age10), cor_log_height = cor(index_value, mechanics_all$log_height),
+         n_patients = nobs(fit))
+}) %>%
+  mutate(kind = case_when(grepl("^placebo_", index) ~ "placebo", grepl("^oracle", index) ~ "oracle", TRUE ~ "reference"),
+         share_of_oracle = partial_r2 / partial_r2[kind == "oracle"])
+loading_fit <- lm(z ~ cor_age + cor_log_height, data = crs_placebo %>% filter(kind == "placebo"))
+crs_placebo <- crs_placebo %>%
+  mutate(z_predicted_by_loadings = predict(loading_fit, crs_placebo),
+         residual = z - z_predicted_by_loadings,
+         residual_sd_among_placebos = sigma(loading_fit),
+         loadings_r2_among_placebos = summary(loading_fit)$r.squared,
+         abs_z_percentile = if_else(kind != "placebo", map_dbl(abs(z), ~ mean(abs(z[kind == "placebo"]) < .x)), NA_real_),
+         site = site_name, .before = 1)
+write_csv(crs_placebo, file.path(final_dir, paste0("crs_channels_placebo_", site_name, ".csv")))
+message("\nPlacebo formulas for log Crs (", PLACEBO_N, " placebos; partial R2, share of the oracle, |z| percentile):")
+print(as.data.frame(crs_placebo %>% filter(kind != "placebo") %>%
+                      transmute(index, estimate = signif(estimate, 3), z = signif(z, 3), partial_r2 = signif(partial_r2, 3),
+                                share_of_oracle = signif(share_of_oracle, 3), abs_z_percentile,
+                                residual = signif(residual, 3), cor_age = signif(cor_age, 2),
+                                cor_log_height = signif(cor_log_height, 2))), row.names = FALSE)
+message("Placebo |z|: median ", signif(median(abs(crs_placebo$z[crs_placebo$kind == "placebo"])), 3),
+        ", 95th percentile ", signif(quantile(abs(crs_placebo$z[crs_placebo$kind == "placebo"]), 0.95), 3),
+        "; loadings explain ", signif(summary(loading_fit)$r.squared, 2), " of the placebos' z (residual SD ",
+        signif(sigma(loading_fit), 3), ")")
 
 # =============================================================================
 # Figure
