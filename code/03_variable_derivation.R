@@ -672,8 +672,9 @@ write_parquet(analysis_with_completeness,
 # The no-support control has no hypoxemia gate either (its patients are, by and
 # large, not hypoxemic): a qualifying row is a room-air / nasal-cannula row with SF
 # observed, and the index is set at ICU admission (below).
+# PBWPFVC_VTPBW_GATE=0 (utils/config.R) drops the VT/PBW band and keeps the rest.
 qualifying_timepoints <- analysis_with_completeness %>%
-  filter(has_all_data, config$cohort != "imv" | (vtpbw >= 6 & vtpbw <= 8),
+  filter(has_all_data, config$cohort != "imv" | config$vtpbw_gate == "0" | (vtpbw >= 6 & vtpbw <= 8),
          config$cohort == "nosupport" | sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 
 # ---- the no-support control is indexed at ICU ADMISSION
@@ -998,7 +999,7 @@ message("SOFA over the 24 h from the index (clifR): median ", median(cross_secti
 # complete-data hypoxemic IMV timepoint, whatever its VT/PBW, and SOFA scored over
 # the 24 h from it. in_paper_cohort marks the patients the gate admits. Nothing else
 # in the pipeline reads this table.
-if (config$cohort == "imv") {
+if (config$cohort == "imv" && config$vtpbw_gate == "1") {
   ungated_index <- analysis_with_completeness %>%
     filter(has_all_data, sf_ratio < SF_HYPOXEMIA_THRESHOLD) %>%
     index_tiers() %>%
@@ -1093,6 +1094,18 @@ cross_sectional <- cross_sectional %>%
 
 message("28-day VFDs computed. Median VFD-28: ",
         round(median(vfd_data$vfd_28, na.rm = TRUE), 1))
+
+# The ungated cohort (PBWPFVC_VTPBW_GATE=0) stops here: its cross-sectional table is
+# the input of the gate's sensitivity analyses and of nothing else, so it is written
+# under its own name and none of the paper's tables below is touched. (The row-level
+# tables written above, analysis_broad_pfvc, ne_equiv_admin and
+# analysis_all_eligible_timepoints, come before the gate and are rewritten unchanged.)
+if (config$vtpbw_gate == "0") {
+  write_parquet(cross_sectional, file.path(output_dir, "analysis_cross_sectional_ungated.parquet"))
+  message("Ungated cohort (PBWPFVC_VTPBW_GATE=0): ", nrow(cross_sectional),
+          " patients -> analysis_cross_sectional_ungated.parquet; the paper's tables are not written")
+  quit(save = "no", status = 0)
+}
 
 # =============================================================================
 # 3h. Save outputs

@@ -10,6 +10,8 @@ which also decides where files are written.
 
 **Vasopressors.** Vasopressors are a two-part (hurdle) outcome, reported as a pair: on/off (`any_pressor`, every patient-day, a logistic mixed model, in log-odds) and the dose on the days a pressor runs (`pressor_dose`, conditional on being on a pressor that day). Being on a pressor is itself an outcome, so the dose part is read only in the ventilated cohort; the controls, the difference-in-differences and the checks figure use the on/off part.
 
+**The VT/PBW gate's sensitivity.** `PBWPFVC_VTPBW_GATE=0` runs scripts 03, 21, 22 and 23 on the ventilated cohort without the 6–8 mL/kg band. Script 03 then writes only `analysis_cross_sectional_ungated`, the panels are named `_ungated`, and every aggregate goes to `final/ungated/<block>/` under the paper's file names. `PBWPFVC_JM_NO_DOSE=1` drops the index VT/PBW and its daily change from the longitudinal model and keeps the main fit's rows (tag `nodose_`). With `PBWPFVC_JM_SHAPE_ONLY=1` the two give the longitudinal model alone, by maximum likelihood, in minutes.
+
 **Output file names are an interface between scripts.** The pooling and figure
 scripts find their inputs by file-name prefix, so a prefix changes together with
 its readers, in one commit. No other site has the code yet, so names are still free

@@ -229,14 +229,14 @@ pool_by <- function(d, ...) d %>% group_by(...) %>% group_modify(~ pool_one(.x))
 # where the arm tag is, in this order: rrtcause_ (creatinine's dialysis-as-third-cause
 # fit), day0_ (the ICU-day-0 arm of the ventilated-vs-control comparison), sevstd_
 # (severity standardised), sf<lo>to<hi>_ (an index SF band: the hypoxemic control), nolag_ (no previous-day SF
-# and pressor terms), offset_ (baseline offset). Each arm tag is its own arm: arm_tag is a
+# and pressor terms), nodose_ (no VT/PBW terms), offset_ (baseline offset). Each arm tag is its own arm: arm_tag is a
 # grouping key in every pool, so a restricted or sensitivity fit never pools with the
 # full ventilated cohort's (arm_tag ""), which is what the figures draw.
-JM_ARM_TAGS <- "(rrtcause_)?(day0_)?(sevstd_)?(sf[0-9.]+to[0-9.]+_)?(nolag_)?(offset_)?"
+JM_ARM_TAGS <- "(rrtcause_)?(day0_)?(sevstd_)?(sf[0-9.]+to[0-9.]+_)?(nolag_)?(nodose_)?(offset_)?"
 parse_jm_name <- function(file, family) {
   parts <- str_match(file, paste0("^", family, "_", JM_ARM_TAGS, "(?:(\\w+?)_)?(\\d+[hd])_"))
-  tibble(arm_tag = apply(parts[, 2:7, drop = FALSE], 1, function(tags) paste(na.omit(tags), collapse = "")),
-         form = parts[, 8], panel_h = parts[, 9])
+  tibble(arm_tag = apply(parts[, 2:8, drop = FALSE], 1, function(tags) paste(na.omit(tags), collapse = "")),
+         form = parts[, 9], panel_h = parts[, 10])
 }
 jm_form  <- function(file, family, default) parse_jm_name(file, family)$form %>% replace_na(default)
 jm_panel <- function(file, family) parse_jm_name(file, family)$panel_h

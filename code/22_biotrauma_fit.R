@@ -187,7 +187,11 @@ stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "ch
 # and the joint model becomes the PFVC trajectory alone. That is the point of
 # them: if smaller lungs still diverge where no ventilator is acting, the
 # divergence is the patient rather than the breath.
-HAS_DOSE <- config$cohort == "imv"
+# PBWPFVC_JM_NO_DOSE=1 (20_biotrauma_grid.R) drops them from the ventilated model too,
+# but keeps the rows: DOSE_ROWS still requires the dose observed, so the sensitivity
+# fit has the main fit's patients and days and differs only in its terms.
+HAS_DOSE  <- config$cohort == "imv" && !NO_DOSE
+DOSE_ROWS <- config$cohort == "imv"
 if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "disc_level", "vtpfvc", "pfvc_dose"))
   stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc or channels for the ", config$cohort, " cohort")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
@@ -208,7 +212,9 @@ CLOCK_SPEC <- if (JM_CLOCK == "icu") "icu (t0 = icu_admission_dttm, the first IC
   "index (t0 = index_dttm, the first qualifying ventilator row)"
 HAZARD_SPEC <- paste0("Surv(entry_day, event_time): delayed entry at the first trajectory day, continuous days from t0; ",
                       "severity + demographics, standardised, no size or dose terms; association ", ASSOC_FORM)
-MODEL_SPEC <- paste0("dose: between = index VT/PBW (vtpbw_idx), within = previous-day VT/PBW minus vtpbw_idx; ",
+MODEL_SPEC <- paste0(if (HAS_DOSE) "dose: between = index VT/PBW (vtpbw_idx), within = previous-day VT/PBW minus vtpbw_idx; "
+                     else "dose: none; ",
+                     "cohort: ", if (UNGATED) "ungated (no VT/PBW 6-8 gate)" else "VT/PBW 6-8 gate", "; ",
                      "baseline: the marker's day-0 value only; ",
                      "entry: first trajectory day, event_time > entry_day; ",
                      "clock: ", CLOCK_SPEC, ", continuous days from t0, no measurement after the event time; ",
@@ -541,7 +547,7 @@ prepare_fit_data <- function(mk, stamp) {
   # them from the model, so the sensitivity fit has the main fit's rows and differs
   # only in its terms.
   ld <- ld %>%
-    filter(if (HAS_DOSE) !is.na(l_vtpfvc) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
+    filter(if (DOSE_ROWS) !is.na(l_vtpfvc) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
     note_step("lags", "previous-day covariates observed")
   ld <- ld %>%
     mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
@@ -552,8 +558,8 @@ prepare_fit_data <- function(mk, stamp) {
                                    all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa),
-           if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE,
-           if (HAS_DOSE) !is.na(l_vtpbw_within) else TRUE,
+           if (DOSE_ROWS) !is.na(vtpbw_idx) else TRUE,
+           if (DOSE_ROWS) !is.na(l_vtpbw_within) else TRUE,
            if (mk$y %in% PRESSURE_MARKERS) !is.na(bmi) else TRUE) %>%
     note_step("covariates", "SOFA, dose terms and (pressure markers) BMI observed")
   # severity standardisation (PBWPFVC_JM_SEV_CENTER, 20_biotrauma_grid.R): the marker's
@@ -603,7 +609,7 @@ prepare_fit_data <- function(mk, stamp) {
   # --- survival rows for those patients (the hazard's covariates: see HAZARD_SPEC)
   sd_ <- surv_all %>%
     filter(hospitalization_id %in% ld$hospitalization_id) %>%
-    filter(if (HAS_DOSE) !is.na(vtpbw_idx) else TRUE, !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
+    filter(if (DOSE_ROWS) !is.na(vtpbw_idx) else TRUE, !is.na(log_pfvc), !is.na(sf_0), !is.na(bmi), !is.na(ch_height),
            if (MOD_FORM == "vtpfvc") is.finite(vtpfvc_idx) else TRUE) %>%   # the hazard keeps BMI (paper's set)
     mutate(log_sf_0 = log(sf_0))
   if (HAS_DOSE) ld <- ld %>% mutate(vtpbw_c = vtpbw_idx - median(vtpbw_idx, na.rm = TRUE))
@@ -1004,7 +1010,7 @@ manifest <- map_dfr(results, function(r) {
            n_burnin    = if (is.null(r$n_burnin))    NA_integer_  else as.integer(r$n_burnin))
 }) %>%
   mutate(grid = JM_GRID, baseline_form = BASELINE_FORM, assoc_form = ASSOC_FORM,
-         icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, modifier_form = MOD_FORM,
+         icu_day0_only = ICU_DAY0, no_lags = NO_LAGS, no_dose = NO_DOSE, vtpbw_gate = !UNGATED, modifier_form = MOD_FORM,
          hazard_age = HAZARD_AGE, mala = USE_MALA, horizon_days = JM_HORIZON,
          n_chains = N_CHAINS, n_thin = N_THIN,
          cohort = config$cohort,

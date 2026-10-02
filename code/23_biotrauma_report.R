@@ -48,7 +48,8 @@
 #   PBWPFVC_JM_GRID, PBWPFVC_JM_HORIZON   grid and window (default daily, 7 days)
 #   PBWPFVC_JM_BASELINE    baseline form (default free)
 # The restrictions, grid and window are read through 20_biotrauma_grid.R, which builds
-# the tag from them (day0_, sevstd_, sf<lo>to<hi>_, nolag_, in that order).
+# the tag from them (day0_, sevstd_, sf<lo>to<hi>_, nolag_, nodose_, in that order).
+# PBWPFVC_VTPBW_GATE=0 (the ungated cohort) changes the folder, final/ungated/, not the tag.
 # Figure 4 = PBWPFVC_JM_MODIFIER=pfvc, daily grid, 7 days, as set by 29_run_figure4.R.
 #
 # Usage: uvr run code/23_biotrauma_report.R

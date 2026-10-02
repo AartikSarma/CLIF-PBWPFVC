@@ -64,6 +64,21 @@ load_config <- function() {
     config$site_name <- paste0(config$base_site, "_", config$cohort)
     message("  cohort: ", config$cohort, " (PBWPFVC_COHORT); files tagged ", config$site_name)
   }
+  # The VT/PBW gate (PBWPFVC_VTPBW_GATE; environment variable only):
+  #   "1"  default, the paper's cohort: a ventilated patient enters only with a
+  #        complete hypoxemic timepoint at VT/PBW 6-8 mL/kg, and is indexed there
+  #   "0"  the ungated ventilated cohort, for the gate's sensitivity analyses: the same
+  #        rule without the VT/PBW band (code/supplement/xsec_vtpbw_gate_collider.R
+  #        shows why the band matters). Script 03 then writes
+  #        analysis_cross_sectional_ungated.parquet and nothing downstream of it; the
+  #        figure-4 scripts build and fit their panel from that table, and every
+  #        aggregate goes to final/ungated/<block>/, apart from the paper's tables.
+  config$vtpbw_gate <- Sys.getenv("PBWPFVC_VTPBW_GATE", "1")
+  if (!config$vtpbw_gate %in% c("0", "1"))
+    stop("PBWPFVC_VTPBW_GATE must be 0 or 1; got '", config$vtpbw_gate, "'")
+  if (config$vtpbw_gate == "0" && config$cohort != "imv")
+    stop("PBWPFVC_VTPBW_GATE=0 applies to the ventilated cohort only; unset PBWPFVC_COHORT")
+  config$cs_suffix <- if (config$vtpbw_gate == "0") "_ungated" else ""
   site_root <- file.path(getwd(), "output", paste0(config$base_site, "_output"))
   config$output_dir <- if (config$cohort == "imv") file.path(site_root, "intermediate") else
     file.path(site_root, "intermediate", "controls", config$cohort)
@@ -71,13 +86,15 @@ load_config <- function() {
   config$final_dir  <- if (config$cohort == "imv") config$final_root else file.path(config$final_root, "controls")
   return(config)
 }
-# The folder a script writes its aggregates to: final/<block>/ for the ventilated cohort.
+# The folder a script writes its aggregates to: final/<block>/ for the ventilated cohort
+# (final/ungated/<block>/ with PBWPFVC_VTPBW_GATE=0).
 # A control cohort keeps everything in final/controls/, whatever the block, because its
 # file names already say which cohort they are and the comparison reads one folder.
 FINAL_BLOCKS <- c("cross_sectional", "injury", "supplement")
 final_dir_for <- function(block) {
   if (!block %in% FINAL_BLOCKS) stop("final_dir_for(): unknown block '", block, "'; blocks are ", paste(FINAL_BLOCKS, collapse = ", "))
-  block_dir <- if (config$cohort == "imv") file.path(config$final_root, block) else config$final_dir
+  block_dir <- if (config$cohort != "imv") config$final_dir else
+    if (config$vtpbw_gate == "0") file.path(config$final_root, "ungated", block) else file.path(config$final_root, block)
   dir.create(block_dir, recursive = TRUE, showWarnings = FALSE)
   block_dir
 }

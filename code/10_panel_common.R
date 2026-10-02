@@ -4,7 +4,8 @@
 # =============================================================================
 #
 # Builds, for the cohort in config.json (the ventilated cohort or a control), one
-# baseline row per patient from analysis_cross_sectional (script 03) and a daily
+# baseline row per patient from analysis_cross_sectional (script 03; its _ungated
+# twin with PBWPFVC_VTPBW_GATE=0) and a daily
 # panel from the index onward: ventilator settings, the worst SF ratio, mean
 # arterial pressure, vasopressors and the organ-injury labs. Sourced by
 # 21_biotrauma_panel.R, which turns it into the joint-model tables; nothing else
@@ -76,7 +77,8 @@ FIO2_LOOKBACK_H        <- 4     # hours an FiO2 is carried forward to an SpO2 (c
 # =============================================================================
 # 10a. Baseline: one row per patient (PFVC, demographics, time zero, death day)
 # =============================================================================
-cs <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
+# the ungated cohort's table with PBWPFVC_VTPBW_GATE=0 (utils/config.R, script 03)
+cs <- read_parquet(file.path(output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet")))
 if (!"pfvc_age25" %in% names(cs))
   stop("cross_sectional lacks pfvc_age25 -- re-run script 03.")
 if (JM_CLOCK == "icu" && !"icu_admission_dttm" %in% names(cs))

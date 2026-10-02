@@ -17,7 +17,13 @@
 #                         ventilated-vs-control comparison; file tag "day0_"
 #   PBWPFVC_JM_NO_LAGS    0 | 1   drop the previous-day SF and pressor terms from the
 #                         longitudinal submodel (sensitivity); file tag "nolag_"
-#   PBWPFVC_JM_CLOCK      "index" (default) | "icu"   the panel's time zero t0:
+#   PBWPFVC_JM_NO_DOSE    0 | 1   drop the index VT/PBW and its day-to-day change from
+#                         the ventilated longitudinal submodel (sensitivity); file
+#                         tag "nodose_"
+#   PBWPFVC_VTPBW_GATE    1 | 0   0 builds the panel from the ungated ventilated cohort
+#                         (utils/config.R): panel files "_ungated", aggregates in
+#                         final/ungated/
+#   PBWPFVC_JM_CLOCK     "index" (default) | "icu"   the panel's time zero t0:
 #                         index   index_dttm, the first qualifying ventilator row
 #                                 (script 03): the full ventilated arm (figure 4
 #                                 panel A), the arm without the lags, the channels
@@ -71,7 +77,12 @@ N_PERIODS <- as.integer(round(JM_HORIZON / STEP))
 # anchor distribution of 22), so the icu run does not overwrite the index run's rows.
 JM_CLOCK <- Sys.getenv("PBWPFVC_JM_CLOCK", "index")
 if (!JM_CLOCK %in% c("index", "icu")) stop("PBWPFVC_JM_CLOCK must be index or icu; got '", JM_CLOCK, "'")
-panel_sfx <- if (JM_CLOCK == "icu") "_icu" else ""
+# The ungated cohort (PBWPFVC_VTPBW_GATE=0, utils/config.R; read from the environment
+# for the same reason as the cohort below) builds its own panel, from script 03's
+# analysis_cross_sectional_ungated, under its own file names ("_ungated"); its
+# aggregate tables go to final/ungated/ (final_dir_for), so they keep the paper's names.
+UNGATED   <- identical(Sys.getenv("PBWPFVC_VTPBW_GATE", "1"), "0")
+panel_sfx <- paste0(if (JM_CLOCK == "icu") "_icu" else "", if (UNGATED) "_ungated" else "")
 clock_tag <- if (JM_CLOCK == "icu") "icu_" else ""
 panel_path <- function(kind, dir = output_dir) {
   stopifnot(kind %in% c("long", "surv", "meta"))
@@ -299,7 +310,19 @@ NO_LAGS <- identical(Sys.getenv("PBWPFVC_JM_NO_LAGS", "0"), "1")
 no_lags_tag <- if (NO_LAGS) "nolag_" else ""
 no_lags_sfx <- if (NO_LAGS) "_nolag" else ""
 
+# Sensitivity without the VT/PBW terms (PBWPFVC_JM_NO_DOSE = 1): the ventilated
+# model's index VT/PBW and its day-to-day change are dropped. VT/PBW rises with
+# predicted lung size (round-number dosing) and falls with illness, so holding it
+# fixed can link size to illness (supplement/xsec_vtpbw_gate_collider.R); this fit
+# shows how far the terms move the size estimates. The rows are those of the main fit.
+NO_DOSE <- identical(Sys.getenv("PBWPFVC_JM_NO_DOSE", "0"), "1")
+no_dose_tag <- if (NO_DOSE) "nodose_" else ""
+no_dose_sfx <- if (NO_DOSE) "_nodose" else ""
+# the ungated cohort's fit caches (row-level, beside the inputs) need their own names
+# too; its aggregate tables are told apart by their folder
+ungated_sfx <- if (UNGATED) "_ungated" else ""
+
 # every restriction and variant, in the order every script uses: ICU day 0, severity
 # standardisation, SF band, no lags
-restrict_tag <- paste0(icu_day0_tag, sev_center_tag, sf_tag, no_lags_tag)
-restrict_sfx_for <- function(marker) paste0(icu_day0_sfx, sev_center_sfx_for(marker), sf_sfx, no_lags_sfx)
+restrict_tag <- paste0(icu_day0_tag, sev_center_tag, sf_tag, no_lags_tag, no_dose_tag)
+restrict_sfx_for <- function(marker) paste0(icu_day0_sfx, sev_center_sfx_for(marker), sf_sfx, no_lags_sfx, no_dose_sfx, ungated_sfx)
