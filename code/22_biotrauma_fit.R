@@ -90,6 +90,9 @@
 #   PBWPFVC_JM_ANCHOR_ONLY  0 | 1   write the severity-anchor tables and stop
 #   PBWPFVC_JM_SHAPE_ONLY   0 | 1   no joint models: the longitudinal shape check
 #                           (pfvc form, daily grid; section 22f0) -> final/jm_shape_{tag}
+#   PBWPFVC_JM_PLACEBO_N    0 | n   with the shape check, the unadjusted model refitted for
+#                           GLI's other indices and n placebo formulas (section 22f0b)
+#                           -> final/jm_placebo_{tag}
 #   PBWPFVC_JM_ITER / _BURNIN / _CHAINS   3500 / 500 / 3 (lower only for plumbing runs;
 #                           29_run_figure4.R passes 5000 / 1000 / 3)
 #   PBWPFVC_JM_THIN         5   thinning of the stored draws
@@ -295,6 +298,14 @@ SHAPE_ONLY <- identical(Sys.getenv("PBWPFVC_JM_SHAPE_ONLY", "0"), "1")
 SHAPE_SPLIT_DAY <- 3   # early and late divergence meet here: creatinine lags, platelets bottom out about now
 if (SHAPE_ONLY && (MOD_FORM != "pfvc" || JM_GRID != "daily"))
   stop("the shape check reads the pfvc form on the daily grid: set PBWPFVC_JM_MODIFIER=pfvc PBWPFVC_JM_GRID=daily")
+# Placebo formulas (section 22f0b): PBWPFVC_JM_PLACEBO_N > 0, with the shape check,
+# refits each UNADJUSTED longitudinal model with log PFVC replaced by GLI's other
+# indices and by that many random weightings of the same inputs (placebo_formulas(),
+# 20_biotrauma_grid.R), and writes final/jm_placebo_{tag}.csv. 0 (the default) leaves
+# the shape check as figure 4 runs it.
+PLACEBO_N <- as.integer(Sys.getenv("PBWPFVC_JM_PLACEBO_N", "0"))
+if (is.na(PLACEBO_N) || PLACEBO_N < 0L) stop("PBWPFVC_JM_PLACEBO_N must be a whole number >= 0")
+if (PLACEBO_N > 0L && !SHAPE_ONLY) stop("PBWPFVC_JM_PLACEBO_N needs PBWPFVC_JM_SHAPE_ONLY=1")
 message("=== 22_biotrauma_fit: horizon ", JM_HORIZON, "d, site ", site_name,
         ", MCMC ", N_ITER, "/", N_BURNIN, " x ", N_CHAINS, " chains on ", JM_CORES, " cores ===")
 if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_JM_ITER for any reported fit ***")
@@ -508,6 +519,68 @@ shape_check <- function(ld, rhs, random_spec, mk, adj_lab, counts, stamp) {
            first_day = first_day, split_day = SHAPE_SPLIT_DAY, last_day = last_day,
            n_patients = counts$n_patients, n_obs = counts$n_obs, cohort = config$cohort,
            horizon_days = JM_HORIZON, site = site_name)
+}
+
+# =============================================================================
+# 22f0b. Placebo formulas (PBWPFVC_JM_PLACEBO_N > 0, with the shape check)
+# =============================================================================
+# Is the divergence GLI's, or does any index of the same demographics diverge as
+# much? The unadjusted longitudinal model (the shape check's straight line, maximum
+# likelihood, on exactly its rows) is refitted with log PFVC replaced by each of
+# GLI's other indices (log PBW/PFVC and its four pieces) and by PLACEBO_N random
+# weightings of the same inputs. The indices are built and scaled once on this run's
+# whole panel (placebo_formulas() and placebo_references(), 20_biotrauma_grid.R), so
+# each is SD 1 over the same patients as log_pfvc_sd; the gated and ungated runs
+# each whiten over their own patients. Reported per index: the divergence (index x
+# day) and level, |z| of the divergence, the index's correlation with age and log
+# height, and for GLI's indices the percentile of |z| among the placebos. Stated
+# before the data: if the divergence is an age x day gradient (the concern the
+# platelet difference-in-differences raised), the placebos' |z| follows their age
+# loading and GLI sits where its age loading puts it; if it is lung size, GLI's log
+# PFVC stands above placebos of similar age loading. A fit that fails is reported as
+# failed, never refitted. Runtime: one LME of seconds per index, PLACEBO_N + 6 per
+# marker, run on PBWPFVC_CORES cores.
+if (PLACEBO_N > 0L) {
+  placebo_patients <- surv_all %>%
+    transmute(hospitalization_id, age10, sex_category, race_category, height_cm, pfvc = pfvc_gli, pbw)
+  placebo_build <- placebo_formulas(placebo_patients, PLACEBO_N)
+  placebo_index_matrix <- cbind(placebo_references(placebo_patients), placebo_build$indices(placebo_patients))
+  rownames(placebo_index_matrix) <- as.character(placebo_patients$hospitalization_id)
+  message("Placebo formulas: ", ncol(placebo_index_matrix), " indices over ", nrow(placebo_patients), " patients")
+}
+placebo_check <- function(ld, rhs, random_spec, mk, counts, stamp) {
+  size_terms <- c("log_pfvc_sd", "log_pfvc_sd:vent_day")
+  stopifnot(all(size_terms %in% rhs))
+  index_formula <- as.formula(paste("log_y ~", paste(c(setdiff(rhs, size_terms), "index_value", "index_value:vent_day"),
+                                                    collapse = " + ")))
+  row_indices <- placebo_index_matrix[as.character(ld$hospitalization_id), , drop = FALSE]
+  first_row <- !duplicated(ld$hospitalization_id)
+  patient_height <- surv_all$height_cm[match(ld$hospitalization_id[first_row], surv_all$hospitalization_id)]
+  fit_index <- function(k) {
+    d <- ld; d$index_value <- row_indices[, k]
+    index_name <- colnames(row_indices)[k]
+    loadings <- tibble(cor_age = cor(row_indices[first_row, k], ld$age10[first_row]),
+                       cor_log_height = cor(row_indices[first_row, k], log(patient_height)))
+    fit <- tryCatch(lme(index_formula, random = random_spec, data = d, method = "ML",
+                        control = lmeControl(opt = "optim", maxIter = 200, msMaxIter = 200)),
+                    error = function(e) e)
+    if (inherits(fit, "error"))
+      return(tibble(index = index_name, status = "failed", reason = conditionMessage(fit)) %>% bind_cols(loadings))
+    b <- fixef(fit); V <- as.matrix(vcov(fit))
+    rate <- names(b)[vapply(strsplit(names(b), ":"), setequal, logical(1), c("index_value", "vent_day"))]
+    tibble(index = index_name, status = "ok", reason = NA_character_,
+           level = b[["index_value"]], level_se = sqrt(V["index_value", "index_value"]),
+           divergence = b[[rate]], divergence_se = sqrt(V[rate, rate])) %>% bind_cols(loadings)
+  }
+  results <- bind_rows(parallel::mclapply(seq_len(ncol(row_indices)), fit_index, mc.cores = N_CORES))
+  stamp("placebo formulas: ", sum(results$status == "ok"), " of ", nrow(results), " fits ok")
+  results %>%
+    mutate(kind = if_else(grepl("^placebo_", index), "placebo", "reference"),
+           abs_z = abs(divergence / divergence_se)) %>%
+    mutate(abs_z_percentile = if_else(kind == "reference" & status == "ok",
+                                      map_dbl(abs_z, ~ mean(abs_z[kind == "placebo" & status == "ok"] < .x)), NA_real_)) %>%
+    mutate(marker = mk$name, adjustment = "unadjusted", n_patients = counts$n_patients, n_obs = counts$n_obs,
+           cohort = config$cohort, vtpbw_gate = !UNGATED, dose_terms = HAS_DOSE, site = site_name, .before = 1)
 }
 
 # =============================================================================
@@ -803,8 +876,9 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
                                        counts = counts, entry_steps = entry_steps))
     shape <- shape_check(ld, rhs, random_spec, mk, adj_lab, counts, stamp)
     stamp("shape check done")
+    placebo <- if (PLACEBO_N > 0L && !adjusted) placebo_check(ld, rhs, random_spec, mk, counts, stamp) else NULL
     return(list(status = "shape", reason = NA_character_, counts = counts, entry_steps = entry_steps,
-                lme_formula = deparse1(lme_formula), shape = shape))
+                lme_formula = deparse1(lme_formula), shape = shape, placebo = placebo))
   }
   if (isTRUE(mk$binary)) {
     # logistic mixed model, independent intercept and slope variances (the || form)
@@ -1040,6 +1114,20 @@ if (SHAPE_ONLY) {
                          anti_join(manifest %>% distinct(marker, adjustment), by = c("marker", "adjustment")),
                        shape)
   write_csv(shape, shape_path)
+  placebo <- map_dfr(results, "placebo")
+  if (PLACEBO_N > 0L) {
+    if (!nrow(placebo)) stop("PBWPFVC_JM_PLACEBO_N > 0 but no unadjusted shape check ran, so there are no placebo fits")
+    placebo_path <- file.path(final_dir, paste0("jm_placebo_", out_tag, ".csv"))
+    if (file.exists(placebo_path))   # merge on write: keep other markers' rows
+      placebo <- bind_rows(read_csv(placebo_path, show_col_types = FALSE) %>% filter(!marker %in% placebo$marker), placebo)
+    write_csv(placebo, placebo_path)
+    message("\nPlacebo formulas: the divergence's |z| for GLI's indices, and its percentile among the placebos")
+    print(as.data.frame(placebo %>% filter(kind == "reference") %>%
+                          transmute(marker, index, divergence = signif(divergence, 3), abs_z = signif(abs_z, 3),
+                                    abs_z_percentile, cor_age = signif(cor_age, 2), cor_log_height = signif(cor_log_height, 2))),
+          row.names = FALSE)
+    message("placebo formulas -> ", placebo_path)
+  }
   message("\nDivergence per day per SD of log PFVC (log-marker scale): the line against the spline;",
           " early = days ", min(shape$first_day), "-", SHAPE_SPLIT_DAY, ", late = ", SHAPE_SPLIT_DAY, "-", max(shape$last_day))
   print(as.data.frame(shape %>% filter(quantity == "rate") %>%

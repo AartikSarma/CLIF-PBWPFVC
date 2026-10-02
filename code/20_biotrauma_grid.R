@@ -161,6 +161,63 @@ height_fingerprint <- function(height_cm, sex_category) {
   log_ratio(height_cm, sex) - log_ratio(170, 1L)
 }
 
+# ---- Placebo formulas ------------------------------------------------------------
+# GLI log PFVC is one weighting of age, sex, race and height. A placebo formula is
+# another: a random direction through the same inputs (a 4-df natural spline in age,
+# female, Black, Other and log height), whitened so that every direction has SD 1 in
+# the patients the formulas are built on. If a result is GLI's, GLI should stand out
+# from the cloud; if any index of the same demographics does as well, it is the
+# demographics. (supplement/xsec_strain_invariance.R, on the
+# worktree-mortality-channel-equality branch, builds the same inputs inline for its
+# ventilated-minus-control contrast; the two should agree once merged.)
+#
+# placebo_formulas(d, n_placebo) builds the formulas on d (age10, sex_category,
+# race_category, height_cm) and returns:
+#   indices(x)   the n_placebo indices for any patients x, as one fixed function of
+#                the inputs (the age spline's knots, the centring and the whitening
+#                all come from d), so a placebo is the same formula in every sample
+#   weights      the input-scale weights, one column per placebo
+# The seed is fixed, so placebo k is the same direction in every script and at
+# every site. It stops when the inputs are collinear (an empty sex or race group).
+PLACEBO_SEED <- 20260930
+placebo_formulas <- function(d, n_placebo, seed = PLACEBO_SEED) {
+  age_basis <- splines::ns(d$age10, df = 4)
+  inputs <- function(x) {
+    m <- cbind(predict(age_basis, x$age10),
+               as.numeric(x$sex_category == "Female"),
+               as.numeric(x$race_category == "BLACK"),
+               as.numeric(x$race_category == "OTHER"),
+               log(x$height_cm))
+    colnames(m) <- c(paste0("age_spline_", 1:4), "female", "black", "other", "log_height")
+    m
+  }
+  base   <- inputs(d)
+  centre <- colMeans(base)
+  eig    <- eigen(cov(base), symmetric = TRUE)
+  if (min(eig$values) < 1e-10 * max(eig$values))
+    stop("placebo_formulas(): the inputs are collinear here (an empty sex or race group?): eigenvalues ",
+         paste(signif(eig$values, 3), collapse = ", "))
+  set.seed(seed)
+  directions <- matrix(rnorm(n_placebo * ncol(base)), nrow = ncol(base))
+  directions <- sweep(directions, 2, sqrt(colSums(directions^2)), "/")   # unit vectors
+  weights <- eig$vectors %*% diag(1 / sqrt(eig$values)) %*% directions
+  dimnames(weights) <- list(colnames(base), sprintf("placebo_%03d", seq_len(n_placebo)))
+  list(indices = function(x) sweep(inputs(x), 2, centre) %*% weights, weights = weights)
+}
+# the named indices every placebo cloud is read against: GLI log PFVC, log PBW/PFVC,
+# and GLI's four pieces (pfvc_channels() above), each divided by its SD in
+# scale_from, so that, like the placebos, a reference is one formula in every sample
+# (a shift between samples is absorbed by any model's intercept)
+placebo_references <- function(x, scale_from = x) {
+  raw <- function(d) {
+    pieces <- pfvc_channels(d, "log_pfvc")
+    cbind(`log PFVC (GLI)` = log(d$pfvc), `log PBW/PFVC` = log(d$pbw / d$pfvc),
+          `GLI height piece` = pieces$ch_height, `GLI age piece` = pieces$ch_age,
+          `GLI sex piece` = pieces$ch_sex, `GLI race piece` = pieces$ch_race)
+  }
+  sweep(raw(x), 2, apply(raw(scale_from), 2, sd), "/")
+}
+
 # ---- The convergence gate ------------------------------------------------------
 # One gate for every script that reads a joint model (22, 23, 24, 27 and the
 # pooling): a fit counts as converged when the R-hat of its LUNG-SIZE terms, the level

@@ -77,6 +77,20 @@
 # little variance once age is a spline (supplement/xsec_age_form_check.R), so read
 # it for direction only.
 #
+# Placebo formulas (unadjusted models only). GLI log PFVC is one weighting of age,
+# sex, race and height; PLACEBO_N random weightings of the same inputs
+# (placebo_formulas(), 20_biotrauma_grid.R) run through every unadjusted model and
+# design beside GLI's references (log PFVC, log PBW/PFVC, the four GLI pieces). The
+# gate's statistic is each index's inflation, |b in the design| minus |b ungated|,
+# per SD. Stated before the data: the bias grows with how hard an index pushes VT/PBW
+# (the collider's size arm, which round-number dosing makes mostly height), so
+# inflation should rise with |VT/PBW per SD| across the placebos, GLI log PFVC
+# (height-heavy) should sit in the upper part of the cloud, and the ratio (age-heavy)
+# lower, each where its arm predicts. The mechanism table regresses inflation on the
+# arm. The reference |z| of each index is reported too, but this analysis has no
+# control arm, so it measures how strongly an index tracks illness or death, not
+# whether GLI is special.
+#
 # Practice. VT/PBW habits differ widely between providers and between sites: the
 # share of set volumes at or below 6 mL/kg runs from almost none to most. Practice
 # that follows neither the ratio nor illness is noise in VT/PBW's collider role and
@@ -102,6 +116,14 @@
 #   vtpbw_gate_collider_gate_{site}.csv       the gate's counts: VT/PBW below, in and
 #                                             above the band at the ungated index, by
 #                                             membership of the paper's cohort
+#   vtpbw_gate_collider_placebo_{site}.csv    every index (references and placebos)
+#                                             in every unadjusted model and design:
+#                                             the coefficient, its inflation, the
+#                                             index's VT/PBW arm and loadings, and each
+#                                             reference's percentile in the cloud
+#   vtpbw_gate_collider_placebo_mechanism_{site}.csv  inflation regressed on the
+#                                             VT/PBW arm across the placebos
+#   vtpbw_gate_collider_placebo_{site}.pdf    inflation against the arm, 04's design
 #   vtpbw_gate_collider_{site}.pdf            the SOFA slopes by design
 #   vtpbw_gate_collider_mortality_{site}.pdf  the mortality coefficients by design
 #
@@ -118,10 +140,12 @@ if (config$cohort != "imv") stop("The VT/PBW gate exists only in the ventilated 
 site_name  <- config$site_name
 output_dir <- config$output_dir
 final_dir  <- final_dir_for("supplement")
+source(here::here("code", "20_biotrauma_grid.R"))   # placebo_formulas(), placebo_references()
 
 VTPBW_BAND      <- c(6, 8)     # mL/kg, the paper's lung-protective gate (03, 3e)
 VTPBW_BIN_WIDTH <- 0.5         # mL/kg, the descriptive bins
 BOOTSTRAP_REPS  <- 500
+PLACEBO_N       <- 500
 set.seed(20260930)
 
 # --- the two frames, one row per patient: the ungated index and the paper's own index
@@ -135,7 +159,7 @@ prepare <- function(frame) {
            sf10 = sf_ratio / 10)
 }
 FRAME_COLUMNS <- c("hospitalization_id", "vtpbw", "pbwpfvc", "pfvc", "age_at_admission", "sex_category",
-                   "race_category", "sofa_total", "sofa_resp", "sf_ratio", "deceased")
+                   "race_category", "sofa_total", "sofa_resp", "sf_ratio", "deceased", "pbw", "height_cm")
 ungated <- read_parquet(file.path(output_dir, "analysis_ungated_index.parquet")) %>%
   select(all_of(FRAME_COLUMNS), in_paper_cohort) %>%
   prepare() %>%
@@ -258,6 +282,86 @@ mortality_estimates <- estimates %>% filter(outcome == "In-hospital death") %>%
 write_csv(sofa_estimates, file.path(final_dir, paste0("vtpbw_gate_collider_estimates_", site_name, ".csv")))
 if (fit_mortality)
   write_csv(mortality_estimates, file.path(final_dir, paste0("vtpbw_gate_collider_mortality_", site_name, ".csv")))
+
+# --- placebo formulas (unadjusted models only: demographic adjustment would absorb them)
+# Every index (GLI's references and PLACEBO_N placebos) is one fixed formula, built
+# and scaled on the ungated sample and applied unchanged to the paper's rows, so a
+# placebo's shift between designs is the gate's doing, not a change of formula.
+# Fitted after the bootstrap, so the placebos' seed does not move its draws.
+placebo_build <- placebo_formulas(ungated, PLACEBO_N)
+index_columns <- function(frame)
+  cbind(placebo_references(frame, scale_from = ungated), placebo_build$indices(frame))
+ungated_indices <- index_columns(ungated)
+paper_indices   <- index_columns(paper)
+# the dosing arm and the loadings of each index, in the ungated sample
+index_profile <- tibble(
+  index = colnames(ungated_indices),
+  kind = if_else(grepl("^placebo_", index), "placebo", "reference"),
+  vtpbw_per_sd = apply(ungated_indices, 2, function(v) coef(lm(ungated$vtpbw ~ v))[[2]]),
+  cor_log_height = apply(ungated_indices, 2, function(v) cor(v, log(ungated$height_cm))),
+  cor_age = apply(ungated_indices, 2, function(v) cor(v, ungated$age10)))
+PLACEBO_MODELS <- MODELS %>% filter(adjustment == "unadjusted", exposure == names(EXPOSURES)[1]) %>%
+  mutate(formula = str_replace(formula, fixed(size_term), "index_value"))
+message("Placebo formulas: ", ncol(ungated_indices), " indices x ", nrow(PLACEBO_MODELS), " unadjusted models")
+placebo_fits <- map_dfr(colnames(ungated_indices), function(index_name) {
+  samples <- list(ungated = ungated %>% mutate(index_value = ungated_indices[, index_name]))
+  samples$index_in_band <- samples$ungated %>% filter(index_in_band)
+  samples$paper <- paper %>% mutate(index_value = paper_indices[, index_name])
+  pmap_dfr(PLACEBO_MODELS, function(design, outcome, severity, keep, formula, family, ...) {
+    model <- if (family == "binomial") glm(as.formula(formula), data = samples[[keep]], family = binomial)
+             else lm(as.formula(formula), data = samples[[keep]])
+    coefficients <- summary(model)$coefficients
+    tibble(index = index_name, design, outcome, severity,
+           estimate = coefficients["index_value", 1], se = coefficients["index_value", 2])
+  })
+})
+# The gate's statistic is the INFLATION of each index, |b in the design| minus |b in
+# the ungated reference|, per SD: direction-free, so placebos (which have no sign)
+# and GLI are read on one scale. The reference |z| is reported too; it says how
+# strongly an index tracks illness or death here, not whether GLI is special (there
+# is no control arm in this analysis).
+placebo_table <- placebo_fits %>%
+  group_by(index, outcome, severity) %>%
+  mutate(reference_abs_z = abs(estimate[design == "none"] / se[design == "none"]),
+         inflation = abs(estimate) - abs(estimate[design == "none"])) %>%
+  ungroup() %>%
+  left_join(index_profile, by = "index") %>%
+  group_by(outcome, severity, design) %>%
+  mutate(inflation_percentile = if_else(kind == "reference",
+                                        map_dbl(inflation, ~ mean(inflation[kind == "placebo"] < .x)), NA_real_),
+         reference_abs_z_percentile = if_else(kind == "reference",
+                                              map_dbl(reference_abs_z, ~ mean(reference_abs_z[kind == "placebo"] < .x)), NA_real_)) %>%
+  ungroup() %>%
+  mutate(site = site_name, design = factor(design, levels = DESIGNS$design), .before = 1) %>%
+  arrange(outcome, severity, design, kind, index)
+write_csv(placebo_table, file.path(final_dir, paste0("vtpbw_gate_collider_placebo_", site_name, ".csv")))
+# The mechanism check: among the placebos, does an index's inflation follow how hard
+# it pushes VT/PBW (|VT/PBW per SD|, the collider's size arm)?
+placebo_mechanism <- placebo_table %>%
+  filter(kind == "placebo", design != "none") %>%
+  group_by(outcome, severity, design) %>%
+  summarise(inflation_per_vtpbw = coef(lm(inflation ~ abs(vtpbw_per_sd)))[[2]],
+            inflation_per_vtpbw_se = summary(lm(inflation ~ abs(vtpbw_per_sd)))$coefficients[2, 2],
+            r_squared = summary(lm(inflation ~ abs(vtpbw_per_sd)))$r.squared,
+            placebo_inflation_median = median(inflation),
+            placebo_inflation_p95 = quantile(inflation, 0.95), .groups = "drop") %>%
+  mutate(site = site_name, .before = 1)
+write_csv(placebo_mechanism, file.path(final_dir, paste0("vtpbw_gate_collider_placebo_mechanism_", site_name, ".csv")))
+ggsave(file.path(final_dir, paste0("vtpbw_gate_collider_placebo_", site_name, ".pdf")),
+       placebo_table %>%
+         filter(design == "paper cohort + VT/PBW") %>%
+         mutate(panel = paste(outcome, if_else(severity == "none", "", paste("|", severity)))) %>%
+         ggplot(aes(abs(vtpbw_per_sd), inflation)) +
+         geom_hline(yintercept = 0, colour = "grey60") +
+         geom_point(data = ~ filter(.x, kind == "placebo"), colour = "grey65", size = 0.6) +
+         geom_point(data = ~ filter(.x, kind == "reference"), aes(colour = index), size = 2) +
+         facet_wrap(~ panel, scales = "free_y") +
+         scale_colour_manual(values = c("#0072B2", "#D55E00", "#009E73", "#E69F00", "#CC79A7", "#56B4E9"), name = NULL) +
+         labs(x = "|VT/PBW per SD of the index| (the collider's size arm), ungated sample",
+              y = "Inflation in 04's design: |b| minus |b| ungated (per SD)",
+              title = paste0("The gate's inflation of GLI's indices and of ", PLACEBO_N, " placebo formulas (", site_name, ", unadjusted)")) +
+         theme_minimal(base_size = 9) + theme(legend.position = "bottom"),
+       width = 10, height = 6)
 
 # --- the collider's two arms, in every patient: VT/PBW on the size term and on SOFA
 arms <- expand_grid(exposure = names(EXPOSURES), outcome = names(OUTCOMES), adjustment = names(ADJUSTMENTS)) %>%

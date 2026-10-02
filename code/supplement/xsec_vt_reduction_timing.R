@@ -87,6 +87,9 @@
 #   vt_reduction_timing_hazard_{site}.csv     section 2: the size term at each step,
 #                                             and the triggers in the full model
 #   vt_reduction_timing_ancova_{site}.csv     section 3
+#   vt_reduction_timing_placebo_{site}.csv    section 3's change score for GLI's
+#                                             indices and PLACEBO_N placebo formulas
+#                                             (unadjusted): |z|, loadings, percentiles
 #   vt_reduction_timing_{site}.pdf            the size term across the decomposition
 #
 # Needs scripts 01-03 (the ventilated cohort; 03 writes analysis_ungated_index).
@@ -99,6 +102,7 @@ if (config$cohort != "imv") stop("Tidal-volume reductions exist only in the vent
 site_name  <- config$site_name
 output_dir <- config$output_dir
 final_dir  <- final_dir_for("supplement")
+source(here::here("code", "20_biotrauma_grid.R"))   # placebo_formulas(), placebo_references()
 
 HORIZON_H             <- 72
 VOLUME_TARGETED_MODES <- c("assist control-volume control", "pressure-regulated volume control", "simv")
@@ -110,11 +114,12 @@ SF_FALL               <- 25
 BASELINE_H            <- 6
 FOLLOWUP_H            <- c(24, 48)
 VTPBW_BAND            <- c(6, 8)
+PLACEBO_N             <- 500
 
 # --- patients: the ungated index, one row each
 patients <- read_parquet(file.path(output_dir, "analysis_ungated_index.parquet"),
                          col_select = c("hospitalization_id", "pbw", "pfvc", "pbwpfvc", "age_at_admission",
-                                        "sex_category", "race_category", "in_paper_cohort")) %>%
+                                        "sex_category", "race_category", "in_paper_cohort", "height_cm")) %>%
   mutate(sex_category  = factor(sex_category,  levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")),
          age10 = age_at_admission / 10,
@@ -312,6 +317,33 @@ ancova <- imap_dfr(MARKERS, function(marker_values, marker) {
 }) %>%
   mutate(site = site_name, exposure_sd = exposure_sd[exposure], .before = 1)
 write_csv(ancova, file.path(final_dir, paste0("vt_reduction_timing_ancova_", site_name, ".csv")))
+
+# --- placebo formulas for Link 1: the change score, unadjusted, without the initial
+#     VT/PBW (the primary form). Each index is built and scaled on the ungated
+#     patients (placebo_formulas(), 20_biotrauma_grid.R); its |z| is placed in the
+#     cloud, with its loadings on age and height. The hazard decomposition is a
+#     mechanism analysis and gets no placebos.
+placebo_build <- placebo_formulas(patients, PLACEBO_N)
+all_indices <- cbind(placebo_references(patients), placebo_build$indices(patients))
+rownames(all_indices) <- patients$hospitalization_id
+link1_placebo <- imap_dfr(MARKERS, function(marker_values, marker) {
+  frame <- patient_course %>% as_tibble() %>% inner_join(as_tibble(marker_values), by = "hospitalization_id") %>%
+    filter(!is.na(baseline), !is.na(followup)) %>% mutate(change = followup - baseline)
+  frame_indices <- all_indices[as.character(frame$hospitalization_id), , drop = FALSE]
+  map_dfr(colnames(frame_indices), function(index_name) {
+    index_value <- frame_indices[, index_name]
+    coefficients <- summary(lm(frame$change ~ index_value))$coefficients
+    tibble(marker, index = index_name, estimate = coefficients["index_value", 1], se = coefficients["index_value", 2],
+           cor_age = cor(index_value, frame$age10), cor_log_height = cor(index_value, log(frame$height_cm)),
+           n = nrow(frame))
+  })
+}) %>%
+  mutate(kind = if_else(grepl("^placebo_", index), "placebo", "reference"), abs_z = abs(estimate / se)) %>%
+  group_by(marker) %>%
+  mutate(abs_z_percentile = if_else(kind == "reference", map_dbl(abs_z, ~ mean(abs_z[kind == "placebo"] < .x)), NA_real_)) %>%
+  ungroup() %>%
+  mutate(site = site_name, .before = 1)
+write_csv(link1_placebo, file.path(final_dir, paste0("vt_reduction_timing_placebo_", site_name, ".csv")))
 
 # --- figure: the size term across the decomposition (primary window)
 ADJUSTMENT_COLOURS <- c(unadjusted = "#E69F00", adjusted = "#0072B2")    # Okabe-Ito
