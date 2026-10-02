@@ -59,9 +59,13 @@
 #    moves at each step says which arrow carries it. This conditions on the current
 #    VT/PBW, the collider of the companion script, so it is a descriptive
 #    decomposition of who gets turned down, not a causal estimate.
-# 3. Link 1 (does size predict deterioration at all). Fixed-horizon ANCOVA: log Crs
-#    over FOLLOWUP_H hours on the size term and log Crs in the first BASELINE_H
-#    hours; SF the same way. Fitted without the initial VT/PBW (primary: the total
+# 3. Link 1 (does size predict deterioration at all). The change in log Crs from the
+#    first BASELINE_H hours to FOLLOWUP_H hours on the size term (primary), and the
+#    fixed-horizon ANCOVA on the baseline beside it; SF the same way. Compliance
+#    scales with lung size, so an ANCOVA on an error-prone baseline credits size with
+#    a change that did not happen (regression dilution); the change score does not.
+#    At MIMIC the first run, ANCOVA only, gave +0.09 log Crs per SD of log PFVC
+#    adjusted, about the size of that artefact. Fitted without the initial VT/PBW (primary: the total
 #    effect of size, which the companion script found is the identifiable one) and
 #    with it (the standing "at a given VT/PBW" framing). The two answer different
 #    questions, so both are reported. Patients extubated or dead before the
@@ -283,18 +287,25 @@ marker_windows <- function(events_table, value) {
                by = hospitalization_id]
 }
 MARKERS <- list("log Crs" = marker_windows(plateau_events, "log_crs"), "SF" = marker_windows(sf_events, "sf_ratio"))
+# Two forms. The ANCOVA adjusts for the baseline value; but compliance scales with
+# lung size, and a baseline measured with error under-adjusts that level, so the
+# ANCOVA credits size with a "change" even where nothing changed (regression
+# dilution). The change score (follow-up minus baseline) has no such bias: with no
+# true change its expectation is zero at every size. Where the two disagree, read
+# the change score.
+LINK1_FORMS <- c("change score" = "change ~", "ANCOVA (baseline-adjusted)" = "followup ~ baseline +")
 ancova <- imap_dfr(MARKERS, function(marker_values, marker) {
   frame <- patient_course %>% as_tibble() %>% inner_join(as_tibble(marker_values), by = "hospitalization_id")
   n_with_baseline <- sum(!is.na(frame$baseline))
-  frame <- frame %>% filter(!is.na(baseline), !is.na(followup))
-  expand_grid(exposure = names(EXPOSURES), adjustment = names(ADJUSTMENTS),
+  frame <- frame %>% filter(!is.na(baseline), !is.na(followup)) %>% mutate(change = followup - baseline)
+  expand_grid(form = names(LINK1_FORMS), exposure = names(EXPOSURES), adjustment = names(ADJUSTMENTS),
               initial_vtpbw_term = c("without initial VT/PBW", "with initial VT/PBW")) %>%
-    pmap_dfr(function(exposure, adjustment, initial_vtpbw_term) {
+    pmap_dfr(function(form, exposure, adjustment, initial_vtpbw_term) {
       size_term <- paste0(EXPOSURES[[exposure]], "_sd")
-      formula <- paste("followup ~", size_term, "+ baseline",
+      formula <- paste(LINK1_FORMS[[form]], size_term,
                        if (initial_vtpbw_term == "with initial VT/PBW") "+ initial_vtpbw" else "", ADJUSTMENTS[[adjustment]])
       coefficients <- summary(lm(as.formula(formula), data = frame))$coefficients
-      tibble(marker, exposure, adjustment, initial_vtpbw_term,
+      tibble(marker, form, exposure, adjustment, initial_vtpbw_term,
              estimate = coefficients[size_term, 1], se = coefficients[size_term, 2],
              n = nrow(frame), n_with_baseline)
     })
@@ -325,4 +336,4 @@ print(events %>% filter(trigger_window_h == TRIGGER_WINDOWS_H[1], population == 
                share_of_reductions_dp_high, share_of_reductions_crs_fall))
 print(hazard %>% filter(trigger_window_h == TRIGGER_WINDOWS_H[1], exposure == "log PFVC", !grepl(TRIGGER_TERMS, term)) %>%
         select(adjustment, step, estimate, se))
-print(ancova %>% filter(exposure == "log PFVC") %>% select(marker, adjustment, initial_vtpbw_term, estimate, se, n))
+print(ancova %>% filter(exposure == "log PFVC") %>% select(marker, form, adjustment, initial_vtpbw_term, estimate, se, n), n = Inf)
