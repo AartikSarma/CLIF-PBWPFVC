@@ -108,6 +108,19 @@ to change; that stops once sites have returned `final/` folders.
   tabulates what preceded each first reduction by PFVC quartile, decomposes size's
   link to reductions in a discrete-time hazard, and asks whether size predicts a fall
   in compliance at 24-48 h. Not in the runner.
+  `xsec_mortality_channel_equality.R` asks whether sex and race predict death as their
+  share of predicted lung size says they should: with age held by `ns(age, 4)`, each
+  group's coefficient divided by its GLI shift in log PFVC is tested against the
+  height slope (sex, Black, Other, and jointly), in the ventilated arm, the no-support
+  control and their difference (needs scripts 01-03 run for both cohorts). Not in the
+  runner.
+  `xsec_strain_invariance.R` asks whether ventilation's mortality gradient follows
+  the strain error or any index of the same demographics, with severity-only models:
+  the site's tidal-volume rule (slope of set VT on PBW before the 6-8 gate), the
+  ventilated-minus-control contrast for log PBW/PFVC and log PFVC, and 500 random
+  weightings of age, sex, race and height beside GLI's ratio, PFVC and pieces. The
+  cross-site test (the contrast against the dosing rule) is a pooling step. Not in
+  the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises

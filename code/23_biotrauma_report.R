@@ -76,7 +76,7 @@ MOD_FORM      <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")   # figure 4
 # RRT as a third competing cause (creatinine only): its own tables and its own
 # bundles, so the two-cause primary is never overwritten by the sensitivity
 RRT_EVENT     <- identical(Sys.getenv("PBWPFVC_JM_RRT_EVENT", "0"), "1")
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose"))
+stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose", "pfvc25", "disc25_level"))
 out_tag  <- paste0(if (RRT_EVENT) "rrtcause_" else "", restrict_tag,
                    if (BASELINE_FORM == "offset") "offset_" else "",
                    if (MOD_FORM != "disc") paste0(MOD_FORM, "_") else "",
@@ -218,7 +218,7 @@ for (i in seq_len(nrow(usable))) {
     draws[, ex] + (if (length(tcol)) draws[, tcol[1]] else 0) * hh / 24
   }
   for (hh in LEVEL_HOURS[LEVEL_HOURS <= JM_HORIZON * 24]) {
-    exs <- intersect(c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS), colnames(draws))
+    exs <- intersect(c("log_pfvc_sd", "ldisc_sd", "log_pfvc25_sd", "ldisc25_sd", "vtpfvc_c", CHANNELS), colnames(draws))
     if (!length(exs)) next
     V <- sapply(exs, contrast_draws, hh = hh)                       # draws x exposures
     p_equal <- if (all(CHANNELS %in% exs)) channels_equal_p(colMeans(V[, CHANNELS]), cov(V[, CHANNELS])) else NA_real_
@@ -253,7 +253,7 @@ for (i in seq_len(nrow(usable))) {
     } else {
       fe <- nlme::fixef(b$lme); fe_v <- vcov(b$lme)
     }
-    for (ex in intersect(c("log_pfvc_sd", "ldisc_sd", "vtpfvc_c", CHANNELS), colnames(draws))) {
+    for (ex in intersect(c("log_pfvc_sd", "ldisc_sd", "log_pfvc25_sd", "ldisc25_sd", "vtpfvc_c", CHANNELS), colnames(draws))) {
       rate <- intersect(c(paste0(ex, ":vent_day"), paste0("vent_day:", ex)), colnames(draws))
       for (tm in c(ex, rate)) {
         if (!tm %in% names(fe)) next
