@@ -99,6 +99,13 @@ to change; that stops once sites have returned `final/` folders.
   slope with and without the gate and the VT/PBW term, with bootstrap intervals for
   the change, split into respiratory and other SOFA, and then asks the same of
   in-hospital death, with and without 04's severity terms. Not in the runner.
+  `xsec_vt_reduction_timing.R` follows it up: when clinicians turn the tidal volume
+  down in the first 72 hours, which arrow from predicted size carries the reduction?
+  The candidates are a high starting setting, a high driving pressure, or a fall in
+  compliance (the only one that would mean small lungs caused the illness). It
+  tabulates what preceded each first reduction by PFVC quartile, decomposes size's
+  link to reductions in a discrete-time hazard, and asks whether size predicts a fall
+  in compliance at 24-48 h. Not in the runner.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
   external trial table, `creatinine_positive_control.R` checks that creatinine rises
