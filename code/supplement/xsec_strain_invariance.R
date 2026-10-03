@@ -93,6 +93,16 @@
 #                                           VT/PBW gate and (for reference) inside it
 #   strain_invariance_contrast_{site}.csv   per cohort, the difference, and the delivered-
 #                                           strain row, by population, outcome and dose
+#                                           (outcomes include 60-day death with no
+#                                           censoring at intubation, and 60-day death or
+#                                           intubation, which bracket section 2b)
+#   strain_invariance_censoring_{site}.csv  section 2b: each exposure's hazard of
+#                                           intubation in the control (informative
+#                                           censoring?)
+#   strain_invariance_age25_pieces_{site}.csv  section 2c: the age-25 strain error split
+#                                           into sex, Black, Other and the height curve,
+#                                           per cohort and the difference, each on the
+#                                           ratio's scale
 #   strain_invariance_placebo_{site}.csv    every index: the two cohorts' coefficients,
 #                                           the difference, its z, and (references) the
 #                                           percentile of |z| among the placebos; the
@@ -236,16 +246,27 @@ separated <- function(fit) inherits(fit, "separation")
 # time (days from the index) and event for 60-day death before invasive ventilation,
 # as xsec_pfvc_age_control.R defines it (identical to 60-day death in the ventilated
 # arm, which is intubated at the index)
-outcome_data <- function(cohort_data) cohort_data %>% mutate(
-  censor_day = pmin(HORIZON_DAYS, coalesce(imv_day, Inf)),
-  event = as.integer(!is.na(death_index_day) & death_index_day <= censor_day),
-  end_day = pmax(if_else(event == 1L, death_index_day, censor_day), 0.01))
+#
+# Two companions bracket what censoring a control at intubation can do (section 2b
+# asks whether that censoring is informative): every 60-day death, the control's
+# deaths after intubation included, and 60-day death or invasive ventilation, in
+# which a control's intubation is itself the event, so nothing is censored before day
+# 60. In the ventilated arm all three are the same 60-day death.
+outcome_data <- function(cohort_data, outcome_key) cohort_data %>% mutate(
+  censor_day = if (outcome_key == "day60_before_imv") pmin(HORIZON_DAYS, coalesce(imv_day, Inf)) else HORIZON_DAYS,
+  failure_day = if (outcome_key == "day60_death_or_imv") pmin(coalesce(death_index_day, Inf), coalesce(imv_day, Inf))
+                else death_index_day,
+  failure_day = if_else(is.infinite(failure_day), NA_real_, failure_day),
+  event = as.integer(!is.na(failure_day) & failure_day <= censor_day),
+  end_day = pmax(if_else(event == 1L, failure_day, censor_day), 0.01))
 OUTCOMES <- c(inhosp_logistic = "in-hospital death (logistic)",
-              day60_before_imv = "60-day death, before invasive ventilation (Cox)")
+              day60_before_imv = "60-day death, before invasive ventilation (Cox)",
+              day60_all = "60-day death, all (Cox; control deaths after intubation counted)",
+              day60_death_or_imv = "60-day death or invasive ventilation (Cox; control intubation is the event)")
 
 # One coefficient: `term` in the model event ~ SF + SOFA + [extra] + term
 fit_term <- function(dat, outcome_key, term, extra = character(0)) {
-  dat <- if (outcome_key == "inhosp_logistic") dat %>% mutate(event = deceased) else outcome_data(dat)
+  dat <- if (outcome_key == "inhosp_logistic") dat %>% mutate(event = deceased) else outcome_data(dat, outcome_key)
   row_head <- tibble(n_patients = nrow(dat), n_deaths = sum(dat$event == 1))
   if (row_head$n_deaths < MIN_EVENTS)
     return(row_head %>% mutate(log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
@@ -399,6 +420,109 @@ contrast <- bind_rows(per_cohort, delivered) %>%
 message("\nThe ventilation contrast, in-hospital death, everyone (per 0.1 log units; severity only):")
 print(as.data.frame(contrast %>% filter(population == "everyone", grepl("^in-hospital", outcome)) %>%
                       select(exposure, dose, quantity, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, n_deaths) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+
+# =============================================================================
+# 2b. Is censoring the control at intubation informative?
+# =============================================================================
+# "60-day death before invasive ventilation" censors a control at intubation. If an
+# exposure predicts which controls are intubated, the censoring is informative: the
+# control's coefficient is estimated on the patients the exposure kept unventilated,
+# and the difference shifts with it. Per control population, the cause-specific
+# hazard of invasive ventilation within HORIZON_DAYS (death is the competing event,
+# censored), on SF, SOFA and each exposure, as the mortality models. A hazard ratio
+# near 1 means the censoring does not select on the exposure; the two companion
+# outcomes of section 2 show how far the contrast moves when nothing is censored.
+censoring_check <- expand_grid(population = names(POPULATIONS), exposure = names(EXPOSURES)) %>%
+  pmap_dfr(function(population, exposure) {
+    dat <- population_data(population, "No support") %>%
+      mutate(event = as.integer(!is.na(imv_day) & imv_day <= HORIZON_DAYS &
+                                  (is.na(death_index_day) | imv_day <= death_index_day)),
+             end_day = pmax(pmin(HORIZON_DAYS, coalesce(imv_day, Inf), coalesce(death_index_day, Inf)), 0.01))
+    head_row <- tibble(population = POPULATIONS[[population]], exposure = EXPOSURES[[exposure]],
+                       n_patients = nrow(dat), n_intubated = sum(dat$event))
+    if (head_row$n_intubated < MIN_EVENTS)
+      return(head_row %>% mutate(log_hr = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "intubations")))
+    term <- exposure   # the column name; inside mutate(), `exposure` is the label column
+    fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~ sf_z + sofa_z +", term)), data = dat)))
+    if (separated(fit)) return(head_row %>% mutate(log_hr = NA_real_, se = NA_real_, note = conditionMessage(fit)))
+    head_row %>% mutate(log_hr = unname(coef(fit)[term]), se = unname(sqrt(vcov(fit)[term, term])), note = NA_character_)
+  }) %>%
+  mutate(hr_per_0.1 = exp(0.1 * log_hr), lo_per_0.1 = exp(0.1 * (log_hr - 1.96 * se)), hi_per_0.1 = exp(0.1 * (log_hr + 1.96 * se)),
+         p = 2 * pnorm(-abs(log_hr / se)), outcome = paste0("invasive ventilation within ", HORIZON_DAYS, " days, control only (cause-specific Cox)"),
+         scale = "log HR per log unit of the exposure; hr_per_0.1 is per 0.1 log units", site = site_name)
+message("\nIs the control's censoring at intubation informative? Hazard of intubation per 0.1 log units:")
+print(as.data.frame(censoring_check %>% select(population, exposure, n_patients, n_intubated, hr_per_0.1, lo_per_0.1, hi_per_0.1, p) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+
+# =============================================================================
+# 2c. The age-free strain error by its inputs: sex, race and height
+# =============================================================================
+# log PBW/PFVC at age 25 is Devine's PBW over GLI's FVC at age 25: a fixed function of
+# sex, race and height. Its ventilator-specific contrast is split here by input, so
+# that one input (at MIMIC, the OTHER category, which holds the unknown race) cannot
+# carry it unseen. Per cohort, with no age term (the age-free index has none):
+#   death ~ SF + SOFA + female + Black + Other + height piece
+# The height piece is the ratio's own height curve at each patient's sex
+# (height_fingerprint(), 20_biotrauma_grid.R), in log PBW/PFVC units. Each indicator
+# is also put on the ratio's scale: its coefficient over the ratio-at-25 shift that
+# GLI and Devine assign it at the cohort's median height (implied_per_0.1). If the
+# contrast is strain error, the pieces' implied slopes agree with one another and
+# with the one-beta contrast of section 2; a piece that runs alone is that input's
+# own ventilator-specific effect, not strain.
+ratio25_at <- function(height_cm, sex, race) {
+  sex_code <- if (sex == "Female") 2L else 1L
+  race_code <- switch(race, WHITE = 1L, BLACK = 2L, OTHER = 5L)
+  devine <- if (sex == "Female") 45.5 + 2.3 * (height_cm / 2.54 - 60) else 50 + 2.3 * (height_cm / 2.54 - 60)
+  log(devine) - log(rspiro::pred_GLI(age = 25, height = height_cm / 100, gender = sex_code, ethnicity = race_code, param = "FVC"))
+}
+median_height <- median(both_cohorts$height_cm)
+PIECE_SHIFTS <- c(female = ratio25_at(median_height, "Female", "WHITE") - ratio25_at(median_height, "Male", "WHITE"),
+                  black  = ratio25_at(median_height, "Male", "BLACK") - ratio25_at(median_height, "Male", "WHITE"),
+                  other  = ratio25_at(median_height, "Male", "OTHER") - ratio25_at(median_height, "Male", "WHITE"),
+                  height_piece = 1)   # already in log PBW/PFVC units
+PIECE_LABELS <- c(female = "sex (female)", black = "race (Black)", other = "race (Other)", height_piece = "height (own-sex curve)")
+both_cohorts <- both_cohorts %>%
+  mutate(female = as.numeric(sex_category == "Female"), black = as.numeric(race_category == "BLACK"),
+         other = as.numeric(race_category == "OTHER"),
+         height_piece = height_fingerprint(height_cm, as.character(sex_category)))
+fit_pieces <- function(dat, outcome_key) {
+  dat <- if (outcome_key == "inhosp_logistic") dat %>% mutate(event = deceased) else outcome_data(dat, outcome_key)
+  pieces <- names(PIECE_SHIFTS)
+  head_row <- tibble(n_patients = nrow(dat), n_deaths = sum(dat$event == 1))
+  if (head_row$n_deaths < MIN_EVENTS)
+    return(head_row %>% mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
+  rhs <- paste(c("sf_z", "sofa_z", pieces), collapse = " + ")
+  fit <- fit_or_separation(if (outcome_key == "inhosp_logistic")
+    fit_strict(glm(as.formula(paste("event ~", rhs)), family = binomial, data = dat)) else
+    fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat)))
+  if (separated(fit)) return(head_row %>% mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = conditionMessage(fit)))
+  head_row %>% slice(rep(1, length(pieces))) %>%
+    mutate(piece = pieces, log_ratio = unname(coef(fit)[pieces]), se = unname(sqrt(diag(vcov(fit))[pieces])), note = NA_character_)
+}
+age25_pieces <- expand_grid(population = names(POPULATIONS), outcome_key = names(OUTCOMES)) %>%
+  mutate(fits = map2(population, outcome_key, function(population, outcome_key) {
+    ventilated <- fit_pieces(population_data(population, "Ventilated"), outcome_key) %>% mutate(quantity = "Ventilated")
+    control <- fit_pieces(population_data(population, "No support"), outcome_key) %>% mutate(quantity = "No support")
+    difference <- ventilated %>% transmute(piece, quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                           se = sqrt(se^2 + control$se^2), n_patients = NA_integer_, n_deaths = NA_integer_,
+                                           note = coalesce(note, control$note))
+    bind_rows(ventilated, control, difference)
+  })) %>% unnest(fits) %>%
+  mutate(population = POPULATIONS[population], outcome = OUTCOMES[outcome_key],
+         shift_in_log_ratio25 = PIECE_SHIFTS[piece], input = PIECE_LABELS[piece],
+         implied_log_ratio = log_ratio / shift_in_log_ratio25, implied_se = se / abs(shift_in_log_ratio25),
+         implied_per_0.1 = exp(0.1 * implied_log_ratio),
+         implied_lo_per_0.1 = exp(0.1 * (implied_log_ratio - 1.96 * implied_se)),
+         implied_hi_per_0.1 = exp(0.1 * (implied_log_ratio + 1.96 * implied_se)),
+         p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "log_ratio: log OR or log HR per unit of the piece (an indicator, or log PBW/PFVC units for height); implied_*: per 0.1 log units of PBW/PFVC at age 25",
+         site = site_name) %>%
+  select(population, outcome, quantity, input, piece, log_ratio, se, p, shift_in_log_ratio25,
+         implied_per_0.1, implied_lo_per_0.1, implied_hi_per_0.1, n_patients, n_deaths, note, scale, site)
+message("\nThe age-25 strain error by input, ventilated minus control, everyone (implied per 0.1 log units of PBW/PFVC at 25):")
+print(as.data.frame(age25_pieces %>% filter(population == "everyone", quantity == DIFFERENCE) %>%
+                      select(outcome, input, implied_per_0.1, implied_lo_per_0.1, implied_hi_per_0.1, p) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 # =============================================================================
@@ -598,6 +722,8 @@ placebo_results <- bind_rows(placebo_results, age_tests) %>%
 
 write_csv(dosing, file.path(final_dir, paste0("strain_invariance_dosing_", site_name, ".csv")))
 write_csv(contrast, file.path(final_dir, paste0("strain_invariance_contrast_", site_name, ".csv")))
+write_csv(censoring_check, file.path(final_dir, paste0("strain_invariance_censoring_", site_name, ".csv")))
+write_csv(age25_pieces, file.path(final_dir, paste0("strain_invariance_age25_pieces_", site_name, ".csv")))
 write_csv(placebo_results, file.path(final_dir, paste0("strain_invariance_placebo_", site_name, ".csv")))
 write_csv(age_curve, file.path(final_dir, paste0("strain_invariance_age_curve_", site_name, ".csv")))
 if (!is.null(code_status_counts))
