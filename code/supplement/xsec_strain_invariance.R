@@ -105,9 +105,11 @@
 #                                           ratio's scale
 #   strain_invariance_death_modes_{site}.csv  section 2d: the age component, the age-25
 #                                           strain error, both, and the ratio, by mode
-#                                           of death (full support, limitation, no
-#                                           record, after discharge), per cohort and
+#                                           of death (full support, terminal and
+#                                           established limitation, no record,
+#                                           hospice, after discharge), per cohort and
 #                                           the difference; _death_mode_counts_ the
+#                                           charting checks and
 #                                           deaths in each mode (needs code_status)
 #   strain_invariance_placebo_{site}.csv    every index: the two cohorts' coefficients,
 #                                           the difference, its z, and (references) the
@@ -532,7 +534,7 @@ print(as.data.frame(age25_pieces %>% filter(population == "everyone", quantity =
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 # =============================================================================
-# 2d. How the patient died: under full support, after a limitation, or after discharge
+# 2d. How the patient died: under full support, after a limitation, in hospice, or after discharge
 # =============================================================================
 # The age component of the strain error, log(PFVC at age 25 / PFVC) = log PBW/PFVC
 # minus log PBW/PFVC at age 25, is a fixed function of age, so its ventilator-specific
@@ -542,21 +544,38 @@ print(as.data.frame(age25_pieces %>% filter(population == "everyone", quantity =
 # limitation or after discharge. Strain acts through the lung whatever the goals of
 # care. So the 60-day death of section 2 (controls censored at intubation) is split by
 # how it happened, each a cause-specific hazard with the other kinds of death as
-# competing events (censored):
-#   full support    in hospital, with a code-status record and no limitation (any
-#                   status other than Full or Presume Full) started before death
-#   limitation      in hospital, after a limitation started (between hospital
-#                   admission and death)
-#   no record       in hospital, with no code-status record in the hospitalization
-#   after discharge within the 60 days, after the patient left hospital
+# competing events (censored). How a death is charted decides its class, so the
+# classes follow the discharge disposition, not the timestamps alone:
+#   full support        discharged dead (discharge category Expired, 03's in-hospital
+#                       death), with a code-status record and no limitation (any status
+#                       other than Full or Presume Full) started before death
+#   terminal limitation discharged dead, a limitation first written in the last
+#                       LIMITATION_LEAD_H hours before death: an order charted as death
+#                       becomes imminent, or with a terminal extubation, which records
+#                       how the death was managed more than a decision that changed
+#                       its course
+#   established limitation  discharged dead, a limitation in place at least
+#                       LIMITATION_LEAD_H hours before death: goals of care that shaped
+#                       the stay
+#   no record           discharged dead, with no code-status record in the hospitalization
+#   hospice             discharged to hospice and dead within the 60 days
+#   after discharge     discharged alive anywhere else and dead within the 60 days
+# A patient discharged dead is an in-hospital death even when the death stamp falls
+# after the discharge stamp (a date-only stamp, or one charted the next calendar day),
+# and a hospice discharge is an end-of-life transfer, not a recovery. The counts table
+# also gives, for the deaths after discharge, how many fell within
+# EARLY_POST_DISCHARGE_H hours of it and the discharge categories they came from, so a
+# charting artefact the disposition misses would show there.
 # Stated before the data: if the age component's ventilator-specific excess is strain,
 # it appears in deaths under full support; if it is withdrawal and goals of care, it
-# sits in deaths after a limitation (and, for the control, after discharge). Neither
-# split is clean: age and illness also decide who receives a limitation, so the
-# limitation hazard is not a pure "decision" outcome, and the full-support hazard is
-# measured in the patients the decisions left. The exposures are the age component,
+# sits in the limitation and hospice classes (and, for the control, after discharge).
+# Neither split is clean: age and illness also decide who receives a limitation, so
+# the limitation hazards are not pure "decision" outcomes, and the full-support hazard
+# is measured in the patients the decisions left. The exposures are the age component,
 # the age-25 strain error, the two together, and the full ratio. Needs the optional
-# code_status table.
+# code_status table and the hospitalization table's discharge_category.
+LIMITATION_LEAD_H      <- 24   # an order written in the last day is end-of-life charting
+EARLY_POST_DISCHARGE_H <- 48   # a death this soon after discharge is checked for charting
 if (HAS_CODE_STATUS) {
   limitation_start <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
     inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
@@ -568,20 +587,34 @@ if (HAS_CODE_STATUS) {
               limitation_dttm = suppressWarnings(min(start_dttm[!tolower(code_status_category) %in% FULL_CODE_CATEGORIES])),
               .groups = "drop") %>%
     mutate(limitation_dttm = if_else(is.infinite(as.numeric(limitation_dttm)), as.POSIXct(NA), limitation_dttm))
-  DEATH_MODES <- c(full_support = "in hospital, under full support", limitation = "in hospital, after a limitation",
-                   no_record = "in hospital, no code-status record", after_discharge = "after discharge")
+  discharge_disposition <- read_clif_table("hospitalization", c("hospitalization_id", "discharge_category")) %>%
+    filter(hospitalization_id %in% both_cohorts$hospitalization_id) %>%
+    distinct(hospitalization_id, .keep_all = TRUE)
+  DEATH_MODES <- c(full_support = "in hospital, under full support",
+                   terminal_limitation = paste0("in hospital, limitation written in the last ", LIMITATION_LEAD_H, " h"),
+                   established_limitation = paste0("in hospital, limitation in place ", LIMITATION_LEAD_H, " h or more"),
+                   no_record = "in hospital, no code-status record",
+                   hospice = "discharged to hospice",
+                   after_discharge = "after discharge, elsewhere")
   death_mode_data <- both_cohorts %>%
     left_join(limitation_start, by = c("cohort", "hospitalization_id")) %>%
+    left_join(discharge_disposition, by = "hospitalization_id") %>%
     mutate(has_code_status_record = coalesce(has_code_status_record, FALSE),
+           discharged_dead = deceased == 1,
+           to_hospice = coalesce(tolower(discharge_category) == "hospice", FALSE),
            age_component = log(pfvc_age25 / pfvc))
   mode_outcome <- function(dat) {
     dat <- outcome_data(dat, "day60_before_imv")
-    dat %>% mutate(death_mode = case_when(
-      event == 0L ~ NA_character_,
-      !is.na(discharge_index_day) & death_index_day > discharge_index_day ~ "after_discharge",
-      !has_code_status_record ~ "no_record",
-      !is.na(limitation_dttm) & limitation_dttm <= death_dttm ~ "limitation",
-      TRUE ~ "full_support"))
+    dat %>% mutate(
+      limitation_lead_h = as.numeric(difftime(death_dttm, limitation_dttm, units = "hours")),
+      death_mode = case_when(
+        event == 0L ~ NA_character_,
+        !discharged_dead & to_hospice ~ "hospice",
+        !discharged_dead ~ "after_discharge",
+        !has_code_status_record ~ "no_record",
+        !is.na(limitation_dttm) & limitation_dttm <= death_dttm & limitation_lead_h >= LIMITATION_LEAD_H ~ "established_limitation",
+        !is.na(limitation_dttm) & limitation_dttm <= death_dttm ~ "terminal_limitation",
+        TRUE ~ "full_support"))
   }
   MODE_EXPOSURES <- c(age_component = "age component, log(PFVC at 25 / PFVC)",
                       log_ratio_age25 = "log PBW/PFVC at age 25",
@@ -619,9 +652,21 @@ if (HAS_CODE_STATUS) {
            n_patients, n_deaths_mode, note, outcome, scale, site)
   death_mode_counts <- map_dfr(names(mode_populations), function(population) map_dfr(COHORTS, function(cohort_now) {
     mode_outcome(mode_population(population, cohort_now)) %>%
+      mutate(post_discharge_h = as.numeric(difftime(death_dttm, discharge_dttm, units = "hours"))) %>%
       summarise(n_patients = n(), deaths = sum(event),
-                deaths_full_support = sum(death_mode %in% "full_support"), deaths_limitation = sum(death_mode %in% "limitation"),
-                deaths_no_record = sum(death_mode %in% "no_record"), deaths_after_discharge = sum(death_mode %in% "after_discharge"),
+                deaths_full_support = sum(death_mode %in% "full_support"),
+                deaths_terminal_limitation = sum(death_mode %in% "terminal_limitation"),
+                deaths_established_limitation = sum(death_mode %in% "established_limitation"),
+                deaths_no_record = sum(death_mode %in% "no_record"),
+                deaths_hospice = sum(death_mode %in% "hospice"),
+                deaths_after_discharge = sum(death_mode %in% "after_discharge"),
+                # charting checks: discharged dead but stamped after discharge; dead soon after a live discharge
+                discharged_dead_stamped_after_discharge = sum(event == 1 & discharged_dead & post_discharge_h > 0, na.rm = TRUE),
+                after_discharge_within_early_window = sum(death_mode %in% c("hospice", "after_discharge") &
+                                                            post_discharge_h <= EARLY_POST_DISCHARGE_H, na.rm = TRUE),
+                early_post_discharge_categories = paste(sort(unique(discharge_category[death_mode %in% c("hospice", "after_discharge") &
+                                                                                        post_discharge_h <= EARLY_POST_DISCHARGE_H])),
+                                                        collapse = "; "),
                 with_code_status_record = sum(has_code_status_record)) %>%
       mutate(population = mode_populations[[population]], cohort = cohort_now, .before = 1)
   })) %>% mutate(site = site_name)
