@@ -103,6 +103,12 @@
 #                                           into sex, Black, Other and the height curve,
 #                                           per cohort and the difference, each on the
 #                                           ratio's scale
+#   strain_invariance_death_modes_{site}.csv  section 2d: the age component, the age-25
+#                                           strain error, both, and the ratio, by mode
+#                                           of death (full support, limitation, no
+#                                           record, after discharge), per cohort and
+#                                           the difference; _death_mode_counts_ the
+#                                           deaths in each mode (needs code_status)
 #   strain_invariance_placebo_{site}.csv    every index: the two cohorts' coefficients,
 #                                           the difference, its z, and (references) the
 #                                           percentile of |z| among the placebos; the
@@ -526,6 +532,111 @@ print(as.data.frame(age25_pieces %>% filter(population == "everyone", quantity =
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 # =============================================================================
+# 2d. How the patient died: under full support, after a limitation, or after discharge
+# =============================================================================
+# The age component of the strain error, log(PFVC at age 25 / PFVC) = log PBW/PFVC
+# minus log PBW/PFVC at age 25, is a fixed function of age, so its ventilator-specific
+# contrast cannot be told from other things that make old age worse on a ventilator.
+# Two of those run through decisions rather than physiology: life support is withdrawn
+# more often in older ventilated patients, and older controls more often die under a
+# limitation or after discharge. Strain acts through the lung whatever the goals of
+# care. So the 60-day death of section 2 (controls censored at intubation) is split by
+# how it happened, each a cause-specific hazard with the other kinds of death as
+# competing events (censored):
+#   full support    in hospital, with a code-status record and no limitation (any
+#                   status other than Full or Presume Full) started before death
+#   limitation      in hospital, after a limitation started (between hospital
+#                   admission and death)
+#   no record       in hospital, with no code-status record in the hospitalization
+#   after discharge within the 60 days, after the patient left hospital
+# Stated before the data: if the age component's ventilator-specific excess is strain,
+# it appears in deaths under full support; if it is withdrawal and goals of care, it
+# sits in deaths after a limitation (and, for the control, after discharge). Neither
+# split is clean: age and illness also decide who receives a limitation, so the
+# limitation hazard is not a pure "decision" outcome, and the full-support hazard is
+# measured in the patients the decisions left. The exposures are the age component,
+# the age-25 strain error, the two together, and the full ratio. Needs the optional
+# code_status table.
+if (HAS_CODE_STATUS) {
+  limitation_start <- read_clif_table("code_status", c("patient_id", "start_dttm", "code_status_category")) %>%
+    inner_join(site_hospitalizations, by = "patient_id", relationship = "many-to-many") %>%
+    inner_join(both_cohorts %>% transmute(cohort, hospitalization_id, admission_dttm, discharge_dttm),
+               by = "hospitalization_id", relationship = "many-to-many") %>%
+    filter(start_dttm >= admission_dttm, start_dttm <= discharge_dttm) %>%
+    group_by(cohort, hospitalization_id) %>%
+    summarise(has_code_status_record = TRUE,
+              limitation_dttm = suppressWarnings(min(start_dttm[!tolower(code_status_category) %in% FULL_CODE_CATEGORIES])),
+              .groups = "drop") %>%
+    mutate(limitation_dttm = if_else(is.infinite(as.numeric(limitation_dttm)), as.POSIXct(NA), limitation_dttm))
+  DEATH_MODES <- c(full_support = "in hospital, under full support", limitation = "in hospital, after a limitation",
+                   no_record = "in hospital, no code-status record", after_discharge = "after discharge")
+  death_mode_data <- both_cohorts %>%
+    left_join(limitation_start, by = c("cohort", "hospitalization_id")) %>%
+    mutate(has_code_status_record = coalesce(has_code_status_record, FALSE),
+           age_component = log(pfvc_age25 / pfvc))
+  mode_outcome <- function(dat) {
+    dat <- outcome_data(dat, "day60_before_imv")
+    dat %>% mutate(death_mode = case_when(
+      event == 0L ~ NA_character_,
+      !is.na(discharge_index_day) & death_index_day > discharge_index_day ~ "after_discharge",
+      !has_code_status_record ~ "no_record",
+      !is.na(limitation_dttm) & limitation_dttm <= death_dttm ~ "limitation",
+      TRUE ~ "full_support"))
+  }
+  MODE_EXPOSURES <- c(age_component = "age component, log(PFVC at 25 / PFVC)",
+                      log_ratio_age25 = "log PBW/PFVC at age 25",
+                      `age_component + log_ratio_age25` = "both together (each holding the other)",
+                      log_ratio = "log PBW/PFVC")
+  mode_population <- function(population, cohort_now) death_mode_data %>%
+    filter(cohort == cohort_now, if (population == "eligible") intubation_eligible else TRUE)
+  fit_mode <- function(dat, mode, exposure_key) {
+    dat <- mode_outcome(dat) %>% mutate(mode_event = as.integer(coalesce(death_mode == mode, FALSE)))
+    terms <- trimws(strsplit(exposure_key, "\\+")[[1]])
+    head_row <- tibble(n_patients = nrow(dat), n_deaths_mode = sum(dat$mode_event))
+    if (head_row$n_deaths_mode < MIN_EVENTS)
+      return(head_row %>% slice(rep(1, length(terms))) %>% mutate(term = terms, log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
+    fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, mode_event) ~ sf_z + sofa_z +", exposure_key)), data = dat)))
+    if (separated(fit)) return(head_row %>% slice(rep(1, length(terms))) %>% mutate(term = terms, log_ratio = NA_real_, se = NA_real_, note = conditionMessage(fit)))
+    head_row %>% slice(rep(1, length(terms))) %>%
+      mutate(term = terms, log_ratio = unname(coef(fit)[terms]), se = unname(sqrt(diag(vcov(fit))[terms])), note = NA_character_)
+  }
+  mode_populations <- c(everyone = "everyone", eligible = ELIGIBLE_LABEL)
+  death_modes <- expand_grid(population = names(mode_populations), mode = names(DEATH_MODES), exposure_key = names(MODE_EXPOSURES)) %>%
+    mutate(fits = pmap(list(population, mode, exposure_key), function(population, mode, exposure_key) {
+      ventilated <- fit_mode(mode_population(population, "Ventilated"), mode, exposure_key) %>% mutate(quantity = "Ventilated")
+      control <- fit_mode(mode_population(population, "No support"), mode, exposure_key) %>% mutate(quantity = "No support")
+      difference <- ventilated %>% transmute(term, quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                             se = sqrt(se^2 + control$se^2), n_patients = NA_integer_, n_deaths_mode = NA_integer_,
+                                             note = coalesce(note, control$note))
+      bind_rows(ventilated, control, difference)
+    })) %>% unnest(fits) %>%
+    mutate(population = mode_populations[population], death_mode = DEATH_MODES[mode], model = MODE_EXPOSURES[exposure_key],
+           hr_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+           hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+           outcome = paste0(HORIZON_DAYS, "-day death by mode, controls censored at invasive ventilation (cause-specific Cox)"),
+           scale = "log HR per log unit of the term; hr_per_0.1 is per 0.1 log units", site = site_name) %>%
+    select(population, death_mode, model, term, quantity, log_ratio, se, hr_per_0.1, lo_per_0.1, hi_per_0.1, p,
+           n_patients, n_deaths_mode, note, outcome, scale, site)
+  death_mode_counts <- map_dfr(names(mode_populations), function(population) map_dfr(COHORTS, function(cohort_now) {
+    mode_outcome(mode_population(population, cohort_now)) %>%
+      summarise(n_patients = n(), deaths = sum(event),
+                deaths_full_support = sum(death_mode %in% "full_support"), deaths_limitation = sum(death_mode %in% "limitation"),
+                deaths_no_record = sum(death_mode %in% "no_record"), deaths_after_discharge = sum(death_mode %in% "after_discharge"),
+                with_code_status_record = sum(has_code_status_record)) %>%
+      mutate(population = mode_populations[[population]], cohort = cohort_now, .before = 1)
+  })) %>% mutate(site = site_name)
+  message("\nDeaths by mode (", HORIZON_DAYS, " days, controls censored at intubation):")
+  print(as.data.frame(death_mode_counts %>% select(-site)), row.names = FALSE)
+  message("Age component of the strain error by mode of death, ventilated minus control, everyone (HR per 0.1 log units):")
+  print(as.data.frame(death_modes %>% filter(population == "everyone", quantity == DIFFERENCE, model == MODE_EXPOSURES[["age_component"]]) %>%
+                        select(death_mode, hr_per_0.1, lo_per_0.1, hi_per_0.1, p) %>%
+                        mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+} else {
+  message("\n*** No code_status table: the split by mode of death (section 2d) is skipped. ***")
+  death_modes <- NULL; death_mode_counts <- NULL
+}
+
+# =============================================================================
 # 3. Placebo formulas
 # =============================================================================
 # The inputs, whitened over both cohorts together: X centred, then rotated and scaled
@@ -724,6 +835,10 @@ write_csv(dosing, file.path(final_dir, paste0("strain_invariance_dosing_", site_
 write_csv(contrast, file.path(final_dir, paste0("strain_invariance_contrast_", site_name, ".csv")))
 write_csv(censoring_check, file.path(final_dir, paste0("strain_invariance_censoring_", site_name, ".csv")))
 write_csv(age25_pieces, file.path(final_dir, paste0("strain_invariance_age25_pieces_", site_name, ".csv")))
+if (!is.null(death_modes)) {
+  write_csv(death_modes, file.path(final_dir, paste0("strain_invariance_death_modes_", site_name, ".csv")))
+  write_csv(death_mode_counts, file.path(final_dir, paste0("strain_invariance_death_mode_counts_", site_name, ".csv")))
+}
 write_csv(placebo_results, file.path(final_dir, paste0("strain_invariance_placebo_", site_name, ".csv")))
 write_csv(age_curve, file.path(final_dir, paste0("strain_invariance_age_curve_", site_name, ".csv")))
 if (!is.null(code_status_counts))
