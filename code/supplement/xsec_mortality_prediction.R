@@ -44,8 +44,9 @@
 #              family, the PBW, PFVC and PFVC-at-age-25 scalings against each other
 # A model that warns stops the script.
 #
-# Inputs : intermediate/analysis_cross_sectional.parquet (script 03)
-# Outputs: final/supplement/
+# Inputs : intermediate/analysis_cross_sectional.parquet (script 03); with
+#          PBWPFVC_VTPBW_GATE=0 (the runner's second pass) the ungated cohort's table
+# Outputs: final/supplement/ (final/ungated/supplement/ when ungated)
 #   mortality_prediction_{site}.csv   one row per measure x outcome x form x
 #                                     adjustment x sample
 #   mortality_prediction_pairwise_{site}.csv  the size scalings within each family
@@ -99,7 +100,7 @@ fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
 # =============================================================================
 # Data
 # =============================================================================
-cross_sectional <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
+cross_sectional <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
   select(hospitalization_id, all_of(MEASURES$column), deceased, mortality_event_60, sex_category, race_category) %>%
   mutate(sex_category = factor(sex_category, levels = c("Male", "Female")),
          race_category = factor(race_category, levels = c("WHITE", "BLACK", "OTHER")))

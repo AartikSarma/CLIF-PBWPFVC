@@ -150,6 +150,7 @@ base <- cs %>%
             pfvc_gli = pfvc,           # the GLI-2012 PFVC, under the name 21 reads
             pfvc,                       # the same value, the denominator of the daily VT/PFVC
             pfvc_age25,                 # PFVC at age 25 (script 03), carried to the survival table
+            pva, ptlc, pfrc,            # reference lung volumes (script 03; NA outside their ages)
             pbw, death_day, death_time_days,
             # extubation: the last invasive-ventilation record of the stay (script 03;
             # a reintubation counts as continuous ventilation), ventilated cohort only

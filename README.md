@@ -107,7 +107,9 @@ Each site has one output folder, `output/<site_name>_output/`:
   |---|---|---|
   | `final/cross_sectional/` | figures 1-3 | `03`-`05` |
   | `final/injury/` | figure 4 | `21`-`28` |
+  | `final/supplement/` | supplementary analyses | `code/supplement/` |
   | `final/controls/` | the control cohorts, all in one folder; file names carry `<site>_<cohort>` | `01`-`03`, `21`-`26` under `PBWPFVC_COHORT` |
+  | `final/ungated/<block>/` | the same tables for the ventilated cohort without the VT/PBW 6-8 mL/kg entry band | the runners, with `PBWPFVC_VTPBW_GATE=0` |
 
   A script asks `utils/config.R` for its folder with `final_dir_for("<block>")`.
 
@@ -174,8 +176,10 @@ what this runner has always done, so existing site instructions still work.
 
 `code/29_run_figure4.R` runs everything behind figure 4 for a site and draws it:
 
-- **Markers:** platelets, bilirubin, creatinine, vasopressors, and the oxygen
-  saturation index, each over the first 7 days, adjusted and unadjusted.
+- **Markers:** platelets, creatinine, vasopressors, and the oxygen saturation
+  index, each over the first 7 days, adjusted and unadjusted. Bilirubin is drawn when
+  a liver is suspected, so its missingness is informative; `26_measurement_check.R`
+  reports that selection (`measurement_selection_`) and bilirubin is not a marker.
   Creatinine ends at renal replacement of any kind, continuous or intermittent, which
   is modelled as a third competing event; patients with ESRD are censored at day 0.
   Vasopressors are a two-part outcome, reported as a pair: on/off (`any_pressor`,

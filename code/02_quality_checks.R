@@ -136,7 +136,7 @@ resp_thresholds <- read_csv(
 ) %>%
   mutate(across(c(lower_limit, upper_limit), as.numeric))
 
-# Apply thresholds to each numeric column in the waterfall output
+# Apply threshclds to each numeric column in the waterfall output
 resp_waterfall_clean <- resp_waterfall
 
 for (i in seq_len(nrow(resp_thresholds))) {

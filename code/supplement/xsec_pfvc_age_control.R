@@ -49,7 +49,7 @@
 # support, and the PFVC association with escalation itself, which says whether
 # censoring at escalation selects on PFVC. Every control patient stays in the
 # cohort whenever they escalate; a control's follow-up for the comparison ends at
-# escalation, which is why "before escalation" is the comparison outcome (the rows
+# escalation, which is why "censored at any escalation of support" is the comparison outcome (the rows
 # figure 4's checks read), and deaths after escalation, which can follow
 # ventilation, are counted only in the "all" outcomes. The severity form reads the
 # control at the ventilated cohort's severity, as figure 4 does, because the
@@ -479,12 +479,15 @@ curves <- cohort_fits %>% mutate(curves = map(fit, "curves")) %>% select(-fit) %
 # 03's surv_time; the times are recomputed here because the escalation-censored
 # outcomes need the death, discharge and escalation days on one clock. Six
 # cause-specific Cox models, 60-day horizon:
-#   in-hospital death, all                          censored at discharge
-#   in-hospital death, before escalation            censored at discharge and at escalation
-#   in-hospital death, before invasive ventilation  censored at discharge and at intubation
-#   60-day death, all                               includes deaths after discharge
-#   60-day death, before escalation                 censored at escalation
-#   60-day death, before invasive ventilation       censored at intubation
+#   in-hospital death, all                                          censored at discharge
+#   in-hospital death, controls censored at any escalation of support
+#                                                                   and at escalation
+#   in-hospital death, controls censored at escalation to IMV       and at intubation
+#   60-day death, all                                               includes deaths after discharge
+#   60-day death, controls censored at any escalation of support    censored at escalation
+#   60-day death, controls censored at escalation to IMV            censored at intubation
+# A ventilated patient is intubated at the index and never censored, so in the
+# ventilated cohort every pair is the same outcome; the censoring acts on the control.
 # The in-hospital logistic model of the age curves is kept beside them. If the
 # control's PFVC association moves with the outcome (in-hospital against 60-day),
 # deaths after discharge carry it, a reserve channel outside the ventilator; if it
@@ -507,18 +510,18 @@ OUTCOMES <- tribble(
   ~outcome_key,          ~outcome,                                    ~model,
   "inhosp_logistic",     "in-hospital death (logistic)",               "logistic",
   "inhosp_all",          "in-hospital death, all",                     "cox",
-  "inhosp_before_esc",   "in-hospital death, before escalation",       "cox",
-  "inhosp_before_imv",   "in-hospital death, before invasive ventilation", "cox",
+  "inhosp_before_esc",   "in-hospital death, controls censored at any escalation of support",       "cox",
+  "inhosp_censor_escalation",   "in-hospital death, controls censored at escalation to IMV", "cox",
   "day60_all",           "60-day death, all",                          "cox",
-  "day60_before_esc",    "60-day death, before escalation",            "cox",
-  "day60_before_imv",    "60-day death, before invasive ventilation",  "cox")
+  "day60_before_esc",    "60-day death, controls censored at any escalation of support",            "cox",
+  "day60_censor_escalation",    "60-day death, controls censored at escalation to IMV",  "cox")
 outcome_data <- function(cohort_data, outcome_key) {
-  # time (days from the index) and event for each Cox outcome; "before invasive
-  # ventilation" keeps deaths after high-flow or noninvasive support and censors
+  # time (days from the index) and event for each Cox outcome; "censored at escalation
+  # to IMV" keeps deaths after high-flow or noninvasive support and censors
   # only at intubation, where a PBW-scaled volume begins (identical to "all" in the
   # ventilated cohort, which is intubated at the index)
   censor_escalation <- grepl("before_esc", outcome_key)
-  censor_imv <- grepl("before_imv", outcome_key)
+  censor_imv <- grepl("censor_escalation", outcome_key)
   in_hospital <- grepl("^inhosp", outcome_key)
   # one death time for every outcome: death_dttm, which script 03 dates at discharge
   # for an expired patient with no death time. In-hospital outcomes count only
@@ -639,7 +642,7 @@ escalation_hazard <- expand_grid(
 # the index), adjusted and unadjusted:
 #   onset   cause-specific Cox for the first day with a worst SF < 315 (days 1-7);
 #           escalation, death and discharge censor
-#   death   cause-specific Cox for death before escalation, with hypoxemia as a
+#   death   cause-specific Cox for death, controls censored at any escalation, with hypoxemia as a
 #           time-varying state and its interaction with log PFVC: the PFVC ratio
 #           before hypoxemia, after it, and their ratio. Onset is dated at the start
 #           of the day whose worst SF first falls below 315.
@@ -708,7 +711,7 @@ if (HAS_CONTROL_PANEL) {
              end_day = pmax(if_else(event == 1L, death_day, censor_day), 0.01),
              hypoxemia_day = if_else(!is.na(hypoxemia_day) & hypoxemia_day < end_day, hypoxemia_day, NA_real_))
     row_head <- tibble(population = POPULATIONS[[population]], adjustment,
-                       analysis = "death before escalation, by hypoxemic state", horizon_days = horizon,
+                       analysis = "death with controls censored at any escalation of support, by hypoxemic state", horizon_days = horizon,
                        n_patients = nrow(dat), n_patients_hypoxemic = sum(!is.na(dat$hypoxemia_day)),
                        n_deaths = sum(dat$event),
                        n_deaths_after_hypoxemia = sum(dat$event == 1 & !is.na(dat$hypoxemia_day)))
@@ -766,7 +769,7 @@ if (HAS_CONTROL_PANEL) {
 # Assumption, as for the whole contrast: each direct path is the same in both cohorts
 # (at the within-cohort severity). The pieces are computed once on both cohorts, so
 # they share one reference patient. Outcomes: the in-hospital logistic model, 60-day
-# death, and 60-day death before intubation; populations as elsewhere. The one-beta
+# death, and 60-day death, controls censored at escalation; populations as elsewhere. The one-beta
 # model (the four pieces' sum, which is log PFVC to a small remainder) is fitted beside
 # it for reference. No demographics: the pieces are the demographics in GLI's shape.
 #
@@ -801,7 +804,7 @@ identifying_sd <- function(frame, piece) {
   others <- setdiff(CHANNELS, piece)
   sd(resid(lm(as.formula(paste(piece, "~", paste(others, collapse = " + "))), data = frame)))
 }
-CHANNEL_OUTCOMES <- OUTCOMES %>% filter(outcome_key %in% c("inhosp_logistic", "day60_all", "day60_before_imv"))
+CHANNEL_OUTCOMES <- OUTCOMES %>% filter(outcome_key %in% c("inhosp_logistic", "day60_all", "day60_censor_escalation"))
 fit_channels <- function(frame, population, cohort_now, outcome_key, model) {
   cohort_data <- frame %>% filter(cohort == cohort_now, .data[[paste0("population_", population)]])
   dat <- if (model == "logistic") cohort_data %>% mutate(event = deceased) else outcome_data(cohort_data, outcome_key)
@@ -897,10 +900,10 @@ print(as.data.frame(contrast %>% filter(adjustment == "adjusted", severity == SE
                       arrange(factor(population, levels = POPULATIONS), factor(outcome, levels = OUTCOMES$outcome), quantity) %>%
                       select(population, outcome, quantity, ratio, ratio_lo, ratio_hi, p, n_deaths, note) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
-message("\nThe channel control contrast (everyone, 60-day death before intubation; per 0.1 log units of each piece;",
+message("\nThe channel control contrast (everyone, 60-day death, controls censored at escalation; per 0.1 log units of each piece;",
         " strain predicts equal ventilated-minus-control differences):")
 print(as.data.frame(channel_contrast %>%
-                      filter(population == POPULATIONS[["everyone"]], outcome == "60-day death, before invasive ventilation") %>%
+                      filter(population == POPULATIONS[["everyone"]], outcome == "60-day death, controls censored at escalation to IMV") %>%
                       select(exposure, quantity, piece, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, identifying_sd) %>%
                       mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 print(as.data.frame(channel_tests %>% mutate(p = signif(p, 3))), row.names = FALSE)

@@ -46,6 +46,21 @@
 #    across patients with Ers scaled by PFVC and by PFVC at age 25 (PBW is not scaled
 #    here).
 #
+# 2c. Reference lung volumes (sensitivity for the strain denominator). The
+#    head-to-head again, with three other predicted volumes beside PBW, PFVC and PFVC
+#    at age 25: alveolar volume (GLI 2017, close to TLC and nearly flat with age),
+#    TLC and FRC (GLI 2021 static lung volumes; FRC rises with age). FVC falls about
+#    a third from 40 to 80, TLC and alveolar volume a few percent, so the age
+#    behaviour is what separates them. All on one sample (age <= 80, the GLI 2021
+#    limit, every volume present). Those equations come from people of European
+#    ancestry with no race term: White patients are the primary stratum, everyone
+#    else a pre-specified second stratum, both decided before any real-site run.
+#    2d: normalised elastance (Ers x each denominator) against age on the same
+#    samples: its change per decade and its median by age band.
+#    2e: the same on dynamic pressures (peak minus PEEP) beside the plateau on the
+#    same patients, the dynamic-compliance head-to-head, and the resistive pressure
+#    (peak minus plateau, volume control) against age and predicted RV.
+#
 # 3. Height elasticity by sex: d log Crs / d log height within each sex, beside
 #    GLI's height elasticity (2.41 men, 2.26 women) and Devine's at the sex's median
 #    height (a line with an intercept, so its elasticity falls as height rises).
@@ -64,8 +79,9 @@
 # no separate driving-pressure sensitivity is fitted. A model that warns stops the
 # script.
 #
-# Inputs : intermediate/analysis_cross_sectional.parquet (script 03)
-# Outputs: final/supplement/
+# Inputs : intermediate/analysis_cross_sectional.parquet (script 03); with
+#          PBWPFVC_VTPBW_GATE=0 (the runner's second pass) the ungated cohort's table
+# Outputs: final/supplement/ (final/ungated/supplement/ when ungated)
 #   crs_channels_estimates_{site}.csv   every exponent: model, term, estimate, SE,
 #                                       CI, p, the value predicted before the data;
 #                                       the specific-elastance rows carry their own
@@ -97,6 +113,15 @@ source(here("code", "20_biotrauma_grid.R"))   # pfvc_channels(), CHANNELS, chann
 # the CLIF minimum-count standard
 MIN_PATIENTS <- 100
 MIN_SUBGROUP_PATIENTS <- 50
+# section 2c: the reference lung volumes, their age limit (GLI 2021 static volumes
+# stop at 80) and the race strata they are read in
+REFERENCE_EXPOSURES <- c(PBW = "log_pbw", PFVC = "log_pfvc", `PFVC at age 25` = "log_pfvc25",
+                         `alveolar volume (GLI 2017)` = "log_pva", `TLC (GLI 2021)` = "log_ptlc",
+                         `FRC (GLI 2021)` = "log_pfrc")
+REFERENCE_MAX_AGE <- 80
+# section 2d: age bands for the normalised-elastance medians
+ELASTANCE_AGE_BANDS <- c(18, 40, 50, 60, 70, 81)
+REFERENCE_STRATA <- list(White = function(race) race == "WHITE", `not White` = function(race) race != "WHITE")
 GLI_HEIGHT_ELASTICITY <- c(Male = 2.41, Female = 2.26)
 OKABE_ITO <- c(height = "#0072B2", age = "#E69F00", sex = "#009E73", race = "#CC79A7",
                PFVC = "#0072B2", PBW = "#D55E00")
@@ -108,7 +133,7 @@ fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w)
 # =============================================================================
 # Data: the plateau-measured index timepoint
 # =============================================================================
-mechanics_all <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet")) %>%
+mechanics_all <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
   filter(!is.na(crs), crs > 0, !is.na(dp), dp > 0) %>%
   filter(!is.na(pfvc), pfvc > 0, !is.na(pfvc_age25), pfvc_age25 > 0, !is.na(pbw), pbw > 0, !is.na(height_cm), !is.na(age_at_admission),
          !is.na(sex_category), !is.na(race_category), !is.na(sf_ratio), sf_ratio > 0,
@@ -127,7 +152,9 @@ mechanics_all <- read_parquet(file.path(config$output_dir, "analysis_cross_secti
          # differs: a Crs
          # exponent of 1 is the same statement as an Espec exponent of 0, and the
          # second is the one a reader weighs against "specific elastance is constant".
-         log_espec = log(ers * pfvc), log_espec25 = log(ers * pfvc_age25))
+         log_espec = log(ers * pfvc), log_espec25 = log(ers * pfvc_age25),
+         # the reference lung volumes of section 2c (script 03; NA outside their ages)
+         log_pva = log(pva), log_ptlc = log(ptlc), log_pfrc = log(pfrc))
 if (nrow(mechanics_all) < MIN_PATIENTS)
   stop("fewer than ", MIN_PATIENTS, " patients with a measured plateau and every covariate")
 SAMPLES <- list(`all plateau-measured` = mechanics_all)
@@ -212,6 +239,124 @@ analyse_sample <- function(dat, sample_label) {
               if (nrow(short_women) >= MIN_SUBGROUP_PATIENTS) head_to_head(short_women, short_women_label, TRUE))
   estimates$head_to_head <- map_dfr(compact(h2h), "estimates")
   tests$head_to_head <- map_dfr(compact(h2h), "tests")
+
+  # ---- 2c. reference lung volumes: which predicted volume does measured compliance
+  #      follow? The same head-to-head with the reference volumes (header, 2c), on
+  #      one sample so the AICs compare: patients aged
+  #      REFERENCE_MAX_AGE or younger with every volume. Those equations come from
+  #      people of European ancestry and have no race term, so the primary stratum is
+  #      White patients and the rest are a pre-specified second stratum.
+  reference_rows <- imap(REFERENCE_STRATA, function(in_stratum, stratum) {
+    sub_dat <- dat %>% filter(age_at_admission <= REFERENCE_MAX_AGE, in_stratum(race_category),
+                              if_all(all_of(unname(REFERENCE_EXPOSURES)), is.finite))
+    if (nrow(sub_dat) < MIN_SUBGROUP_PATIENTS) {
+      message("reference volumes, ", stratum, ": ", nrow(sub_dat), " patients, fewer than ", MIN_SUBGROUP_PATIENTS, "; skipped")
+      return(NULL)
+    }
+    map(c(FALSE, TRUE), function(age_adjusted) {
+      label <- paste0("reference volumes, ", stratum, ", age <= ", REFERENCE_MAX_AGE,
+                      if (age_adjusted) ", age spline in every model" else "")
+      fits <- map(REFERENCE_EXPOSURES, function(exposure)
+        fit_strict(lm(as.formula(paste("log_crs ~", exposure, "+", if (age_adjusted) "ns(age10, 4) +", COVARIATES)), data = sub_dat)))
+      list(estimates = imap_dfr(fits, ~ coef_rows(.x, REFERENCE_EXPOSURES[[.y]], label, sample_label, 1) %>% mutate(exposure = .y)),
+           tests = imap_dfr(fits[names(fits) != "PBW"], ~ tibble(
+             sample = sample_label, test = paste0(label, ": AIC, ", .y, " minus PBW (< 0 favours ", .y, ")"),
+             statistic = AIC(.x) - AIC(fits$PBW), df = NA_real_, p = NA_real_, n_patients = nobs(.x))))
+    })
+  }) %>% compact() %>% list_flatten()
+  estimates$reference_volumes <- map_dfr(reference_rows, "estimates")
+  tests$reference_volumes <- map_dfr(reference_rows, "tests")
+
+  # ---- 2d. normalised elastance against age, under each denominator: Ers x V on the
+  #      same samples. log(Ers x V) = log Ers + log V, and V is a fixed function of
+  #      age, height, sex (and race for GLI 2012), so each slope is measured Ers's age
+  #      slope plus the denominator's own; they differ only through V. Reported as the
+  #      change per decade of age (log scale, with the covariates), and as the median
+  #      of Ers x V in each age band relative to the youngest band (unit-free, since
+  #      PBW is in kg and the rest in litres). A flat slope means the denominator
+  #      absorbs age's effect on measured elastance.
+  estimates$normalised_elastance_age <- imap_dfr(REFERENCE_STRATA, function(in_stratum, stratum) {
+    sub_dat <- dat %>% filter(age_at_admission <= REFERENCE_MAX_AGE, in_stratum(race_category),
+                              if_all(all_of(unname(REFERENCE_EXPOSURES)), is.finite)) %>%
+      mutate(age_band = cut(age_at_admission, ELASTANCE_AGE_BANDS, right = FALSE))
+    if (nrow(sub_dat) < MIN_SUBGROUP_PATIENTS) return(NULL)
+    imap_dfr(REFERENCE_EXPOSURES, function(log_volume, denominator) {
+      sub_dat <- sub_dat %>% mutate(log_normalised = log(ers) + .data[[log_volume]])
+      fit <- fit_strict(lm(as.formula(paste("log_normalised ~ age10 +", COVARIATES)), data = sub_dat))
+      band_medians <- sub_dat %>% group_by(age_band) %>%
+        summarise(n_band = n(), median_normalised = median(exp(log_normalised)), .groups = "drop") %>%
+        mutate(relative_to_youngest_band = median_normalised / first(median_normalised))
+      coef_rows(fit, "age10", paste0("normalised elastance by age, ", stratum, ", age <= ", REFERENCE_MAX_AGE),
+                sample_label) %>%
+        mutate(exposure = denominator, scale = "change in log(Ers x denominator) per decade of age, with the covariates",
+               age_band_relative = paste0(band_medians$age_band, " ", sprintf("%.2f", band_medians$relative_to_youngest_band),
+                                          " (n ", band_medians$n_band, ")", collapse = "; "))
+    })
+  })
+
+  # ---- 2e. the same reads on dynamic pressures. The plateau is taken during an
+  #      end-inspiratory hold; during ordinary breathing, flow and gas trapping could
+  #      make the volume a breath uses differ from what the hold shows, increasingly
+  #      with age. Peak minus PEEP (the dynamic driving pressure) carries the
+  #      resistive pressure as well, peak minus plateau. On the patients of 2c with a
+  #      peak at least as high as the plateau:
+  #        normalised elastance by age, static (plateau) and dynamic (peak), under
+  #          each denominator, on the same patients
+  #        the head-to-head with dynamic compliance, VT / (peak - PEEP), beside
+  #          static compliance on the same patients
+  #        the resistive pressure against age and against predicted RV (GLI 2021),
+  #          volume control only, with VT and the set rate (flow is not recorded, so
+  #          a higher resistive pressure and a faster flow cannot be told apart)
+  #      Peak pressure depends on the mode, hence volume control for the resistive read.
+  dynamic_rows <- imap(REFERENCE_STRATA, function(in_stratum, stratum) {
+    sub_dat <- dat %>% filter(age_at_admission <= REFERENCE_MAX_AGE, in_stratum(race_category),
+                              if_all(all_of(unname(REFERENCE_EXPOSURES)), is.finite),
+                              is.finite(peak_inspiratory_pressure_obs), peak_inspiratory_pressure_obs >= plateau_pressure_obs) %>%
+      mutate(ers_dynamic = 1000 * (peak_inspiratory_pressure_obs - peep_set) / tidal_volume_set,
+             log_crs_dynamic = log(tidal_volume_set / (peak_inspiratory_pressure_obs - peep_set)),
+             resistive_pressure = peak_inspiratory_pressure_obs - plateau_pressure_obs)
+    message("dynamic pressures, ", stratum, ": ", nrow(sub_dat), " patients with a peak >= plateau (",
+            sum(sub_dat$mp_mode_class == "vcv", na.rm = TRUE), " in volume control)")
+    if (nrow(sub_dat) < MIN_SUBGROUP_PATIENTS) return(NULL)
+    label_tail <- paste0(stratum, ", age <= ", REFERENCE_MAX_AGE, ", peak recorded")
+    elastance_by_age <- imap_dfr(c(static = "ers", dynamic = "ers_dynamic"), function(elastance, kind)
+      imap_dfr(REFERENCE_EXPOSURES, function(log_volume, denominator) {
+        fit <- fit_strict(lm(as.formula(paste0("log(", elastance, ") + ", log_volume, " ~ age10 + ", COVARIATES)), data = sub_dat))
+        coef_rows(fit, "age10", paste0("normalised ", kind, " elastance by age, ", label_tail), sample_label) %>%
+          mutate(exposure = denominator, scale = paste("change in log(", kind, "Ers x denominator) per decade of age, with the covariates"))
+      }))
+    head_to_head_dynamic <- map(c(FALSE, TRUE), function(age_adjusted) {
+      map(c(static = "log_crs", dynamic = "log_crs_dynamic"), function(outcome) {
+        label <- paste0("reference volumes, ", if (outcome == "log_crs") "static" else "dynamic", " compliance, ", label_tail,
+                        if (age_adjusted) ", age spline in every model" else "")
+        fits <- map(REFERENCE_EXPOSURES, function(exposure)
+          fit_strict(lm(as.formula(paste(outcome, "~", exposure, "+", if (age_adjusted) "ns(age10, 4) +", COVARIATES)), data = sub_dat)))
+        list(estimates = imap_dfr(fits, ~ coef_rows(.x, REFERENCE_EXPOSURES[[.y]], label, sample_label, 1) %>% mutate(exposure = .y)),
+             tests = imap_dfr(fits[names(fits) != "PBW"], ~ tibble(
+               sample = sample_label, test = paste0(label, ": AIC, ", .y, " minus PBW (< 0 favours ", .y, ")"),
+               statistic = AIC(.x) - AIC(fits$PBW), df = NA_real_, p = NA_real_, n_patients = nobs(.x))))
+      })
+    }) %>% list_flatten()
+    volume_control <- sub_dat %>% filter(mp_mode_class == "vcv", !is.na(resp_rate_set)) %>%
+      mutate(log_prv = log(suppressWarnings(rspiro::pred_GLIvol(age_at_admission, height_cm / 100,
+                                                                if_else(sex_category == "Male", 1, 2), "RV"))),
+             log_vt = log(tidal_volume_set))
+    resistive <- if (nrow(volume_control) >= MIN_SUBGROUP_PATIENTS) {
+      by_age <- fit_strict(lm(as.formula(paste("resistive_pressure ~ age10 + log_vt + resp_rate_set +", COVARIATES)), data = volume_control))
+      # predicted RV is a fixed function of age, height and sex, so with height and sex
+      # held this is age re-expressed on the RV scale
+      by_rv <- fit_strict(lm(as.formula(paste("resistive_pressure ~ log_prv + log_height + sex_category + log_vt + resp_rate_set +", COVARIATES)),
+                             data = volume_control))
+      bind_rows(coef_rows(by_age, "age10", paste0("resistive pressure (peak - plateau), volume control, ", label_tail), sample_label) %>%
+                  mutate(scale = "cmH2O per decade of age, with VT, set rate and the covariates"),
+                coef_rows(by_rv, "log_prv", paste0("resistive pressure (peak - plateau), volume control, ", label_tail), sample_label) %>%
+                  mutate(scale = "cmH2O per log unit of predicted RV (GLI 2021), with log height, sex, VT, set rate and the covariates"))
+    }
+    list(estimates = bind_rows(elastance_by_age, map_dfr(head_to_head_dynamic, "estimates"), resistive),
+         tests = map_dfr(head_to_head_dynamic, "tests"))
+  }) %>% compact()
+  estimates$dynamic_pressures <- map_dfr(dynamic_rows, "estimates")
+  tests$dynamic_pressures <- map_dfr(dynamic_rows, "tests")
 
   # ---- 2b. is specific elastance more nearly constant under one scaling than the other?
   #      The spread of log(Ers x size) across patients, and its residual spread after the

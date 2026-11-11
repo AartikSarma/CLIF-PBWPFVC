@@ -30,7 +30,8 @@
 # QC: rows with dp <= 0 (plateau < PEEP; nonphysiologic measurement error) are
 # dropped, as are rows missing any model variable; each filter reports its N.
 #
-# Input  : analysis_cross_sectional.parquet (script 03)
+# Input  : analysis_cross_sectional.parquet (script 03); with PBWPFVC_VTPBW_GATE=0 (the
+#          runner's second pass) the ungated cohort's table, outputs in final/ungated/
 # Outputs: final/cross_sectional/norm_{discordance_summary, discordance_reclassification,
 #          prognostic_fit, prognostic_coefs}_<site>.csv
 # =============================================================================
@@ -47,7 +48,7 @@ output_dir <- config$output_dir
 final_dir  <- final_dir_for("cross_sectional")
 dir.create(final_dir, recursive = TRUE, showWarnings = FALSE)
 
-cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
+cross_sectional <- read_parquet(file.path(output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet")))
 
 # In-sample C-statistic (Mann-Whitney AUC). In-sample, so optimistic in absolute
 # terms but fine for RELATIVE comparison of specs on the same data.

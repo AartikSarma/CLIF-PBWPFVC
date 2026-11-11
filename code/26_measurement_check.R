@@ -10,7 +10,15 @@
 # the control arm. A difference-in-differences survives selection that is equally
 # strong on both sides; it does not survive selection that differs between them.
 #
-# Two tests, neither of which needs a joint model:
+# Bilirubin is therefore not in figure 4 (2026-10-17); this script shows why. Three
+# tests, none of which needs a joint model:
+#
+#   selection (is missingness informative?).  Per marker, among patients with
+#     enough panel days to enter its analysis, those who enter against those who do
+#     not: the marker's severity anchor, a pressor at the index, 28-day death, and
+#     the odds of entering per death given the anchor, index SF and panel days.
+#     Run per cohort, so the arms can be compared.
+#     Written to measurement_selection_{tag}.csv.
 #
 #   frame check (the falsification).  Refit the PLATELET divergence twice with one
 #     model: on every platelet day, and on the platelet days that also carry a
@@ -106,6 +114,72 @@ rhs  <- function(adjusted) paste(BASE, if (adjusted) paste("+", DEMO) else "")
 EXPOSURE <- "log_pfvc_sd"
 tidy_row <- function(est, se, ...) tibble(estimate = est, se = se, lo = est - 1.96 * se,
                                           hi = est + 1.96 * se, p = 2 * pnorm(-abs(est / se)), ...)
+
+# --- 0. is being measured informative? ---------------------------------------
+# A marker's missingness is informative when, among patients who could enter its
+# analysis, those who do differ in outcome from those who do not, beyond severity.
+# Entering needs a baseline and two or more measured later days, so a patient who
+# leaves the panel early (most often a survivor discharged from the ICU) cannot
+# enter any marker's analysis; that would make death predict entry for every lab.
+# So the comparison is among the patients with at least MIN_PANEL_DAYS panel days,
+# with the number of panel days adjusted for. Severity is the marker's own anchor
+# (20_biotrauma_grid.R: cardiovascular, coagulation, liver and renal SOFA without
+# the marker's own component, which a missing lab would set to zero) and the index
+# SF. Per marker: the share entering, the anchor, a pressor at the index and 28-day
+# death of those in and out, and the odds of entering per 28-day death. Platelets
+# and creatinine, drawn as routine, are the reference; run per cohort, the arms'
+# rows show whether selection differs between them, which is what a
+# difference-in-differences cannot absorb.
+DEATH_WINDOW   <- 28   # the panel's death window (10_panel_common.R)
+MIN_PANEL_DAYS <- 2    # the fewest panel days on which a trajectory can enter
+MIN_SELECTION_N <- 10  # the fewest patients in a cell of entered x died for the odds
+outcomes <- surv %>%
+  transmute(hospitalization_id, died = as.integer(!is.na(death_time) & death_time <= DEATH_WINDOW),
+            pressor_0 = as.integer(!is.na(ne_equiv_0) & ne_equiv_0 > 0),
+            across(all_of(ANCHOR_POOL)))
+selection_rows <- list()
+for (m in MARKERS) {
+  y0 <- BASELINE[[m]]
+  if (!y0 %in% names(frame)) next
+  measured <- paste0("measured_", m)
+  per_patient <- frame %>%
+    group_by(hospitalization_id) %>%
+    summarise(in_sample = as.integer(!is.na(first(.data[[y0]])) & sum(.data[[measured]]) >= 2),
+              panel_days = n(), days_measured = mean(.data[[measured]]),
+              log_sf_0 = first(log_sf_0), .groups = "drop") %>%
+    filter(panel_days >= MIN_PANEL_DAYS) %>%
+    inner_join(outcomes, by = "hospitalization_id") %>%
+    mutate(anchor = rowSums(across(all_of(anchor_components(m)))), log_panel_days = log(panel_days))
+  by_group <- per_patient %>%
+    group_by(in_sample) %>%
+    summarise(n_patients = n(), anchor_mean = mean(anchor, na.rm = TRUE), pressor_0_share = mean(pressor_0),
+              died_share = mean(died), panel_days_mean = mean(panel_days),
+              days_measured_share = mean(days_measured), .groups = "drop") %>%
+    mutate(group = if_else(in_sample == 1L, "enters the analysis", "does not enter")) %>%
+    select(-in_sample)
+  cells <- table(factor(per_patient$in_sample, 0:1), factor(per_patient$died, 0:1))
+  odds_row <- if (min(cells) >= MIN_SELECTION_N) {
+    fit <- glm(in_sample ~ died + anchor + log_sf_0 + log_panel_days, family = binomial(), data = per_patient)
+    s <- summary(fit)$coefficients["died", ]
+    tidy_row(s[["Estimate"]], s[["Std. Error"]], n_patients = nobs(fit)) %>%
+      mutate(odds_ratio = exp(estimate), or_lo = exp(lo), or_hi = exp(hi))
+  } else {
+    message("  ", m, ": fewer than ", MIN_SELECTION_N, " patients in a cell of entered x died; odds not fitted")
+    tibble(n_patients = nrow(per_patient), note = paste("not fitted: a cell of entered x died has fewer than", MIN_SELECTION_N))
+  }
+  selection_rows[[length(selection_rows) + 1L]] <- bind_rows(
+    by_group,
+    odds_row %>% mutate(group = "odds of entering, died vs survived (given anchor, index SF and panel days)")) %>%
+    mutate(marker = m, anchor = anchor_label(m), share_entering = mean(per_patient$in_sample), .before = 1)
+}
+selection <- bind_rows(selection_rows) %>%
+  mutate(min_panel_days = MIN_PANEL_DAYS, death_window_days = DEATH_WINDOW,
+         cohort = config$cohort, clock = JM_CLOCK, panel = h_suffix, site = site_name)
+write_csv(selection, file.path(final_dir, paste0("measurement_selection_", out_tag, ".csv")))
+message("measurement selection -> ", file.path(final_dir, paste0("measurement_selection_", out_tag, ".csv")))
+print(as.data.frame(selection %>% transmute(marker, group, n_patients, anchor_mean = signif(anchor_mean, 3),
+                                            died_share = signif(died_share, 3), odds_ratio = signif(odds_ratio, 3))),
+      row.names = FALSE)
 
 # --- 1. the measurement model ------------------------------------------------
 # entry: does this patient contribute a trajectory for this marker at all?

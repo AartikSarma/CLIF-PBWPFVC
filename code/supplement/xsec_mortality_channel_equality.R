@@ -50,7 +50,7 @@
 #     the index; a death stamped between admission and the index counts on the index
 #     day, at SAME_DAY_DEATH_D days.
 #   - Outcomes: in-hospital death (logistic); 60-day death (cause-specific Cox); 60-day
-#     death before invasive ventilation (Cox; identical to 60-day death in the
+#     death with controls censored at escalation to IMV (Cox; identical to 60-day death in the
 #     ventilated arm, which is intubated at the index, and the control outcome that
 #     keeps strain out).
 #   - A model that warns stops the script; separation is reported as not estimable in
@@ -248,12 +248,12 @@ OUTCOMES <- tribble(
   ~outcome_key,          ~outcome,                                     ~model,
   "inhosp_logistic",     "in-hospital death (logistic)",               "logistic",
   "day60_all",           "60-day death, all",                          "cox",
-  "day60_before_imv",    "60-day death, before invasive ventilation",  "cox")
+  "day60_censor_escalation",    "60-day death, controls censored at escalation to IMV",  "cox")
 # time (days from the index) and event for a Cox outcome, as xsec_pfvc_age_control.R
-# defines them: "before invasive ventilation" censors at intubation, where a
+# defines them: "censored at escalation" censors a control at intubation, where a
 # PBW-scaled volume begins
 outcome_data <- function(cohort_data, outcome_key) {
-  censor_imv <- grepl("before_imv", outcome_key)
+  censor_imv <- grepl("censor_escalation", outcome_key)
   cohort_data %>% mutate(
     death_day = death_index_day,
     censor_day = pmin(HORIZON_DAYS, if (censor_imv) coalesce(imv_day, Inf) else Inf),

@@ -91,16 +91,27 @@ if (config$cohort != "imv")
 base_site <- config$site_name
 source(here("code", "20_biotrauma_grid.R"))   # h_suffix
 MOD_FORM  <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
-stopifnot(MOD_FORM %in% c("pfvc", "channels", "disc_level", "pfvc25", "disc25_level"))
+# lambda<NNN>: the lambda sweep (22_biotrauma_fit.R), the strain error against a
+# denominator keeping the share NNN/100 of GLI's age decline in FVC
+LAMBDA_FORM <- grepl("^lambda[0-9]{3}$", MOD_FORM)
+LAMBDA <- if (LAMBDA_FORM) as.numeric(substring(MOD_FORM, 7)) / 100 else NA_real_
+stopifnot(LAMBDA_FORM || MOD_FORM %in% c("pfvc", "channels", "disc_level", "pfvc25", "disc25_level", "disc_tlc", "disc_va", "disc_frc"))
 # The form's size exposure and its label: log PFVC (pfvc), or log PBW/PFVC
 # (disc_level, the strain-error companion; at a given VT/PBW it is VT/PFVC, which has
 # no control analogue because a control receives no tidal volume).
 # pfvc25 and disc25_level are the same with GLI at age 25 (height, sex and race only)
-SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", pfvc25 = "log_pfvc25_sd", disc25_level = "ldisc25_sd", "log_pfvc_sd")
+# disc_tlc, disc_va and disc_frc are log PBW over predicted TLC, alveolar volume and
+# FRC; they run only inside a reference-volume stratum (PBWPFVC_JM_REF_STRATUM)
+SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", pfvc25 = "log_pfvc25_sd", disc25_level = "ldisc25_sd",
+                        disc_tlc = "ldisc_tlc_sd", disc_va = "ldisc_va_sd", disc_frc = "ldisc_frc_sd",
+                        if (LAMBDA_FORM) "ldisc_lambda_sd" else "log_pfvc_sd")
 SIZE_LABEL    <- switch(MOD_FORM, disc_level = "log PBW/PFVC", pfvc25 = "log PFVC at age 25",
-                        disc25_level = "log PBW/PFVC at age 25", "log PFVC")
+                        disc25_level = "log PBW/PFVC at age 25", disc_tlc = "log PBW/TLC (GLI 2021)",
+                        disc_va = "log PBW/alveolar volume (GLI 2017)", disc_frc = "log PBW/FRC (GLI 2021)",
+                        if (LAMBDA_FORM) sprintf("log PBW/V(lambda = %.2f)", LAMBDA) else "log PFVC")
 SCALE_SD      <- switch(MOD_FORM, disc_level = "sd_ldisc", pfvc25 = "sd_log_pfvc25", disc25_level = "sd_ldisc25",
-                        "sd_log_pfvc")   # jm_scale_* column
+                        disc_tlc = "sd_ldisc_tlc", disc_va = "sd_ldisc_va", disc_frc = "sd_ldisc_frc",
+                        if (LAMBDA_FORM) "sd_ldisc_lambda" else "sd_log_pfvc")   # jm_scale_* column
 # PBWPFVC_JM_LME_ONLY=1 reads the longitudinal-submodel-only tables (22's lmeonly_
 # tables) in place of the joint models'. Their estimates carry no R-hat, so
 # both_converged is NA.
@@ -117,7 +128,11 @@ okabe <- c("#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#56B4E9", "#0
 cohort_folders <- tibble(cohort = c("imv", "nosupport"),
                          cohort_label = c("Ventilated", "No support, at ventilated severity"),
                          site = c(base_site, paste0(base_site, "_nosupport")),
-                         arm_pattern = c("^(day0_)?$", "^sevstd_(sf0to315_)?$"))
+                         arm_pattern = paste0("^", ref_stratum_tag, c("(day0_)?$", "sevstd_(sf0to315_)?$")))
+# Inside a reference-volume stratum (PBWPFVC_JM_REF_STRATUM) the tables take a
+# jm_refvol_ root and the stratum tag, so the pooling and the figure, which read the
+# jm_control_* tables, never mix a stratum's rows with the whole cohort's.
+table_root <- function(name) paste0(if (nzchar(ref_stratum_tag)) "jm_refvol_" else "jm_", name, "_", ref_stratum_tag)
 
 # ---- discover the arms: one per (cohort folder, restriction tag) with an estimates table
 file_stub <- function(site) paste0(MOD_FORM, "_", LME_TAG, h_suffix, "_", site, ".csv")
@@ -133,7 +148,7 @@ arms <- arms %>%
   mutate(sf_part  = str_match(restriction, "sf([0-9.]+)to([0-9.]+)_")[, 2:3, drop = FALSE] %>%
            apply(1, function(limits) if (anyNA(limits)) NA_character_ else
              if (as.numeric(limits[1]) == 0) paste0("SF < ", limits[2]) else paste0("SF ", limits[1], "-", limits[2])),
-         at_icu_admission = grepl("^day0_", restriction),
+         at_icu_admission = grepl(paste0("^", ref_stratum_tag, "day0_"), restriction),
          arm = paste0(cohort_label, if_else(at_icu_admission, ", at ICU admission", ""),
                       if_else(is.na(sf_part), "", paste0(", ", sf_part))))
 message("=== 27_control_comparison (", MOD_FORM, ", ", h_suffix, ", ", base_site, "): ", nrow(arms), " arms ===")
@@ -165,7 +180,10 @@ lme_check <- each_arm("lme_check")
 convergence <- fit_convergence(estimates, MOD_FORM, by = c("arm", "marker", "model", "adjustment"))
 
 # the unit of a marker's rate: log-odds for the yes/no marker, the log marker otherwise
-marker_scale <- function(marker) if_else(marker == "any_pressor", "log-odds of any vasopressor", "log marker")
+marker_scale <- function(marker) case_when(marker == "any_pressor" ~ "log-odds of any vasopressor",
+                                           marker == "pressor_marginal" ~ "log expected vasopressor dose (zeros included)",
+                                           marker == "cv_score" ~ "cumulative log-odds of a higher cardiovascular score",
+                                           TRUE ~ "log marker")
 # ---- the comparison table: divergence and level per SD of log PFVC, with what qualifies them
 # sev_modification = the control's log_pfvc_sd:vent_day:sev_anchor_c: the change in the
 # divergence per point of the severity anchor (NA in arms without it)
@@ -204,7 +222,7 @@ comparison <- size_terms %>%
          form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   arrange(marker, adjustment, arm)
 out_stub <- paste0(MOD_FORM, "_", LME_TAG, h_suffix, "_", base_site)
-write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".csv")))
+write_csv(comparison, file.path(final_dir, paste0(table_root("control_comparison"), out_stub, ".csv")))
 
 # ---- the difference-in-differences: ventilated divergence (patients on IMV at ICU
 #      admission) minus control divergence
@@ -225,17 +243,22 @@ write_csv(comparison, file.path(final_dir, paste0("jm_control_comparison_", out_
 # the subtraction: per ventilated SD = per control SD x (SD ventilated / SD control).
 # The ICU-admission arm's rate is already per SD of the whole ventilated panel.
 # Without both SDs there is no difference-in-differences, never one that assumes them equal.
-did_path <- file.path(final_dir, paste0("jm_control_did_", out_stub, ".csv"))
+did_path <- file.path(final_dir, paste0(table_root("control_did"), out_stub, ".csv"))
 scale_vent <- file.path(final_dir, paste0("jm_scale_", h_suffix, "_", base_site, ".csv"))
 scale_ctrl <- file.path(config$final_root, "controls", paste0("jm_scale_", h_suffix, "_", base_site, "_nosupport.csv"))
 read_scale_sd <- function(path) {
   scale_row <- read_csv(path, show_col_types = FALSE)
+  # every 22 run rewrites the scale table, so a lambda form's SD is the last lambda fitted
+  if (LAMBDA_FORM && !isTRUE(all.equal(scale_row$lambda, LAMBDA)))
+    stop(basename(path), " holds the scale of lambda = ", scale_row$lambda, ", not ", LAMBDA,
+         ": run 27 straight after that lambda's fits")
   if (!SCALE_SD %in% names(scale_row))
     stop(basename(path), " has no ", SCALE_SD, " column: it predates the disc_level control; rerun 22_biotrauma_fit.R for that cohort")
   scale_row[[SCALE_SD]]
 }
+ventilated_sd <- if (file.exists(scale_vent)) read_scale_sd(scale_vent) else NA_real_
 to_vent_sd <- if (file.exists(scale_vent) && file.exists(scale_ctrl))
-  read_scale_sd(scale_vent) / read_scale_sd(scale_ctrl) else NA_real_
+  ventilated_sd / read_scale_sd(scale_ctrl) else NA_real_
 if (is.na(to_vent_sd)) {
   message("--- no difference-in-differences: the SD of ", SIZE_LABEL, " is missing for ",
           paste(c(if (!file.exists(scale_vent)) "the ventilated cohort", if (!file.exists(scale_ctrl)) "the control"), collapse = " and "),
@@ -308,13 +331,16 @@ did_against <- function(control_arm) {
          p_did_gt0 = pnorm(did_estimate / did_sd),
          both_converged = if (LME_ONLY) NA else size_gate_ventilated & size_gate_control,
          control_to_ventilated_sd = to_vent_sd, ventilated_arm = VENTILATED_DID_ARM, control_arm = control_arm,
+         # the exposure's SD in the ventilated cohort, so each rate can be read per log unit
+         # (estimate / ventilated_sd), the scale on which different exposures compare
+         ventilated_sd = ventilated_sd,
          unit = paste(marker_scale(marker), "per day per SD of", SIZE_LABEL, "in the ventilated cohort"), form = MOD_FORM, panel = h_suffix, site = base_site) %>%
   select(-size_gate_ventilated, -size_gate_control) %>%
   left_join(lme_did_against(control_arm), by = c("marker", "adjustment"))
 }
 did <- did_against("No support, at ventilated severity")
 HYPOXEMIC_CONTROL_ARM <- "No support, at ventilated severity, SF < 315"
-hypoxemic_did_path <- file.path(final_dir, paste0("jm_hypoxemic_control_did_", out_stub, ".csv"))
+hypoxemic_did_path <- file.path(final_dir, paste0(table_root("hypoxemic_control_did"), out_stub, ".csv"))
 if (HYPOXEMIC_CONTROL_ARM %in% arms$arm) {
   hypoxemic_did <- did_against(HYPOXEMIC_CONTROL_ARM)
   if (nrow(hypoxemic_did)) {
@@ -388,6 +414,6 @@ if (nrow(movement)) {
     theme_minimal(base_size = 11) + theme(legend.position = "bottom")
   panels <- c(panels, list(movement_plot))
 }
-ggsave(file.path(final_dir, paste0("jm_control_comparison_", out_stub, ".pdf")),
+ggsave(file.path(final_dir, paste0(table_root("control_comparison"), out_stub, ".pdf")),
        wrap_plots(panels, ncol = 1), width = 12, height = 4.5 * length(panels))
 message("27_control_comparison complete: ", nrow(comparison), " rows -> ", final_dir)

@@ -592,7 +592,7 @@ if (exists("channels_tbl") && nrow(channels_tbl) && !is.null(pooled$age_control_
       labs(title = title, subtitle = subtitle, x = "ratio per 0.1 log units of the piece (log scale)", y = NULL) +
       channel_theme + theme(strip.text.y.left = element_text(angle = 0), strip.placement = "outside")
   }
-  outcomes_main <- c("in-hospital death (logistic)", "60-day death, all", "60-day death, before invasive ventilation")
+  outcomes_main <- c("in-hospital death (logistic)", "60-day death, all", "60-day death, controls censored at escalation to IMV")
   page_1a <- forest(channel_rows(DIFFERENCE, "everyone", outcomes_main) %>% mutate(outcome = factor(outcome, outcomes_main)),
                     piece ~ outcome, "A. Ventilated minus no support, by GLI input",
                     "mortality OR (in-hospital) or cause-specific HR; below 1 = more protective under ventilation than without it")

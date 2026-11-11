@@ -82,8 +82,9 @@
 # pressures are never forward-filled). A model that warns (non-convergence,
 # separation) stops the script: no rung is silently replaced by a simpler one.
 #
-# Inputs : intermediate/analysis_cross_sectional.parquet (script 03)
-# Outputs: final/supplement/
+# Inputs : intermediate/analysis_cross_sectional.parquet (script 03); with
+#          PBWPFVC_VTPBW_GATE=0 (the runner's second pass) the ungated cohort's table
+# Outputs: final/supplement/ (final/ungated/supplement/ when ungated)
 #   dp_vtpfvc_additive_estimates_{site}.csv   exposure terms of every rung: log-scale
 #                                             coefficient, ratio per SD, CI, p
 #   dp_vtpfvc_additive_lrt_{site}.csv         the likelihood-ratio tests and AICs
@@ -122,7 +123,7 @@ OKABE_ITO <- c(dp = "#D55E00", vt = "#0072B2", espec = "#009E73",
 # Data: the mechanics subset of the cross-sectional cohort
 # =============================================================================
 
-cross_sectional <- read_parquet(file.path(config$output_dir, "analysis_cross_sectional.parquet"))
+cross_sectional <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet")))
 
 # SYNTHETIC SITE ONLY: synthetic CLIF mortality is unreliable (a handful of deaths),
 # so death is simulated independently of every exposure (35% by day 60, time to
@@ -185,7 +186,12 @@ message("Correlation of log DP with log VT/PFVC: ",
 
 # VT/PBW, the delivered dose, enters linearly and as a 3-df natural spline
 # (column vtpbw_adjustment). "VTPBW" in the covariate set is replaced by it.
-VTPBW_TERM <- c(linear = "vtpbw", spline = "ns(vtpbw, 3)")
+# The spline's boundary knots sit at the 1st and 99th percentiles, so it is
+# linear in the tails: on the ungated cohort VT/PBW runs from under 3 to 15 mL/kg,
+# and with the knots at the range a few patients at either end carried a basis
+# column on their own (the Cox fits in the age-band rung did not converge).
+VTPBW_BOUNDARY_KNOTS <- quantile(complete_mechanics$vtpbw, c(0.01, 0.99), names = FALSE)
+VTPBW_TERM <- c(linear = "vtpbw", spline = "ns(vtpbw, 3, Boundary.knots = VTPBW_BOUNDARY_KNOTS)")
 base_covariates <- "VTPBW + bmi + sofa_total + sf10"
 # The age main effect, by age_adjustment. "AGE" in a rung (and in the demographic
 # set) is replaced by it; the age modification terms stay linear in age_c.

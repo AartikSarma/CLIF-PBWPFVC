@@ -10,7 +10,7 @@ which also decides where files are written.
 
 **Vasopressors.** Vasopressors are a two-part (hurdle) outcome, reported as a pair: on/off (`any_pressor`, every patient-day, a logistic mixed model, in log-odds) and the dose on the days a pressor runs (`pressor_dose`, conditional on being on a pressor that day). Being on a pressor is itself an outcome, so the dose part is read only in the ventilated cohort; the controls, the difference-in-differences and the checks figure use the on/off part.
 
-**The VT/PBW gate's sensitivity.** `PBWPFVC_VTPBW_GATE=0` runs scripts 03, 21, 22 and 23 on the ventilated cohort without the 6–8 mL/kg band. Script 03 then writes only `analysis_cross_sectional_ungated`, the panels are named `_ungated`, and every aggregate goes to `final/ungated/<block>/` under the paper's file names. `PBWPFVC_JM_NO_DOSE=1` drops the index VT/PBW and its daily change from the longitudinal model and keeps the main fit's rows (tag `nodose_`). With `PBWPFVC_JM_SHAPE_ONLY=1` the two give the longitudinal model alone, by maximum likelihood, in minutes. `PBWPFVC_JM_PLACEBO_N=500` then refits the unadjusted model with log PFVC replaced by GLI's other indices and by 500 placebo formulas, random weightings of the same age, sex, race and height inputs (`placebo_formulas()` in `20_biotrauma_grid.R`; `jm_placebo_` tables). The gate check and the reduction-timing supplement run the same placebos through their unadjusted models. The three ventilated-versus-control supplements (`xsec_pfvc_age_control.R`, `xsec_mortality_channel_equality.R`, `xsec_strain_invariance.R`) also take `PBWPFVC_VTPBW_GATE=0` for their ventilated arm, and the first two take `PBWPFVC_DID_VTPBW=0` to drop the arm's VT/PBW term, writing to a `novtpbw/` subfolder.
+**Gated and ungated cohorts.** VT/PBW follows both predicted lung size and illness, so entering patients only at VT/PBW 6–8 mL/kg can link the two (`xsec_vtpbw_gate_collider.R`). Every analysis is therefore reported on both cohorts, and the runners do it without being asked: `00_run_pipeline.R` runs 03 a second time and every cross-sectional script a second time with `PBWPFVC_VTPBW_GATE=0`, and `29_run_figure4.R` runs the three ventilated-versus-control supplements on both cohorts (two of them also without the ventilated arm's VT/PBW term) and figure 4's divergences and difference-in-differences on the ungated cohort from the longitudinal submodels alone (its step 8). A site never sets either variable by hand. With `PBWPFVC_VTPBW_GATE=0`, script 03 writes only `analysis_cross_sectional_ungated`, the panels are named `_ungated`, and every aggregate goes to `final/ungated/<block>/` under the paper's file names. `PBWPFVC_JM_NO_DOSE=1` drops the index VT/PBW and its daily change from the longitudinal model and keeps the main fit's rows (tag `nodose_`). With `PBWPFVC_JM_SHAPE_ONLY=1` the two give the longitudinal model alone, by maximum likelihood, in minutes. `PBWPFVC_JM_PLACEBO_N=500` then refits the unadjusted model with log PFVC replaced by GLI's other indices and by 500 placebo formulas, random weightings of the same age, sex, race and height inputs (`placebo_formulas()` in `20_biotrauma_grid.R`; `jm_placebo_` tables). The gate check and the reduction-timing supplement run the same placebos through their unadjusted models. In the three ventilated-versus-control supplements (`xsec_pfvc_age_control.R`, `xsec_mortality_channel_equality.R`, `xsec_strain_invariance.R`) the gate selects the ventilated arm, and the first two take `PBWPFVC_DID_VTPBW=0` to drop the arm's VT/PBW term, writing to a `novtpbw/` subfolder.
 
 **Output file names are an interface between scripts.** The pooling and figure
 scripts find their inputs by file-name prefix, so a prefix changes together with
@@ -33,7 +33,7 @@ to change; that stops once sites have returned `final/` folders.
 | `22_biotrauma_fit.R` | figure 4 | One joint model per organ-injury marker | `jm_manifest_`, `jm_estimates_`, `jm_scale_`, `jm_severity_anchor_` |
 | `23_biotrauma_report.R` | figure 4 | Level contrasts by horizon, marker movement, the size terms with and without the death correction, hazard associations | `jm_level_contrast_`, `jm_movement_`, `jm_lme_check_`, `jm_association_hr_` |
 | `24_biotrauma_figures.R` | figure 4 | Figure 4 and its DiD check, from the aggregate tables only | `biotrauma_fig_main_`, `biotrauma_fig_checks_` |
-| `26_measurement_check.R` | figure 4 | Whether a marker is missing in a way that biases the comparison: does predicted lung size predict being measured (entry and day by day), and does the platelet divergence survive on bilirubin's sampling frame | `measurement_model_`, `measurement_frame_` |
+| `26_measurement_check.R` | figure 4 | Whether a marker is missing in a way that biases the comparison, and why bilirubin is not a figure-4 marker: who enters each marker's analysis by severity and 28-day death, does predicted lung size predict being measured (entry and day by day), and does the platelet divergence survive on bilirubin's sampling frame | `measurement_selection_`, `measurement_model_`, `measurement_frame_` |
 | `27_control_comparison.R` | figure 4 | The divergence by lung size, arm by arm: ventilated, its SF strata, and no support read at the ventilated severity, with the severity x divergence test, and the difference-in-differences (ventilated minus control, and minus the control hypoxemic on the index day) | `jm_control_comparison_`, `jm_control_did_`, `jm_hypoxemic_control_did_` |
 | `28_height_fingerprint.R` | Claim 5c.2 | The height fingerprint: at a fixed VT/PBW, does the marker follow the ratio's sex-reversed height curve beyond a height function the sexes share? Platelets by default, on the 7-day panel; run for the no-support control first to get the DiD | `fingerprint_`, `fingerprint_ladder_`, `fingerprint_curves_`, `fingerprint_did_` |
 | `29_run_figure4.R` | figure 4 | Runs every analysis behind figure 4 and draws it: both cohorts, all arms, the control standardised to the ventilated severity, SF as the positive control, and the channel breakdown (supplement). The comparisons with the control run both arms on the ICU-admission clock (`PBWPFVC_JM_CLOCK=icu`, panel files `jm_*_7d_icu`); every other arm counts from the index | |
@@ -100,32 +100,41 @@ to change; that stops once sites have returned `final/` folders.
   without the gate (03's `analysis_ungated_index`), it compares the size term's SOFA
   slope with and without the gate and the VT/PBW term, with bootstrap intervals for
   the change, split into respiratory and other SOFA, and then asks the same of
-  in-hospital death, with and without 04's severity terms. Not in the runner.
+  in-hospital death, with and without 04's severity terms. Run by `00_run_pipeline.R`
+  (cross_sectional stage).
   `xsec_vt_reduction_timing.R` follows it up: when clinicians turn the tidal volume
   down in the first 72 hours, which arrow from predicted size carries the reduction?
   The candidates are a high starting setting, a high driving pressure, or a fall in
   compliance (the only one that would mean small lungs caused the illness). It
   tabulates what preceded each first reduction by PFVC quartile, decomposes size's
   link to reductions in a discrete-time hazard, and asks whether size predicts a fall
-  in compliance at 24-48 h. Not in the runner.
+  in compliance at 24-48 h. Run by `00_run_pipeline.R` (cross_sectional stage).
   `xsec_mortality_channel_equality.R` asks whether sex and race predict death as their
   share of predicted lung size says they should: with age held by `ns(age, 4)`, each
   group's coefficient divided by its GLI shift in log PFVC is tested against the
   height slope (sex, Black, Other, and jointly), in the ventilated arm, the no-support
-  control and their difference (needs scripts 01-03 run for both cohorts). Not in the
-  runner.
+  control and their difference (needs scripts 01-03 run for both cohorts). Run by
+  `29_run_figure4.R` (step 2b).
   `xsec_strain_invariance.R` asks whether ventilation's mortality gradient follows
   the strain error or any index of the same demographics, with severity-only models:
   the site's tidal-volume rule (slope of set VT on PBW before the 6-8 gate), the
   ventilated-minus-control contrast for log PBW/PFVC and log PFVC, and 500 random
   weightings of age, sex, race and height beside GLI's ratio, PFVC and pieces. The
-  cross-site test (the contrast against the dosing rule) is a pooling step. Not in
-  the runner.
+  cross-site test (the contrast against the dosing rule) is a pooling step. Run by
+  `29_run_figure4.R` (step 2b).
+  `xsec_dml_contrast.R` refits the same ventilated-minus-control contrast with severity
+  entered flexibly, still with no demographic term: double machine learning (cross-fitted
+  random forest and lasso) and overlap weights to the cohorts' common severity, for
+  in-hospital death, 60-day death and death during the exposure (as pseudo-observations)
+  and the 7-day platelet and creatinine slopes, along lambda. Run by `29_run_figure4.R`
+  (step 8e, gated and ungated).
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
-  dataset for fast test loops, `calc_external_pfvc.R` computes PFVC by arm for an
-  external trial table, `creatinine_positive_control.R` checks that creatinine rises
+  dataset for fast test loops, `calc_external_pfvc.R` computes PFVC, predicted TLC and alveolar volume, and the
+  delivered VT on each scale, by arm for an external trial table, `creatinine_positive_control.R` checks that creatinine rises
   where kidney injury is expected (by ESRD, dialysis procedures and pressor dose; aggregates
-  only).
+  only), and `pediatric_pbw_vs_pfvc.R` draws presentation figures comparing six pediatric PBW
+  formulas with GLI-2012 predicted FVC at ages 3-18 (formulas and CDC 2000 growth charts in
+  `reference-data/cdc_growth_2000/` only; no patient data; writes `figures/pediatric_pbw/`).
 - `archive/` is gitignored local scratch.
 
 Every file each script writes to `final/`, its reader and the claim it supports are

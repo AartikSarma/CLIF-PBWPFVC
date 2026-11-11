@@ -197,8 +197,31 @@ MOD_FORM <- Sys.getenv("PBWPFVC_JM_MODIFIER", "pfvc")
 # with GLI's age decline removed (height, sex and race only). Both run in a control.
 # At a given VT/PBW, log PBW/PFVC at age 25 is log VT/PFVC at age 25 less a
 # constant, so disc25_level is also the VT/PFVC-at-age-25 contrast.
-stopifnot(MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose",
-                          "pfvc25", "disc25_level"))
+# "disc_tlc", "disc_va" and "disc_frc": the disc_level form with PBW over another
+# predicted lung volume (script 03: TLC and FRC, GLI 2021; alveolar volume, GLI 2017).
+# Those equations have no race term and stop at age 80 (TLC, FRC), so these forms
+# run only inside a reference-volume stratum (PBWPFVC_JM_REF_STRATUM, 20_biotrauma_grid.R).
+REFVOL_FORMS <- c(disc_tlc = "ptlc", disc_va = "pva", disc_frc = "pfrc")
+# "lambda<NNN>" (lambda000 to lambda100): the strain error against a denominator that
+# keeps the share lambda = NNN/100 of GLI's age decline in FVC,
+#   log V(lambda) = log PFVC at age 25 + lambda (log PFVC - log PFVC at age 25),
+# so lambda = 0 is disc25_level and lambda = 1 is disc_level; TLC and alveolar volume
+# sit near 0.1-0.25. The lambda sweep reads one strain error along that axis.
+LAMBDA_FORM <- grepl("^lambda[0-9]{3}$", MOD_FORM)
+LAMBDA <- if (LAMBDA_FORM) as.numeric(substring(MOD_FORM, 7)) / 100 else NA_real_
+if (LAMBDA_FORM && LAMBDA > 1) stop("lambda forms run from lambda000 to lambda100; got ", MOD_FORM)
+# "agedose": does the age part of the strain error injure more at a larger dose? The
+# strain error split into its age-free part (log PBW/PFVC at age 25, ldisc25_sd) and
+# its age part (log PFVC at 25 / PFVC, agecomp_sd, the share of GLI's age decline in
+# FVC), each with its divergence, and each divergence modified by the index VT/PBW
+# (centred, vtpbw_c). Strain is volume over volume, so a strain effect predicts that
+# agecomp_sd:vtpbw_c:vent_day (and ldisc25_sd:vtpbw_c:vent_day) are non-zero, with the
+# same sign as the divergence; a non-strain effect of age predicts no dose modification.
+# Ventilated cohort only (a control has no tidal volume).
+stopifnot(LAMBDA_FORM || MOD_FORM %in% c("disc", "saturated", "none", "pfvc", "disc_level", "channels", "vtpfvc", "pfvc_dose",
+                                         "pfvc25", "disc25_level", "agedose", names(REFVOL_FORMS)))
+if (MOD_FORM %in% names(REFVOL_FORMS) && !nzchar(REF_STRATUM))
+  stop("the ", MOD_FORM, " form needs a reference-volume stratum: set PBWPFVC_JM_REF_STRATUM=white or notwhite")
 # The control cohorts receive no set tidal volume, so every dose term is dropped
 # and the joint model becomes the PFVC trajectory alone. That is the point of
 # them: if smaller lungs still diverge where no ventilator is acting, the
@@ -211,12 +234,13 @@ DOSE_ROWS <- config$cohort == "imv"
 # disc_level runs in a control too: log PBW/PFVC exists without a ventilator, and the
 # ventilated-minus-control difference of its divergence is the strain-error
 # companion of the PFVC difference (27_control_comparison.R)
-if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "vtpfvc", "pfvc_dose"))
+if (!HAS_DOSE && MOD_FORM %in% c("disc", "saturated", "none", "vtpfvc", "pfvc_dose", "agedose"))
   stop("modifier form '", MOD_FORM, "' needs a ventilator dose; use pfvc, disc_level or channels for the ", config$cohort, " cohort")
 # the form's size exposure: the column whose level and divergence the form reads, and
 # the one the severity anchor modifies in a severity-standardised control
 SIZE_EXPOSURE <- switch(MOD_FORM, disc_level = "ldisc_sd", vtpfvc = "vtpfvc_c", pfvc25 = "log_pfvc25_sd",
-                        disc25_level = "ldisc25_sd", "log_pfvc_sd")
+                        disc25_level = "ldisc25_sd", disc_tlc = "ldisc_tlc_sd", disc_va = "ldisc_va_sd",
+                        disc_frc = "ldisc_frc_sd", agedose = "agecomp_sd", if (LAMBDA_FORM) "ldisc_lambda_sd" else "log_pfvc_sd")
 adj_label <- function(adjusted) if (MOD_FORM == "channels") "channels" else if (adjusted) "adjusted" else "unadjusted"
 # The survival submodel. Its job is the correction for who leaves the
 # panel (death, extubation, escalation), not the size effect, which the mortality
@@ -244,7 +268,7 @@ MODEL_SPEC <- paste0(if (HAS_DOSE) "dose: between = index VT/PBW (vtpbw_idx), wi
                      "lags: ", if (NO_LAGS) "none (previous-day SF and pressor dropped)" else "previous-day log SF and pressor flag")
 # the time trend is part of each marker's specification: a 3-df natural spline in day
 # on the daily grid, linear for the binary on/off marker (its spline did not mix)
-time_term_for <- function(mk) if (JM_GRID == "6h" || isTRUE(mk$binary)) "vent_day" else "ns(vent_day, 3)"
+time_term_for <- function(mk) if (JM_GRID == "6h" || isTRUE(mk$binary) || !is.null(mk$model)) "vent_day" else "ns(vent_day, 3)"
 model_spec_for <- function(mk) paste0(MODEL_SPEC, "; time: ", time_term_for(mk))
 # Renal replacement as a third competing cause, for creatinine only. Off by
 # default because it redefines the other two: with RRT in, the death hazard is
@@ -349,6 +373,16 @@ if (N_ITER < 3000L) message("*** PLUMBING setting: N_ITER < 3000; raise PBWPFVC_
 # this clock's panel (PBWPFVC_JM_CLOCK, 20_biotrauma_grid.R)
 long_all <- read_parquet(panel_path("long"))
 surv_all <- read_parquet(panel_path("surv"))
+# the ordinal cardiovascular score (cv_score, 22e): daily median MAP and peak
+# NE-equivalent dose; the day-0 score is its baseline
+CV_DOSE_CUT <- 0.1   # mcg/kg/min NE-equivalent, the cardiovascular SOFA's dose tier
+CV_MAP_CUT  <- 70    # mmHg
+long_all <- long_all %>%
+  mutate(cv_score = case_when(ne_equiv_peak > CV_DOSE_CUT ~ 3, ne_equiv_peak > 0 ~ 2,
+                              !is.na(map) & map < CV_MAP_CUT ~ 1, !is.na(map) ~ 0, TRUE ~ NA_real_))
+surv_all <- surv_all %>%
+  left_join(long_all %>% filter(period == 0L) %>% distinct(hospitalization_id, .keep_all = TRUE) %>%
+              transmute(hospitalization_id, cv_score_0 = cv_score), by = "hospitalization_id")
 meta     <- readRDS(panel_path("meta"))
 # The age-25 exposures (the pfvc25 and disc25_level forms), built here from the
 # panel's pfvc_age25 and pbw. They are standardised over this panel's patients, not
@@ -362,6 +396,21 @@ AGE25_SCALE <- list(log_pfvc25_mean = mean(log(surv_all$pfvc_age25)), log_pfvc25
 surv_all <- surv_all %>%
   mutate(log_pfvc25_sd = (log(pfvc_age25) - AGE25_SCALE$log_pfvc25_mean) / AGE25_SCALE$log_pfvc25_sd,
          ldisc25_sd    = (log(pbw / pfvc_age25) - AGE25_SCALE$ldisc25_mean) / AGE25_SCALE$ldisc25_sd)
+# The reference-volume exposures, log PBW over each volume, standardised the same way
+# over this panel's patients with the volume (it is NA outside the equation's ages)
+REFVOL_SCALE <- map(REFVOL_FORMS, function(volume) {
+  x <- log(surv_all$pbw / surv_all[[volume]]); list(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)) })
+for (form in names(REFVOL_FORMS))
+  surv_all[[paste0("l", form, "_sd")]] <- (log(surv_all$pbw / surv_all[[REFVOL_FORMS[[form]]]]) - REFVOL_SCALE[[form]]$mean) /
+    REFVOL_SCALE[[form]]$sd
+# the lambda form's exposure, standardised the same way (NA in every other form)
+lambda_raw <- log(surv_all$pbw / surv_all$pfvc_age25) - LAMBDA * (log(surv_all$pfvc_gli) - log(surv_all$pfvc_age25))
+LAMBDA_SCALE <- list(mean = mean(lambda_raw), sd = sd(lambda_raw))
+surv_all$ldisc_lambda_sd <- (lambda_raw - LAMBDA_SCALE$mean) / LAMBDA_SCALE$sd
+# the agedose form's age part, log PFVC at 25 / PFVC (positive, rising with age), standardised
+agecomp_raw <- log(surv_all$pfvc_age25 / surv_all$pfvc_gli)
+AGECOMP_SCALE <- list(mean = mean(agecomp_raw), sd = sd(agecomp_raw))
+surv_all$agecomp_sd <- (agecomp_raw - AGECOMP_SCALE$mean) / AGECOMP_SCALE$sd
 if (!identical(meta$clock, JM_CLOCK) || is.null(meta$cohort_scale))
   stop(basename(panel_path("meta")), " was not built on the ", JM_CLOCK, " clock by the current 21_biotrauma_panel.R: rebuild the panel")
 message("Loaded ", nrow(long_all), " patient-days, ", nrow(surv_all), " patients (", JM_CLOCK, " clock)")
@@ -409,7 +458,25 @@ markers <- list(
   # pressor days in the window to enter, as for every marker. Patients leave the
   # dose part as they are weaned; the joint model corrects only for death and
   # extubation, so the dose trajectory is that of patients still on pressors.
-  pressor_dose  = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0,    label = "Vasopressor dose, days on a pressor", positive = TRUE)
+  pressor_dose  = list(y = "ne_equiv_peak", y0 = "ne_equiv_0",   own_lag = "l_pressor",random = "unstructured", offset = 0,    label = "Vasopressor dose, days on a pressor", positive = TRUE),
+  # Two vasopressor outcomes that do not condition on being on a pressor, so each has
+  # a control comparison (the no-support controls also receive pressors). Both are
+  # fitted only as longitudinal models (PBWPFVC_JM_LME_ONLY=1), with a random intercept
+  # and a linear day term.
+  #   pressor_marginal  the daily peak NE-equivalent dose with its zeros, a Tweedie
+  #                     mixed model with a log link (glmmTMB): the expected dose
+  #                     across on and off days, the hurdle's two parts in one
+  #   cv_score          an ordinal cardiovascular score per day: 0 = off pressors
+  #                     with median MAP >= 70; 1 = off pressors, MAP < 70; 2 = on a
+  #                     pressor at <= 0.1 mcg/kg/min NE-equivalent; 3 = above 0.1. A
+  #                     cumulative-logit mixed model (ordinal::clmm); it counts a low
+  #                     MAP off pressors, where dose alone is 0
+  # The day-0 baseline is coded as for the dose part (on_y0 and log_y0) for the
+  # marginal dose, and as the day-0 score for the ordinal score.
+  pressor_marginal = list(y = "ne_equiv_peak", y0 = "ne_equiv_0", own_lag = "l_pressor", random = "intercept", offset = 0,
+                          label = "Vasopressor dose, every day (Tweedie)", model = "tweedie", zero_baseline = TRUE),
+  cv_score      = list(y = "cv_score", y0 = "cv_score_0", own_lag = "l_pressor", random = "intercept", offset = 0,
+                       label = "Cardiovascular score (MAP and NE-equivalent dose, ordinal)", model = "ordinal")
 )
 for (nm in names(markers)) markers[[nm]]$name <- nm   # the output name; any_pressor shares the dose column
 want_markers <- Sys.getenv("PBWPFVC_JM_MARKERS", "")
@@ -472,6 +539,9 @@ scale_tbl <- tibble(cohort = config$cohort, sd_log_pfvc = meta$cohort_scale$log_
                     sd_ldisc = meta$cohort_scale$ldisc_sd, mean_ldisc = meta$cohort_scale$ldisc_mean,
                     # the age-25 exposures, over this panel's patients (above)
                     sd_log_pfvc25 = AGE25_SCALE$log_pfvc25_sd, sd_ldisc25 = AGE25_SCALE$ldisc25_sd,
+                    sd_ldisc_tlc = REFVOL_SCALE$disc_tlc$sd, sd_ldisc_va = REFVOL_SCALE$disc_va$sd,
+                    sd_ldisc_frc = REFVOL_SCALE$disc_frc$sd,
+                    lambda = LAMBDA, sd_ldisc_lambda = LAMBDA_SCALE$sd, sd_agecomp = AGECOMP_SCALE$sd,
                     n_patients = meta$cohort_scale$n_patients, horizon_days = JM_HORIZON, site = site_name)
 # log_pfvc_sd is log_pfvc standardised by those constants
 stopifnot(isTRUE(all.equal(surv_all$log_pfvc_sd, (surv_all$log_pfvc - scale_tbl$mean_log_pfvc) / scale_tbl$sd_log_pfvc)))
@@ -482,13 +552,17 @@ write_csv(scale_tbl, file.path(final_dir, paste0("jm_scale_", h_suffix, "_", sit
 restricted_patients <- function(mk) {
   kept <- surv_all
   if (ICU_DAY0) kept <- kept %>% filter(icu_day0)
+  if (nzchar(REF_STRATUM)) kept <- kept[in_ref_stratum(kept), ] %>%
+    filter(if_all(all_of(paste0("l", names(REFVOL_FORMS), "_sd")), is.finite))
   if (nzchar(SF_BAND)) kept <- kept %>% filter(!is.na(sf_index), sf_index >= sf_band_limits[1], sf_index < sf_band_limits[2])
   kept
 }
 
-DEMO_RHS  <- "ns(age10, 4) + sex_category + race_category"
-DEMO_RHS_HAZARD <- function() paste(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10_z",
-                                    "+ sex_category + race_category")
+# Inside the White reference-volume stratum race has one level and drops out
+RACE_RHS  <- if (REF_STRATUM == "white") "" else " + race_category"
+DEMO_RHS  <- paste0("ns(age10, 4) + sex_category", RACE_RHS)
+DEMO_RHS_HAZARD <- function() paste0(if (HAZARD_AGE == "spline") "ns(age10, 4)" else "age10_z",
+                                     " + sex_category", RACE_RHS)
 # Severity covariates of the longitudinal submodel. Non-respiratory SOFA (log SF
 # carries the respiratory component). BMI ONLY for the pressure-derived marker:
 # BMI is weight over height squared, so it carries height, which is what
@@ -645,12 +719,13 @@ placebo_check <- function(ld, rhs, random_spec, mk, counts, stamp) {
 # patients) and goes to the manifest as n_rows_after_<step> and
 # n_patients_after_<step>.
 prepare_fit_data <- function(mk, stamp) {
-  # --- cohort restriction (ICU day 0, index SF band)
-  if (ICU_DAY0 || nzchar(SF_BAND)) {
+  # --- cohort restriction (reference-volume stratum, ICU day 0, index SF band)
+  if (nzchar(REF_STRATUM) || ICU_DAY0 || nzchar(SF_BAND)) {
     n_cohort <- nrow(surv_all)
     surv_all <- restricted_patients(mk)
     long_all <- long_all %>% semi_join(surv_all, by = "hospitalization_id")
     stamp("restricted to ", nrow(surv_all), " of ", n_cohort, " patients",
+          if (nzchar(REF_STRATUM)) paste0("; ", REF_STRATUM, ", age <= ", REF_STRATUM_MAX_AGE, ", every reference volume") else "",
           if (ICU_DAY0) "; on the cohort's support at ICU admission (icu_day0)" else "",
           if (nzchar(SF_BAND)) paste0("; index SF in [", sf_band_limits[1], ", ", sf_band_limits[2], ")") else "")
   }
@@ -675,12 +750,14 @@ prepare_fit_data <- function(mk, stamp) {
     filter(if (DOSE_ROWS) !is.na(l_vtpfvc) else TRUE, !is.na(l_sf), !is.na(l_pressor)) %>%
     note_step("lags", "previous-day covariates observed")
   ld <- ld %>%
-    mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0) else log(.data[[mk$y]] + mk$offset),
+    mutate(log_y = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y]] > 0)
+                   else if (!is.null(mk$model)) .data[[mk$y]]   # Tweedie dose or ordinal score, on its own scale
+                   else log(.data[[mk$y]] + mk$offset),
            l_log_sf = log(l_sf)) %>%
     inner_join(surv_all %>% select(hospitalization_id, np_sofa, bmi, age10, sex_category,
                                    race_category, vtpfvc_pt_mean, vtpbw_idx,
                                    ldisc_c, log_pbw, log_pfvc, log_pfvc_sd, ldisc_sd, log_pfvc25_sd, ldisc25_sd, vtpfvc_c, vtpfvc_idx,
-                                   all_of(CHANNELS), all_of(mk$y0)),
+                                   ldisc_tlc_sd, ldisc_va_sd, ldisc_frc_sd, ldisc_lambda_sd, agecomp_sd, all_of(CHANNELS), all_of(mk$y0)),
                by = "hospitalization_id") %>%
     filter(!is.na(np_sofa),
            if (DOSE_ROWS) !is.na(vtpbw_idx) else TRUE,
@@ -693,8 +770,8 @@ prepare_fit_data <- function(mk, stamp) {
   # the ventilated severity
   sev_center <- sev_center_for(mk$name)
   if (!is.na(sev_center)) {
-    if (!MOD_FORM %in% c("pfvc", "disc_level", "pfvc25", "disc25_level"))
-      stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc, disc_level, pfvc25 and disc25_level forms")
+    if (!(LAMBDA_FORM || MOD_FORM %in% c("pfvc", "disc_level", "pfvc25", "disc25_level", names(REFVOL_FORMS))))
+      stop("PBWPFVC_JM_SEV_CENTER is written for the pfvc, disc_level, age-25 and reference-volume forms")
     ld <- ld %>%
       inner_join(tibble(hospitalization_id = surv_all$hospitalization_id,
                         sev_anchor_c = anchor_of(surv_all, mk$name) - sev_center), by = "hospitalization_id") %>%
@@ -708,10 +785,11 @@ prepare_fit_data <- function(mk, stamp) {
   # the baseline is the day-0 value (21_biotrauma_panel.R); without one the patient leaves
   if (!is.null(mk$y0)) ld <- ld %>% filter(!is.na(.data[[mk$y0]])) %>%
     mutate(log_y0 = if (isTRUE(mk$binary)) as.numeric(.data[[mk$y0]] > 0) else
-                    if (isTRUE(mk$positive)) if_else(.data[[mk$y0]] > 0, log(pmax(.data[[mk$y0]], 1e-12)), 0) else
+                    if (identical(mk$model, "ordinal")) .data[[mk$y0]] else
+                    if (isTRUE(mk$positive) || isTRUE(mk$zero_baseline)) if_else(.data[[mk$y0]] > 0, log(pmax(.data[[mk$y0]], 1e-12)), 0) else
                     log(.data[[mk$y0]] + mk$offset)) %>%
     note_step("baseline", "day-0 baseline value observed")
-  if (isTRUE(mk$positive)) {
+  if (isTRUE(mk$positive) || isTRUE(mk$zero_baseline)) {
     if (BASELINE_FORM == "offset") stop("marker ", mk$name, ": the offset baseline form needs a positive day-0 value, ",
                                         "and the dose part's baseline is zero for patients who start later; use PBWPFVC_JM_BASELINE=free")
     ld <- ld %>% mutate(on_y0 = as.numeric(.data[[mk$y0]] > 0))
@@ -834,7 +912,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   ld <- fit_data$ld; sd_ <- fit_data$sd_; entry_steps <- fit_data$entry_steps
   sev_center <- fit_data$sev_center; use_rrt <- fit_data$use_rrt
   lv <- levels(ld$id)
-  if (isTRUE(mk$positive)) {
+  if (isTRUE(mk$positive) || isTRUE(mk$zero_baseline)) {
     on0 <- ld %>% distinct(hospitalization_id, on_y0)
     stamp(sum(on0$on_y0 == 1), " of ", nrow(on0), " dose-part patients on a pressor at day 0",
           if (n_distinct(on0$on_y0) == 1) "; the day-0 on/off term is constant and is left out of the model" else "")
@@ -855,7 +933,8 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # --- every modelled column must be finite; name the offender instead of letting
   #     nlme fail with "NA/NaN/Inf in foreign function call"
   num_cols <- intersect(c("log_y", "log_y0", "on_y0", if (HAS_DOSE) c("l_vtpbw_within", "vtpbw_idx"), "ldisc_c",
-                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", "log_pfvc25_sd", "ldisc25_sd", CHANNELS, CUM_TERM,
+                          "log_pbw", "log_pfvc", "log_pfvc_sd", "ldisc_sd", "log_pfvc25_sd", "ldisc25_sd",
+                          if (MOD_FORM %in% names(REFVOL_FORMS) || LAMBDA_FORM || MOD_FORM == "agedose") SIZE_EXPOSURE, CHANNELS, CUM_TERM,
                           if (MOD_FORM == "vtpfvc") "vtpfvc_c",
                           "l_log_sf", "l_pressor", "np_sofa", "sev_anchor_c", if (mk$y %in% PRESSURE_MARKERS) "bmi",
                           "age10"), names(ld))
@@ -882,7 +961,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # disc form: PFVC as an effect modifier of the clinician's dose; the slope of
   # l_vtpbw_within is modified by centred log PBW/PFVC discordance (and, adjusted,
   # by linear age).
-  mod_terms <- switch(MOD_FORM,
+  mod_terms <- if (LAMBDA_FORM) c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_lambda_sd", "ldisc_lambda_sd:vent_day") else switch(MOD_FORM,
     # the age modification of the dose slope is LINEAR in age: a 4-df spline
     # interaction is four weakly identified parameters that fail the R-hat gate
     # even on synthetic data; the age main effect keeps its spline
@@ -902,6 +981,13 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     disc_level = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_sd", "ldisc_sd:vent_day"),
     pfvc25       = c(if (HAS_DOSE) "l_vtpbw_within", "log_pfvc25_sd", "log_pfvc25_sd:vent_day"),
     disc25_level = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc25_sd", "ldisc25_sd:vent_day"),
+    disc_tlc     = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_tlc_sd", "ldisc_tlc_sd:vent_day"),
+    disc_va      = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_va_sd", "ldisc_va_sd:vent_day"),
+    disc_frc     = c(if (HAS_DOSE) "l_vtpbw_within", "ldisc_frc_sd", "ldisc_frc_sd:vent_day"),
+    # the index VT/PBW's main effect is vtpbw_idx (in every dose model, below)
+    agedose      = c("l_vtpbw_within", "ldisc25_sd", "ldisc25_sd:vent_day", "agecomp_sd", "agecomp_sd:vent_day",
+                     "vtpbw_c:vent_day", "ldisc25_sd:vtpbw_c", "ldisc25_sd:vtpbw_c:vent_day",
+                     "agecomp_sd:vtpbw_c", "agecomp_sd:vtpbw_c:vent_day"),
     vtpfvc     = c("l_vtpbw_within", "vtpfvc_c", "vtpfvc_c:vent_day"),
     channels   = c(if (HAS_DOSE) "l_vtpbw_within", CHANNELS, paste0(CHANNELS, ":vent_day")))
   # time: a 3-df natural spline in day on the daily grid (figure 4); linear on the
@@ -917,7 +1003,7 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
                   anchor_label(mk$name), sev_center, mean(distinct(ld, hospitalization_id, sev_anchor_c)$sev_anchor_c) + sev_center))
   rhs <- c(time_term, mod_terms, sev_terms, if (HAS_DOSE) "vtpbw_idx", CUM_TERM,
            if (!is.null(mk$y0) && BASELINE_FORM == "free") "log_y0",
-           if (isTRUE(mk$positive) && n_distinct(ld$on_y0) > 1) "on_y0",
+           if ((isTRUE(mk$positive) || isTRUE(mk$zero_baseline)) && n_distinct(ld$on_y0) > 1) "on_y0",
            lag_terms, base_rhs_for(mk$y), if (adjusted && MOD_FORM != "channels") DEMO_RHS,
            if (adjusted && DEMO_TREND) DEMO_TREND_RHS)
   lme_formula <- as.formula(paste("log_y ~", paste(rhs, collapse = " + ")))
@@ -938,7 +1024,19 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
     return(list(status = "shape", reason = NA_character_, counts = counts, entry_steps = entry_steps,
                 lme_formula = deparse1(lme_formula), shape = shape, placebo = placebo))
   }
-  if (isTRUE(mk$binary)) {
+  if (!is.null(mk$model) && !LME_ONLY)
+    stop("marker ", mk$name, " is fitted only as a longitudinal model: set PBWPFVC_JM_LME_ONLY=1")
+  if (identical(mk$model, "tweedie")) {
+    lme_fit <- glmmTMB::glmmTMB(update(lme_formula, . ~ . + (1 | id)), data = ld, family = glmmTMB::tweedie(link = "log"))
+    if (!isTRUE(lme_fit$sdr$pdHess)) stop("marker ", mk$name, ": the Tweedie model's Hessian is not positive definite")
+    stamp("Tweedie mixed model converged")
+  } else if (identical(mk$model, "ordinal")) {
+    ld <- ld %>% mutate(log_y = factor(log_y, levels = 0:3, ordered = TRUE))
+    lme_fit <- ordinal::clmm(update(lme_formula, . ~ . + (1 | id)), data = ld, link = "logit")
+    if (anyNA(summary(lme_fit)$coefficients[, 2]))
+      stop("marker ", mk$name, ": the cumulative-logit model's Hessian is singular (no standard errors)")
+    stamp("cumulative-logit mixed model converged")
+  } else if (isTRUE(mk$binary)) {
     # logistic mixed model, independent intercept and slope variances (the || form)
     # Student-t penalty on the fixed effects, and a wide coefficient ceiling:
     # pressor status is persistent within patient, so the baseline-status term is
@@ -961,7 +1059,9 @@ fit_one <- function(mk, model = "main", adjusted = TRUE) {
   # PBWPFVC_JM_LME_ONLY: the longitudinal submodel's own estimates, in the estimates
   # table's columns (sd is the standard error; no R-hat), and no joint model
   if (LME_ONLY) {
-    coef_table <- if (isTRUE(mk$binary)) summary(lme_fit)$coef_table else summary(lme_fit)$tTable
+    coef_table <- if (identical(mk$model, "tweedie")) summary(lme_fit)$coefficients$cond
+                  else if (identical(mk$model, "ordinal")) summary(lme_fit)$coefficients
+                  else if (isTRUE(mk$binary)) summary(lme_fit)$coef_table else summary(lme_fit)$tTable
     est <- tibble(block = "longitudinal", term = rownames(coef_table),
                   estimate = unname(coef_table[, 1]), sd = unname(coef_table[, 2])) %>%
       mutate(lo = estimate - 1.96 * sd, hi = estimate + 1.96 * sd, rhat = NA_real_) %>%

@@ -172,7 +172,26 @@ pbw_pfvc_data <- cohort_demographics %>%
       gender    = sex_numeric,
       ethnicity = race_numeric,
       param     = "FVC"
-    )
+    ),
+    # Reference lung volumes for the sensitivity analyses of the strain denominator
+    # (litres). Both sets come from people of European ancestry and have no race
+    # term, so the analyses read them in White patients first and in everyone else
+    # as a pre-specified second stratum. Outside an equation's age range rspiro
+    # returns NA, so every comparison using them is restricted to age <= 80.
+    #   pva   alveolar volume, GLI 2017 (the single-breath diffusing-capacity test):
+    #         close to TLC, nearly flat with age; valid to 90
+    #   ptlc  total lung capacity, GLI 2021 static lung volumes (Hall, ERJ 2021);
+    #         valid to 80
+    #   pfrc  functional residual capacity, GLI 2021: the plethysmographic or
+    #         dilution resting volume (RV + ERV), which rises with age; the closest
+    #         reference value to the end-expiratory volume of the strain framework,
+    #         though not the same quantity; valid to 80
+    pva  = suppressWarnings(pred_GLIdiff(age = age_at_admission, height = height_cm / 100,
+                                         gender = sex_numeric, param = "VA")),
+    ptlc = suppressWarnings(pred_GLIvol(age = age_at_admission, height = height_cm / 100,
+                                        gender = sex_numeric, param = "TLC")),
+    pfrc = suppressWarnings(pred_GLIvol(age = age_at_admission, height = height_cm / 100,
+                                        gender = sex_numeric, param = "FRC"))
   ) %>%
   filter(!is.na(pbw), !is.na(pfvc), pfvc > 0) %>%
   # Reference categories: Male and White (first factor level). Releveling here
@@ -290,7 +309,7 @@ analysis_data <- imv_timepoints %>%
   inner_join(
     pbw_pfvc_data %>% select(hospitalization_id, patient_id, age_at_admission,
                               sex_category, race_category, sex_numeric,
-                              race_numeric, height_cm, pbw, pfvc, pfvc_age25, deceased),
+                              race_numeric, height_cm, pbw, pfvc, pfvc_age25, pva, ptlc, pfrc, deceased),
     by = "hospitalization_id"
   ) %>%
   mutate(

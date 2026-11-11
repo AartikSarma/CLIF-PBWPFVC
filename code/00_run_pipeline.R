@@ -11,19 +11,34 @@
 # holds aggregates only and is the folder a site returns. Re-running a stage updates
 # that folder in place. Stages, by the manuscript figure they feed:
 #
-#   prep             01-03   cohort, quality checks, derived variables
+#   prep             01-03   cohort, quality checks, derived variables; then 03 again
+#                            for the ungated cohort (below)
 #   cross_sectional  04-05   figures 1-3: PBW bias by demographics, respiratory
 #                            mechanics, mortality; then three supplement scripts, all
 #                            written to final/supplement/: xsec_crs_channels.R (does
 #                            measured compliance scale like PFVC or PBW; figure 3C),
 #                            xsec_dp_vtpfvc_additive.R (driving pressure and VT/PFVC
 #                            as additive mortality risks) and xsec_mortality_prediction.R
-#                            (which dose or mechanics measure predicts death best)
+#                            (which dose or mechanics measure predicts death best);
+#                            then, gated pass only, the gate check
+#                            (xsec_vtpbw_gate_collider.R) and what precedes a tidal-volume
+#                            reduction (xsec_vt_reduction_timing.R)
 #   injury           20-29   figure 4: organ-injury markers over 7 days in the ventilated
 #                            cohort and the no-support controls (all, and hypoxemic with
 #                            SF < 315), each control standardised to the ventilated
 #                            cohort's severity rather than matched (29_run_figure4.R:
-#                            builds the control cohort, fits, draws)
+#                            builds the control cohort, runs the ventilated-vs-control
+#                            mortality contrasts, fits, draws)
+#
+# Two cohorts, both reported. The paper's cohort enters a ventilated patient at a
+# hypoxemic timepoint with VT/PBW 6-8 mL/kg. VT/PBW follows both predicted lung size
+# (a round-number volume is more mL/kg in a small patient) and illness (clinicians turn
+# the volume down in sicker patients), so selecting on it can link the two
+# (supplement/xsec_vtpbw_gate_collider.R). Every cross-sectional script therefore runs
+# twice: on the gated cohort (final/<block>/) and on the ungated one, the same rule
+# without the band (PBWPFVC_VTPBW_GATE=0; final/ungated/<block>/, same file names).
+# The runner sets the variable itself; a site never sets it by hand. The ungated pass of
+# 03 repeats its derivation (sections 3a-3d) and writes only its cross-sectional table.
 #
 # The default is "prep,cross_sectional". The injury stage takes hours; ask for it by
 # name, or --stages all.
@@ -167,23 +182,33 @@ if (!uvr_library %in% normalizePath(.libPaths()))
 message("[00] Packages synced.\n")
 
 # --- 2. Run the numbered pipeline scripts in order ---------------------------
-# Each step is an R script in code/.
+# Each step is an R script in code/ and the cohort it runs on: gate "1" is the paper's
+# cohort, "0" the ungated one (PBWPFVC_VTPBW_GATE, set for that step only).
+cross_sectional_scripts <- c(
+  "04_analysis.R",                             # bias, mechanics, mortality (figures 1-3)
+  "05_normalization_analysis.R",               # PBW vs PFVC normalization of the injury metrics
+  "supplement/xsec_crs_channels.R",            # compliance against PFVC and PBW (figure 3C)
+  "supplement/xsec_dp_vtpfvc_additive.R",      # driving pressure and VT/PFVC, additive risks
+  "supplement/xsec_mortality_prediction.R")    # which measure predicts death best
+gate_check_scripts <- c(                       # read both cohorts themselves; gated pass only
+  "supplement/xsec_vtpbw_gate_collider.R",     # does the 6-8 gate link predicted size to illness?
+  "supplement/xsec_vt_reduction_timing.R")     # what precedes a tidal-volume reduction
+step <- function(scripts, gate) data.frame(script = scripts, gate = gate, stringsAsFactors = FALSE)
 stage_steps <- list(
-  prep = c("01_cohort_identification.R", "02_quality_checks.R", "03_variable_derivation.R"),
-  cross_sectional = c("04_analysis.R",                # bias, mechanics, mortality (figures 1-3)
-                      "05_normalization_analysis.R",  # PBW vs PFVC normalization of the injury metrics
-                      "supplement/xsec_crs_channels.R",          # compliance against PFVC and PBW (figure 3C)
-                      "supplement/xsec_dp_vtpfvc_additive.R",    # driving pressure and VT/PFVC, additive risks
-                      "supplement/xsec_mortality_prediction.R"), # which measure predicts death best
-  injury = "29_run_figure4.R"
+  prep = rbind(step(c("01_cohort_identification.R", "02_quality_checks.R", "03_variable_derivation.R"), "1"),
+               step("03_variable_derivation.R", "0")),
+  cross_sectional = rbind(step(c(cross_sectional_scripts, gate_check_scripts), "1"),
+                          step(cross_sectional_scripts, "0")),
+  injury = step("29_run_figure4.R", "1")      # sets the gate for each of its own steps
 )
-pipeline_steps <- unlist(stage_steps[stages], use.names = FALSE)
+pipeline_steps <- do.call(rbind, stage_steps[stages])
 if (analysis_only) {
   # the analyses read script 03's outputs; refuse to start if they are not on disk
   site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
                   else jsonlite::fromJSON("config/config.json")$site_name
   stage_dir <- file.path("output", paste0(site_for_dir, "_output"), "intermediate")
-  needed <- file.path(stage_dir, c("analysis_cross_sectional.parquet", "analysis_negative_control.parquet"))
+  needed <- file.path(stage_dir, c("analysis_cross_sectional.parquet", "analysis_cross_sectional_ungated.parquet",
+                                   "analysis_ungated_index.parquet", "analysis_negative_control.parquet"))
   missing <- needed[!file.exists(needed)]
   if (length(missing))
     stop("--analysis_only needs the script-03 outputs, which are missing:\n  ",
@@ -198,36 +223,46 @@ if (analysis_only) {
 # site's return. Cleared: everything when prep runs; everything but script 03's own
 # tables when only the analyses run. final/injury/ is never cleared: its tables are
 # merged on write and cache the joint-model fits. The control cohorts' folder
-# (final/controls/) is not touched.
+# (final/controls/) is not touched. The ungated cohort's block
+# (final/ungated/cross_sectional/) is cleared whole: 03 writes nothing there.
 if (Sys.getenv("PBWPFVC_COHORT", "imv") == "imv" && any(c("prep", "cross_sectional") %in% stages)) {
   site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
                   else jsonlite::fromJSON("config/config.json")$site_name
-  block_dir <- file.path("output", paste0(site_for_dir, "_output"), "final", "cross_sectional")
+  final_root <- file.path("output", paste0(site_for_dir, "_output"), "final")
+  block_dir <- file.path(final_root, "cross_sectional")
   old_files <- list.files(block_dir, full.names = TRUE)
   if (!("prep" %in% stages)) old_files <- old_files[!grepl("^(attrition_log_|dist_)", basename(old_files))]
+  old_files <- c(old_files, list.files(file.path(final_root, "ungated", "cross_sectional"), full.names = TRUE))
   if (length(old_files)) {
-    message("[00] Clearing ", length(old_files), " file(s) from ", block_dir, " before the rerun")
+    message("[00] Clearing ", length(old_files), " file(s) from ", block_dir, " and its ungated twin before the rerun")
     unlink(old_files)
   }
 }
 
 rscript_bin <- file.path(R.home("bin"), "Rscript")
 
-for (script_name in pipeline_steps) {
+# PBWPFVC_VTPBW_GATE is set for each child and removed afterwards, so it never leaks
+# into a later step (utils/config.R stops if it meets a control cohort)
+for (i in seq_len(nrow(pipeline_steps))) {
+  script_name <- pipeline_steps$script[i]
+  gate <- pipeline_steps$gate[i]
+  step_label <- paste0(script_name, if (gate == "0") " (ungated cohort)" else "")
   message("=============================================================")
-  message("[00] Running ", script_name, " ...")
+  message("[00] Running ", step_label, " ...")
   message("=============================================================")
 
+  if (gate == "0") Sys.setenv(PBWPFVC_VTPBW_GATE = "0") else Sys.unsetenv("PBWPFVC_VTPBW_GATE")
   status <- system2(rscript_bin, shQuote(file.path("code", script_name)))
+  Sys.unsetenv("PBWPFVC_VTPBW_GATE")
 
   if (!identical(status, 0L)) {
-    stop("Pipeline halted: ", script_name, " exited with status ", status,
+    stop("Pipeline halted: ", step_label, " exited with status ", status,
          ". Fix the error above before re-running.")
   }
-  message("[00] ", script_name, " completed successfully.\n")
+  message("[00] ", step_label, " completed successfully.\n")
 }
 
 message("=============================================================")
 message("[00] Pipeline complete. All scripts ran successfully.")
-message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/ and controls/.")
+message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/, supplement/ and controls/, with the ungated cohort's twins in ungated/.")
 message("=============================================================")

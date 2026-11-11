@@ -14,7 +14,7 @@
 #       outcome against each control (every no-support patient, and the no-support
 #       patients hypoxemic at the index), the ventilated side being the patients on
 #       IMV at ICU admission: the markers' difference-in-differences, and 60-day death
-#       before escalation (supplement/xsec_pfvc_age_control.R); then the ventilated
+#       with controls censored at any escalation (supplement/xsec_pfvc_age_control.R); then the ventilated
 #       rate with and without the previous-day SF and pressor terms (nolag_ tables);
 #       and each marker's ventilated divergence from the joint model beside the
 #       longitudinal model alone (jm_lme_check_ tables)
@@ -194,11 +194,11 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
            coalesce(rhat_notes$note[match(m, rhat_notes$marker)], ""))
   }
   # Rows: PBWPFVC_FIG_MARKERS (comma list) picks the markers and their order, e.g.
-  # "platelets,bilirubin,creatinine,any_pressor,pressor_dose". Without it, every marker in the tables:
+  # "platelets,creatinine,any_pressor,pressor_dose". Without it, every marker in the tables:
   # PBWPFVC_FIG_ORDER first (default: the markers where the rate carries the finding),
   # the rest in the order of `lab`. Unconverged markers go last either way.
   fig_markers <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_MARKERS", ""), ",")[[1]])
-  fig_order   <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_ORDER", "platelets,bilirubin,creatinine"), ",")[[1]])
+  fig_order   <- trimws(strsplit(Sys.getenv("PBWPFVC_FIG_ORDER", "platelets,creatinine"), ",")[[1]])
   present   <- if (length(fig_markers)) intersect(fig_markers, unique(rate$marker)) else
     intersect(unique(c(fig_order, names(lab))), unique(rate$marker))
   if (length(fig_markers) && length(setdiff(fig_markers, present)))
@@ -371,7 +371,7 @@ if (n_distinct(level_contrast_ventilated$horizon_h) >= 3) {
 #           hypoxaemia together
 #        B  the no-support patients hypoxemic at the index, SF < 315
 #           (jm_hypoxemic_control_did_*): the arms differ in ventilation alone
-#      and beneath each, 60-day death before escalation against the same control (the
+#      and beneath each, 60-day death with controls censored at any escalation of support against the same control (the
 #      control censored when it escalates): the hazard ratio per SD lower log PFVC in
 #      each cohort and their difference, read at the ventilated severity
 #      (pfvc_age_control_contrast_*, final/supplement/). The supplement keeps age in
@@ -396,7 +396,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
   toward_injury <- function(m) if_else(worse[m] == "higher", -1, 1)   # a smaller lung is the negative of the per-SD rate
   # the vasopressor marker against the controls is the on/off part, never the
   # conditional dose (27_control_comparison.R leaves the dose out of the DiD)
-  check_order <- intersect(c("platelets", "bilirubin", "creatinine", "any_pressor"),
+  check_order <- intersect(c("platelets", "creatinine", "any_pressor"),
                            unique(unlist(map(did_tables, ~ .x$table$marker))))
   check_label <- function(m) factor(lab[m], lab[check_order])
   VENTILATED_CHECK_LABEL <- "ventilated,\nat ICU admission"
@@ -431,7 +431,7 @@ if (MOD_FORM == "pfvc" && !nzchar(restrict_tag)) {
   death_panel <- function(population, control_label) {
     if (is.null(death_contrast)) return(NULL)
     rows <- death_contrast %>%
-      filter(population == !!population, outcome == "60-day death, before escalation",
+      filter(population == !!population, outcome == "60-day death, controls censored at any escalation of support",
              severity == "standardised to ventilated severity",
              quantity %in% c("Ventilated", "No support", "no support minus ventilated"))
     if (!nrow(rows)) return(NULL)

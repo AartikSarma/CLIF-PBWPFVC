@@ -18,6 +18,11 @@
 #   analysis_broad_pfvc       every eligible patient with height, age, sex, race and
 #                             PFVC, ventilated or not (4f3)
 #   analysis_negative_control ventilated non-hypoxemic and non-ventilated cohorts (4j)
+# With PBWPFVC_VTPBW_GATE=0 (the runner's second pass) the first is the ungated cohort,
+# the same rule without the VT/PBW 6-8 band (supplement/xsec_vtpbw_gate_collider.R
+# shows why both are reported); its tables go to final/ungated/cross_sectional/ under
+# the same names, and the CONSORT diagram (4i), drawn from the gated cohort's
+# attrition log, is left to the gated pass.
 #
 # Model families (section)
 #   4c  logistic, in-hospital death              4d  linear, lung mechanics (Ers, Crs,
@@ -90,7 +95,7 @@ DOSE_HEIGHT_BREAKS <- c(150, 160, 170, 180, 190, 210)
 # Load data
 # =============================================================================
 
-cross_sectional <- read_parquet(file.path(output_dir, "analysis_cross_sectional.parquet"))
+cross_sectional <- read_parquet(file.path(output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet")))
 
 message("Cross-sectional: ", nrow(cross_sectional), " observations")
 
@@ -976,13 +981,16 @@ message("Residual-confounding table written (", nrow(residual_confounding),
 # =============================================================================
 # 4i. Inclusion CONSORT diagram (site QC)
 # =============================================================================
-# CONSORT flow from the 7-step attrition log written in script 03.
-attrition <- read_csv(file.path(final_dir, paste0("attrition_log_", site_name, ".csv")),
-                      show_col_types = FALSE)
-consort_fig <- render_consort(attrition, title = paste0("Cohort inclusion - ", site_name))
-ggsave(file.path(final_dir, paste0("consort_diagram_", site_name, ".pdf")),
-       consort_fig, width = 9, height = 11)
-message("CONSORT diagram saved")
+# CONSORT flow from the 7-step attrition log written in script 03. The ungated run of
+# 03 stops before the log, so the diagram belongs to the gated pass only.
+if (config$vtpbw_gate == "1") {
+  attrition <- read_csv(file.path(final_dir, paste0("attrition_log_", site_name, ".csv")),
+                        show_col_types = FALSE)
+  consort_fig <- render_consort(attrition, title = paste0("Cohort inclusion - ", site_name))
+  ggsave(file.path(final_dir, paste0("consort_diagram_", site_name, ".pdf")),
+         consort_fig, width = 9, height = 11)
+  message("CONSORT diagram saved")
+}
 
 # =============================================================================
 # 4j. Negative-control cohorts: PBW/PFVC, PFVC, height (and dose) vs mortality

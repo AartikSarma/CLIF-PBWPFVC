@@ -20,6 +20,11 @@
 #   PBWPFVC_JM_NO_DOSE    0 | 1   drop the index VT/PBW and its day-to-day change from
 #                         the ventilated longitudinal submodel (sensitivity); file
 #                         tag "nodose_"
+#   PBWPFVC_JM_REF_STRATUM  unset | white | notwhite   keep patients aged
+#                         REF_STRATUM_MAX_AGE or younger in one race stratum, the
+#                         sample on which the reference-lung-volume forms (disc_tlc,
+#                         disc_va, disc_frc) are compared with the GLI forms; file tag
+#                         "white80_" / "notwhite80_", before every other tag
 #   PBWPFVC_VTPBW_GATE    1 | 0   0 builds the panel from the ungated ventilated cohort
 #                         (utils/config.R): panel files "_ungated", aggregates in
 #                         final/ungated/
@@ -240,6 +245,9 @@ RHAT_GATE <- 1.1   # the standard convergence threshold
 #   disc_level       ldisc_sd, ldisc_sd:vent_day
 #   pfvc25           log_pfvc25_sd, log_pfvc25_sd:vent_day (GLI at age 25)
 #   disc25_level     ldisc25_sd, ldisc25_sd:vent_day (GLI at age 25)
+#   disc_tlc, disc_va, disc_frc   log PBW over predicted TLC (GLI 2021), alveolar
+#                    volume (GLI 2017) and FRC (GLI 2021), standardised:
+#                    ldisc_{tlc,va,frc}_sd and each x vent_day
 #   vtpfvc           vtpfvc_c, vtpfvc_c:vent_day
 #   channels         ch_height, ch_age, ch_sex, ch_race and each x vent_day
 # The dose-modification forms (not in the paper) have no divergence; their size terms are the
@@ -253,6 +261,10 @@ SIZE_TERMS <- list(
   disc_level = c("ldisc_sd", "ldisc_sd:vent_day"),
   pfvc25       = c("log_pfvc25_sd", "log_pfvc25_sd:vent_day"),
   disc25_level = c("ldisc25_sd", "ldisc25_sd:vent_day"),
+  disc_tlc   = c("ldisc_tlc_sd", "ldisc_tlc_sd:vent_day"),
+  disc_va    = c("ldisc_va_sd", "ldisc_va_sd:vent_day"),
+  disc_frc   = c("ldisc_frc_sd", "ldisc_frc_sd:vent_day"),
+  agedose    = c("ldisc25_sd", "ldisc25_sd:vent_day", "agecomp_sd", "agecomp_sd:vent_day"),
   vtpfvc     = c("vtpfvc_c", "vtpfvc_c:vent_day"),
   channels   = c(CHANNELS, paste0(CHANNELS, ":vent_day")),
   disc       = c("ldisc_c", "l_vtpbw_within:ldisc_c"),
@@ -261,6 +273,8 @@ SIZE_TERMS <- list(
 # a term with its components sorted, so vent_day:log_pfvc_sd matches log_pfvc_sd:vent_day
 sorted_term <- function(term) vapply(strsplit(term, ":"), function(p) paste(sort(p), collapse = ":"), character(1))
 size_terms_for <- function(form) {
+  # the lambda sweep's forms (22_biotrauma_fit.R): lambda000 to lambda100
+  if (grepl("^lambda[0-9]{3}$", form)) return(c("ldisc_lambda_sd", "ldisc_lambda_sd:vent_day"))
   if (!form %in% names(SIZE_TERMS)) stop("unknown modifier form '", form, "': no size terms")
   SIZE_TERMS[[form]]
 }
@@ -307,7 +321,8 @@ channels_equal_p <- function(est, V) {
 # to drop.
 ANCHOR_POOL <- c("sofa_cv_97", "sofa_coag", "sofa_liver", "sofa_renal")
 ANCHOR_DROP <- c(creatinine = "sofa_renal", platelets = "sofa_coag", bilirubin = "sofa_liver",
-                 ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97", pressor_dose = "sofa_cv_97")
+                 ne_equiv_peak = "sofa_cv_97", any_pressor = "sofa_cv_97", pressor_dose = "sofa_cv_97",
+                 pressor_marginal = "sofa_cv_97", cv_score = "sofa_cv_97")
 anchor_components <- function(marker) setdiff(ANCHOR_POOL, unname(ANCHOR_DROP[marker]))
 anchor_label <- function(marker)
   paste(sub("_97", "", sub("sofa_", "", anchor_components(marker))), collapse = " + ")
@@ -383,7 +398,21 @@ no_dose_sfx <- if (NO_DOSE) "_nodose" else ""
 # too; its aggregate tables are told apart by their folder
 ungated_sfx <- if (UNGATED) "_ungated" else ""
 
-# every restriction and variant, in the order every script uses: ICU day 0, severity
-# standardisation, SF band, no lags
-restrict_tag <- paste0(icu_day0_tag, sev_center_tag, sf_tag, no_lags_tag, no_dose_tag)
-restrict_sfx_for <- function(marker) paste0(icu_day0_sfx, sev_center_sfx_for(marker), sf_sfx, no_lags_sfx, no_dose_sfx, ungated_sfx)
+# The reference-volume sample (PBWPFVC_JM_REF_STRATUM): the reference lung volumes come
+# from people of European ancestry with no race term, so they are compared with the
+# GLI forms in White patients and, pre-specified, in everyone else, at ages the GLI
+# 2021 static volumes cover (to 80).
+REF_STRATUM <- Sys.getenv("PBWPFVC_JM_REF_STRATUM", "")
+stopifnot(REF_STRATUM %in% c("", "white", "notwhite"))
+REF_STRATUM_MAX_AGE <- 80
+ref_stratum_tag <- if (nzchar(REF_STRATUM)) paste0(REF_STRATUM, REF_STRATUM_MAX_AGE, "_") else ""
+ref_stratum_sfx <- if (nzchar(REF_STRATUM)) paste0("_", REF_STRATUM, REF_STRATUM_MAX_AGE) else ""
+in_ref_stratum <- function(d) {
+  if (!nzchar(REF_STRATUM)) return(rep(TRUE, nrow(d)))
+  d$age10 <= REF_STRATUM_MAX_AGE / 10 & (if (REF_STRATUM == "white") d$race_category == "WHITE" else d$race_category != "WHITE")
+}
+
+# every restriction and variant, in the order every script uses: the reference-volume
+# stratum, ICU day 0, severity standardisation, SF band, no lags
+restrict_tag <- paste0(ref_stratum_tag, icu_day0_tag, sev_center_tag, sf_tag, no_lags_tag, no_dose_tag)
+restrict_sfx_for <- function(marker) paste0(ref_stratum_sfx, icu_day0_sfx, sev_center_sfx_for(marker), sf_sfx, no_lags_sfx, no_dose_sfx, ungated_sfx)

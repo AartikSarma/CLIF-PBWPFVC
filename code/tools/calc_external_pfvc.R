@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # =============================================================================
-# calc_external_pfvc.R -- GLI-2012 PFVC, PFVC at age 25 and Devine PBW for an external trial
+# calc_external_pfvc.R -- GLI-2012 PFVC, PFVC at age 25, GLI TLC and VA, and Devine PBW for an external trial
 #                         table (e.g. ARMA), by study arm, on the same scale as script 03.
 # =============================================================================
 # Given a trial's individual data (age, sex, race, height, study arm), computes each patient's
@@ -91,10 +91,15 @@ stopifnot(nrow(df) > 0)
 df <- df %>% mutate(
   pfvc       = pred_GLI(age = age,          height = height_cm / 100, gender = gender, ethnicity = ethnicity, param = "FVC"),
   pfvc_age25 = pred_GLI(age = rep(25, n()), height = height_cm / 100, gender = gender, ethnicity = ethnicity, param = "FVC"),
-  pbw        = if_else(gender == 1L, 50 + 2.3 * (height_cm / 2.54 - 60), 45.5 + 2.3 * (height_cm / 2.54 - 60)))
+  pbw        = if_else(gender == 1L, 50 + 2.3 * (height_cm / 2.54 - 60), 45.5 + 2.3 * (height_cm / 2.54 - 60)),
+  # GLI static lung volumes (TLC, valid to 80) and alveolar volume (VA, from the TLCO equations,
+  # valid to 90), as in script 03; both European-only, so no ethnicity term; NA outside the age range
+  ptlc       = suppressWarnings(pred_GLIvol(age = age, height = height_cm / 100, gender = gender, param = "TLC")),
+  pva        = suppressWarnings(pred_GLIdiff(age = age, height = height_cm / 100, gender = gender, param = "VA")))
 
 # delivered strain on each normalizer scale, IF a tidal-volume column was supplied
-metrics <- c("pfvc", "pfvc_age25", "pbw")
+# (n per metric counts non-missing rows: VT/TLC leaves out patients over 80)
+metrics <- c("pfvc", "pfvc_age25", "pbw", "ptlc", "pva")
 if (!is.na(c_vt) && any(is.finite(df$vt))) {
   med_v <- median(df$vt, na.rm = TRUE)
   vunit <- if (med_v >= 100 & med_v <= 2000) "mL" else if (med_v >= 0.1 & med_v <= 2) "L" else "unknown"
@@ -104,8 +109,10 @@ if (!is.na(c_vt) && any(is.finite(df$vt))) {
   cat(sprintf("Tidal volume unit detected: %s (median %.1f -> %.0f mL)\n", vunit, med_v, median(df$vt_ml, na.rm = TRUE)))
   df <- df %>% mutate(vtpbw        = vt_ml / pbw,                 # mL/kg PBW (sanity: ~6 / ~12 by arm)
                       vtpfvc       = vt_ml / pfvc * 0.1,          # % strain, PFVC scale (engine units)
-                      vtpfvc_age25 = vt_ml / pfvc_age25 * 0.1)    # % strain, pfvc_age25 scale
-  metrics <- c(metrics, "vtpbw", "vtpfvc", "vtpfvc_age25")
+                      vtpfvc_age25 = vt_ml / pfvc_age25 * 0.1,    # % strain, pfvc_age25 scale
+                      vttlc        = vt_ml / ptlc * 0.1,          # % of predicted TLC (age <= 80)
+                      vtva         = vt_ml / pva * 0.1)           # % of predicted alveolar volume (age <= 90)
+  metrics <- c(metrics, "vtpbw", "vtpfvc", "vtpfvc_age25", "vttlc", "vtva")
 }
 
 # per-arm (+ pooled) mean & quartiles for each metric (NA-robust; n = non-missing used)

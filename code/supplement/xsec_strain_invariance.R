@@ -27,7 +27,8 @@
 #    with the slope, and PFVC's shrink?) is a pooling step across sites.
 #
 # 2. The ventilation contrast. Per cohort, in-hospital death (logistic) and 60-day
-#    death before invasive ventilation (cause-specific Cox):
+#    death with the controls censored at escalation to invasive ventilation (cause-
+#    specific Cox; a ventilated patient, intubated at the index, is never censored):
 #      death ~ SF (z) + SOFA (z) + exposure       [+ VT/PBW, ventilated, "at fixed VT/PBW"]
 #    for log PBW/PFVC and log PFVC, and their age-standardised versions (GLI at age 25:
 #    height, sex and race only, the structural lung size and strain error), per 0.1
@@ -46,6 +47,16 @@
 #    coefficient holding still.
 #    Populations: everyone, and hypoxemic at the index (SF < 315, the ventilated
 #    cohort's own gate), the control matched on the ventilated cohort's hypoxemia.
+#    Section 2e repeats the no-dose contrast with PBW over three other reference lung
+#    volumes (alveolar volume, GLI 2017; TLC and FRC, GLI 2021), whose age behaviour
+#    differs from FVC's, in White patients and, pre-specified, everyone else, age <= 80.
+#    Section 2f sweeps one axis instead: a denominator keeping the share lambda of
+#    GLI's age decline in FVC (0 = PFVC at age 25, 1 = PFVC), on the whole cohort, and
+#    in a day-2 landmark population that approximates the figure-4 marker sample.
+#    Section 2g splits the age-25 contrast by age band (18-59, 60-74, 75+): does the
+#    structural strain error matter less in older patients?
+#    Section 2h splits the 60-day contrast by time window (days 0-2, 2-7, 7-28, 28-60):
+#    does the age-free signal arise early and fade, or accrue later as in ARMA?
 #
 # 3. Placebo formulas. If the ratio's ventilation-specific gradient is strain, GLI's
 #    weighting of the inputs should matter; if it is any demographic index, arbitrary
@@ -99,6 +110,16 @@
 #   strain_invariance_censoring_{site}.csv  section 2b: each exposure's hazard of
 #                                           intubation in the control (informative
 #                                           censoring?)
+#   strain_invariance_reference_volumes_{site}.csv  section 2e: the contrast with PBW over
+#                                           alveolar volume, TLC and FRC beside PBW/PFVC,
+#                                           White and not White, age <= 80
+#   strain_invariance_lambda_{site}.csv     section 2f: the contrast and the censoring
+#                                           check along log PBW/V(lambda), lambda 0 to 1
+#   strain_invariance_lambda_implied_{site}.csv  where TLC and alveolar volume sit on it
+#   strain_invariance_age_bands_{site}.csv  section 2g: the age-25 and full strain-error
+#                                           contrasts within age bands, with Cochran's Q
+#   strain_invariance_time_windows_{site}.csv  section 2h: the contrast within time
+#                                           windows (days 0-2, 2-7, 7-28, 28-60), lambda 0, 0.5, 1
 #   strain_invariance_age25_pieces_{site}.csv  section 2c: the age-25 strain error split
 #                                           into sex, Black, Other and the height curve,
 #                                           per cohort and the difference, each on the
@@ -150,7 +171,7 @@ DIFFERENCE <- "ventilated minus no support"
 # Data: both cross-sectional cohorts, as xsec_mortality_channel_equality.R builds them
 # =============================================================================
 cohort_columns <- c("hospitalization_id", "index_dttm", "age_at_admission", "sex_category",
-                    "race_category", "pfvc", "pfvc_age25", "pbw", "sf_ratio", "sofa_total", "deceased", "admission_dttm", "death_dttm",
+                    "race_category", "pfvc", "pfvc_age25", "pva", "ptlc", "pfrc", "pbw", "sf_ratio", "sofa_total", "deceased", "admission_dttm", "death_dttm",
                     "discharge_dttm", "height_cm")
 control_file <- file.path(config$output_dir, "controls", "nosupport", "analysis_cross_sectional.parquet")
 if (!file.exists(control_file))
@@ -158,14 +179,14 @@ if (!file.exists(control_file))
 # the ventilated arm: patients on invasive ventilation at ICU admission (icu_day0)
 # the ungated cohort's table with PBWPFVC_VTPBW_GATE=0 (utils/config.R, script 03)
 ventilated_cohort <- read_parquet(file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))) %>%
-  select(all_of(cohort_columns), vtpbw, icu_day0, patient_id)
+  select(all_of(cohort_columns), vtpbw, icu_day0, patient_id, last_imv_dttm)
 ventilated <- ventilated_cohort %>% filter(icu_day0) %>% select(-icu_day0) %>%
   mutate(cohort = "Ventilated", escalation_dttm = as.POSIXct(NA))
 message("Ventilated arm: ", nrow(ventilated), " of ", nrow(ventilated_cohort),
         " ventilated-cohort patients on invasive ventilation at ICU admission (icu_day0)")
 no_support <- read_parquet(control_file) %>%
   select(all_of(cohort_columns), escalation_dttm, patient_id) %>%
-  mutate(cohort = "No support", vtpbw = NA_real_)
+  mutate(cohort = "No support", vtpbw = NA_real_, last_imv_dttm = as.POSIXct(NA))
 # No patient in both arms. Script 03 removed the gated ventilated arm's patients from the
 # control; the ungated arm (PBWPFVC_VTPBW_GATE=0) is larger, so the same rule (by
 # patient_id, any hospitalization) is applied again here. On the gated arm it drops no one.
@@ -223,11 +244,21 @@ both_cohorts <- both_cohorts %>%
          # height, sex and race only
          log_pfvc_age25  = log(pfvc_age25),
          log_ratio_age25 = log(pbw / pfvc_age25),
+         # the strain error against the reference lung volumes of section 2e
+         # (NA outside each equation's ages)
+         log_ratio_va  = log(pbw / pva),
+         log_ratio_tlc = log(pbw / ptlc),
+         log_ratio_frc = log(pbw / pfrc),
          log_vtpfvc    = log(vtpbw) + log_ratio,           # log VT/PFVC up to a constant (ventilated only)
          death_stamped_before_index = !is.na(death_dttm) & death_dttm < index_dttm,
          death_index_day     = if_else(death_stamped_before_index, SAME_DAY_DEATH_D, index_day(death_dttm, index_dttm)),
          discharge_index_day = index_day(discharge_dttm, index_dttm),
          imv_day             = index_day(imv_dttm, index_dttm),   # control only; NA in the ventilated cohort
+         # the control's first advanced support of any kind (high-flow, noninvasive or
+         # invasive; script 03), the event that ends a control's follow-up in the
+         # figure-4 panels; and the ventilated patient's last invasive-ventilation record
+         escalation_day      = index_day(escalation_dttm, index_dttm),
+         last_imv_day        = index_day(last_imv_dttm, index_dttm),
          age10 = age_at_admission / 10,
          hypoxemic = sf_ratio < SF_HYPOXEMIA_THRESHOLD)
 missing_data_counts <- n_before_missing_data %>%
@@ -251,7 +282,7 @@ fit_strict <- function(expr) withCallingHandlers(expr, warning = function(w) {
 fit_or_separation <- function(expr) tryCatch(expr, separation = function(condition) condition)
 separated <- function(fit) inherits(fit, "separation")
 
-# time (days from the index) and event for 60-day death before invasive ventilation,
+# time (days from the index) and event for 60-day death with controls censored at escalation to IMV,
 # as xsec_pfvc_age_control.R defines it (identical to 60-day death in the ventilated
 # arm, which is intubated at the index)
 #
@@ -260,17 +291,34 @@ separated <- function(fit) inherits(fit, "separation")
 # deaths after intubation included, and 60-day death or invasive ventilation, in
 # which a control's intubation is itself the event, so nothing is censored before day
 # 60. In the ventilated arm all three are the same 60-day death.
+# A fourth outcome censors a control at its first advanced support of any kind, as the
+# figure-4 panels end a control's follow-up there, so the mortality and marker
+# analyses define the control's follow-up the same way.
+# A fifth outcome counts only deaths during the exposure: a ventilated patient's death
+# on invasive ventilation or within DEATH_ON_SUPPORT_GRACE_D of the last IMV record
+# (a terminal extubation is a death on the ventilator), censored at liberation; a
+# control's death in hospital before any invasive ventilation, censored at escalation
+# to IMV and at discharge. Both are cause-specific and within the 60-day horizon.
+DEATH_ON_SUPPORT_GRACE_D <- 1
 outcome_data <- function(cohort_data, outcome_key) cohort_data %>% mutate(
-  censor_day = if (outcome_key == "day60_before_imv") pmin(HORIZON_DAYS, coalesce(imv_day, Inf)) else HORIZON_DAYS,
+  censor_day = case_when(outcome_key == "day60_censor_escalation" ~ pmin(HORIZON_DAYS, coalesce(imv_day, Inf)),
+                         outcome_key == "day60_censor_any_escalation" ~ pmin(HORIZON_DAYS, coalesce(escalation_day, Inf)),
+                         outcome_key == "death_on_support" & cohort == "Ventilated" ~
+                           pmin(HORIZON_DAYS, coalesce(last_imv_day, 0) + DEATH_ON_SUPPORT_GRACE_D),
+                         outcome_key == "death_on_support" ~
+                           pmin(HORIZON_DAYS, coalesce(imv_day, Inf), coalesce(discharge_index_day, Inf)),
+                         TRUE ~ HORIZON_DAYS),
   failure_day = if (outcome_key == "day60_death_or_imv") pmin(coalesce(death_index_day, Inf), coalesce(imv_day, Inf))
                 else death_index_day,
   failure_day = if_else(is.infinite(failure_day), NA_real_, failure_day),
   event = as.integer(!is.na(failure_day) & failure_day <= censor_day),
   end_day = pmax(if_else(event == 1L, failure_day, censor_day), 0.01))
 OUTCOMES <- c(inhosp_logistic = "in-hospital death (logistic)",
-              day60_before_imv = "60-day death, before invasive ventilation (Cox)",
+              day60_censor_escalation = "60-day death, controls censored at escalation to IMV (Cox)",
+              day60_censor_any_escalation = "60-day death, controls censored at any escalation of support (Cox)",
               day60_all = "60-day death, all (Cox; control deaths after intubation counted)",
-              day60_death_or_imv = "60-day death or invasive ventilation (Cox; control intubation is the event)")
+              day60_death_or_imv = "60-day death or invasive ventilation (Cox; control intubation is the event)",
+              death_on_support = "death during the exposure (Cox): ventilated on IMV or within 1 day of the last IMV record; controls in hospital before IMV")
 
 # One coefficient: `term` in the model event ~ SF + SOFA + [extra] + term
 fit_term <- function(dat, outcome_key, term, extra = character(0)) {
@@ -392,9 +440,20 @@ print(as.data.frame(dosing %>% select(population, n_patients, slope_vt_on_pbw, s
 # =============================================================================
 POPULATIONS <- c(everyone = "everyone", hypoxemic = "hypoxemic at the index (SF < 315)",
                  if (HAS_CODE_STATUS) c(eligible = ELIGIBLE_LABEL))
+# The landmark population (section 2f only) approximates the figure-4 marker sample: a
+# trajectory needs a baseline and two or more later days on support, so patients
+# extubated, escalated, discharged or dead in the first LANDMARK_DAY days never enter
+# it. Ventilated patients alive, in hospital and still on invasive ventilation after
+# LANDMARK_DAY days; controls alive, in hospital and not yet escalated to any support.
+LANDMARK_DAY <- 2
 population_data <- function(population, cohort_now) both_cohorts %>%
   filter(cohort == cohort_now,
-         if (population == "hypoxemic") hypoxemic else if (population == "eligible") intubation_eligible else TRUE)
+         if (population == "hypoxemic") hypoxemic else if (population == "eligible") intubation_eligible
+         else if (population == "landmark") (is.na(death_index_day) | death_index_day > LANDMARK_DAY) &
+           discharge_index_day > LANDMARK_DAY &
+           (if (cohort_now == "Ventilated") !is.na(last_imv_day) & last_imv_day > LANDMARK_DAY
+            else is.na(escalation_day) | escalation_day > LANDMARK_DAY)
+         else TRUE)
 EXPOSURES <- c(log_ratio = "log PBW/PFVC", log_pfvc = "log PFVC",
                log_ratio_age25 = "log PBW/PFVC at age 25", log_pfvc_age25 = "log PFVC at age 25")
 DOSES <- c(no_dose = "no dose", fixed_vtpbw = "at fixed VT/PBW")
@@ -433,7 +492,7 @@ print(as.data.frame(contrast %>% filter(population == "everyone", grepl("^in-hos
 # =============================================================================
 # 2b. Is censoring the control at intubation informative?
 # =============================================================================
-# "60-day death before invasive ventilation" censors a control at intubation. If an
+# "60-day death with controls censored at escalation to IMV" censors a control at intubation. If an
 # exposure predicts which controls are intubated, the censoring is informative: the
 # control's coefficient is estimated on the patients the exposure kept unventilated,
 # and the difference shifts with it. Per control population, the cause-specific
@@ -499,12 +558,14 @@ fit_pieces <- function(dat, outcome_key) {
   pieces <- names(PIECE_SHIFTS)
   head_row <- tibble(n_patients = nrow(dat), n_deaths = sum(dat$event == 1))
   if (head_row$n_deaths < MIN_EVENTS)
-    return(head_row %>% mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
+    return(head_row %>% slice(rep(1, length(pieces))) %>%
+             mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "deaths")))
   rhs <- paste(c("sf_z", "sofa_z", pieces), collapse = " + ")
   fit <- fit_or_separation(if (outcome_key == "inhosp_logistic")
     fit_strict(glm(as.formula(paste("event ~", rhs)), family = binomial, data = dat)) else
     fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~", rhs)), data = dat)))
-  if (separated(fit)) return(head_row %>% mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = conditionMessage(fit)))
+  if (separated(fit)) return(head_row %>% slice(rep(1, length(pieces))) %>%
+                               mutate(piece = pieces, log_ratio = NA_real_, se = NA_real_, note = conditionMessage(fit)))
   head_row %>% slice(rep(1, length(pieces))) %>%
     mutate(piece = pieces, log_ratio = unname(coef(fit)[pieces]), se = unname(sqrt(diag(vcov(fit))[pieces])), note = NA_character_)
 }
@@ -604,7 +665,7 @@ if (HAS_CODE_STATUS) {
            to_hospice = coalesce(tolower(discharge_category) == "hospice", FALSE),
            age_component = log(pfvc_age25 / pfvc))
   mode_outcome <- function(dat) {
-    dat <- outcome_data(dat, "day60_before_imv")
+    dat <- outcome_data(dat, "day60_censor_escalation")
     dat %>% mutate(
       limitation_lead_h = as.numeric(difftime(death_dttm, limitation_dttm, units = "hours")),
       death_mode = case_when(
@@ -680,6 +741,232 @@ if (HAS_CODE_STATUS) {
   message("\n*** No code_status table: the split by mode of death (section 2d) is skipped. ***")
   death_modes <- NULL; death_mode_counts <- NULL
 }
+
+# =============================================================================
+# 2e. The strain error against other reference lung volumes
+# =============================================================================
+# Which lung volume the strain denominator is, is not settled: FVC falls about a third
+# from 40 to 80, total lung capacity and alveolar volume a few percent, and FRC rises.
+# The section-2 contrast (no dose) is refitted with PBW over each reference volume
+# from script 03 (alveolar volume, GLI 2017; TLC and FRC, GLI 2021) beside PBW/PFVC
+# and PBW/PFVC at age 25, all on one sample: age <= REFERENCE_MAX_AGE (the GLI 2021
+# limit) with every volume. Those equations come from people of European ancestry and
+# have no race term, so White patients are the primary stratum and everyone else a
+# pre-specified second stratum. The control's hazard of intubation on each exposure
+# (section 2b's censoring check) is in the same table, quantity CENSORING_QUANTITY.
+REFERENCE_MAX_AGE <- 80
+REFERENCE_EXPOSURES <- c(log_ratio = "log PBW/PFVC", log_ratio_age25 = "log PBW/PFVC at age 25",
+                         log_ratio_va = "log PBW/alveolar volume (GLI 2017)",
+                         log_ratio_tlc = "log PBW/TLC (GLI 2021)", log_ratio_frc = "log PBW/FRC (GLI 2021)")
+REFERENCE_STRATA <- list(White = function(race) race == "WHITE", `not White` = function(race) race != "WHITE")
+reference_volumes <- expand_grid(population = names(POPULATIONS), stratum = names(REFERENCE_STRATA),
+                                 outcome_key = names(OUTCOMES), exposure = names(REFERENCE_EXPOSURES)) %>%
+  mutate(fits = pmap(list(population, stratum, outcome_key, exposure), function(population, stratum, outcome_key, exposure) {
+    in_sample <- function(cohort_now) population_data(population, cohort_now) %>%
+      filter(age_at_admission <= REFERENCE_MAX_AGE, REFERENCE_STRATA[[stratum]](race_category),
+             if_all(all_of(names(REFERENCE_EXPOSURES)), is.finite))
+    ventilated <- fit_term(in_sample("Ventilated"), outcome_key, exposure) %>% mutate(quantity = "Ventilated")
+    control <- fit_term(in_sample("No support"), outcome_key, exposure) %>% mutate(quantity = "No support")
+    bind_rows(ventilated, control,
+              ventilated %>% transmute(quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                       se = sqrt(se^2 + control$se^2), n_patients = NA_integer_, n_deaths = NA_integer_,
+                                       note = coalesce(note, control$note)))
+  })) %>% unnest(fits)
+# Section 2b's censoring check on the same samples: does the exposure predict which
+# controls are intubated (cause-specific hazard of invasive ventilation within
+# HORIZON_DAYS, death the competing event)? A hazard ratio away from 1 means the
+# outcome that censors controls at escalation to IMV is selected on the exposure.
+CENSORING_QUANTITY <- "No support: hazard of intubation (censoring check)"
+reference_censoring <- expand_grid(population = names(POPULATIONS), stratum = names(REFERENCE_STRATA),
+                                   exposure = names(REFERENCE_EXPOSURES)) %>%
+  pmap_dfr(function(population, stratum, exposure) {
+    dat <- population_data(population, "No support") %>%
+      filter(age_at_admission <= REFERENCE_MAX_AGE, REFERENCE_STRATA[[stratum]](race_category),
+             if_all(all_of(names(REFERENCE_EXPOSURES)), is.finite)) %>%
+      mutate(event = as.integer(!is.na(imv_day) & imv_day <= HORIZON_DAYS &
+                                  (is.na(death_index_day) | imv_day <= death_index_day)),
+             end_day = pmax(pmin(HORIZON_DAYS, coalesce(imv_day, Inf), coalesce(death_index_day, Inf)), 0.01))
+    head_row <- tibble(population = population, stratum = stratum, outcome_key = "intubation", exposure = exposure,
+                       quantity = CENSORING_QUANTITY, n_patients = nrow(dat), n_deaths = sum(dat$event))
+    if (head_row$n_deaths < MIN_EVENTS)
+      return(head_row %>% mutate(log_ratio = NA_real_, se = NA_real_, note = paste("skipped: fewer than", MIN_EVENTS, "intubations")))
+    fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~ sf_z + sofa_z +", exposure)), data = dat)))
+    if (separated(fit)) return(head_row %>% mutate(log_ratio = NA_real_, se = NA_real_, note = conditionMessage(fit)))
+    head_row %>% mutate(log_ratio = unname(coef(fit)[exposure]), se = unname(sqrt(vcov(fit)[exposure, exposure])),
+                        note = "n_deaths counts intubations")
+  })
+reference_volumes <- bind_rows(reference_volumes, reference_censoring) %>%
+  mutate(population = POPULATIONS[population],
+         outcome = coalesce(OUTCOMES[outcome_key], paste0("invasive ventilation within ", HORIZON_DAYS, " days, control only (cause-specific Cox)")),
+         exposure = REFERENCE_EXPOSURES[exposure],
+         sample = paste0(stratum, ", age <= ", REFERENCE_MAX_AGE, ", every reference volume"),
+         ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+         hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "log OR or log HR per log unit of the exposure; ratio_per_0.1 is per 0.1 log units",
+         site = site_name) %>%
+  select(population, sample, outcome, exposure, quantity, log_ratio, se, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p,
+         n_patients, n_deaths, note, scale, site)
+message("\nThe ventilation contrast against other reference volumes, everyone, 60-day death, controls censored at escalation:")
+print(as.data.frame(reference_volumes %>% filter(population == "everyone", quantity == DIFFERENCE,
+                                                 outcome == OUTCOMES[["day60_censor_escalation"]]) %>%
+                      select(sample, exposure, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+
+# =============================================================================
+# 2f. The lambda sweep: how much of FVC's age decline belongs in the denominator?
+# =============================================================================
+# PBW/TLC, PBW/alveolar volume and PBW/PFVC differ mostly in how much of GLI's age
+# decline in FVC their denominator carries. One axis covers them:
+#   log V(lambda) = log PFVC at age 25 + lambda (log PFVC - log PFVC at age 25),
+# lambda = 0 being PFVC at age 25 and lambda = 1 PFVC. Every point keeps GLI's race
+# term and every age, so the sweep runs on the whole cohort. The section-2 contrast
+# (no dose) and the section-2b censoring check are fitted at each lambda in LAMBDA_GRID.
+# The implied lambda of TLC and alveolar volume (the slope of log V - log PFVC at 25 on
+# log PFVC - log PFVC at 25, White patients aged <= 80 with every volume) places them
+# on the axis.
+LAMBDA_GRID <- c(0, 0.1, 0.2, 0.3, 0.5, 0.75, 1)
+lambda_key <- function(lambda) sprintf("log_ratio_lambda%03d", round(100 * lambda))
+for (lambda in LAMBDA_GRID)
+  both_cohorts[[lambda_key(lambda)]] <- with(both_cohorts, log_ratio_age25 - lambda * (log_pfvc - log_pfvc_age25))
+LAMBDA_POPULATIONS <- c(POPULATIONS, landmark = paste0("landmark: alive, in hospital and in follow-up after day ", LANDMARK_DAY,
+                                                        " (ventilated still on IMV; controls not escalated): the marker sample"))
+lambda_sweep <- expand_grid(population = names(LAMBDA_POPULATIONS), outcome_key = c(names(OUTCOMES), "intubation"),
+                            lambda = LAMBDA_GRID) %>%
+  mutate(fits = pmap(list(population, outcome_key, lambda), function(population, outcome_key, lambda) {
+    term <- lambda_key(lambda)
+    if (outcome_key == "intubation") {
+      dat <- population_data(population, "No support") %>%
+        mutate(event = as.integer(!is.na(imv_day) & imv_day <= HORIZON_DAYS &
+                                    (is.na(death_index_day) | imv_day <= death_index_day)),
+               end_day = pmax(pmin(HORIZON_DAYS, coalesce(imv_day, Inf), coalesce(death_index_day, Inf)), 0.01))
+      fit <- fit_or_separation(fit_strict(coxph(as.formula(paste("Surv(end_day, event) ~ sf_z + sofa_z +", term)), data = dat)))
+      if (separated(fit)) return(tibble(quantity = CENSORING_QUANTITY, log_ratio = NA_real_, se = NA_real_,
+                                        n_patients = nrow(dat), n_deaths = sum(dat$event), note = conditionMessage(fit)))
+      return(tibble(quantity = CENSORING_QUANTITY, log_ratio = unname(coef(fit)[term]), se = unname(sqrt(vcov(fit)[term, term])),
+                    n_patients = nrow(dat), n_deaths = sum(dat$event), note = "n_deaths counts intubations"))
+    }
+    ventilated <- fit_term(population_data(population, "Ventilated"), outcome_key, term) %>% mutate(quantity = "Ventilated")
+    control <- fit_term(population_data(population, "No support"), outcome_key, term) %>% mutate(quantity = "No support")
+    bind_rows(ventilated, control,
+              ventilated %>% transmute(quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                       se = sqrt(se^2 + control$se^2), n_patients = NA_integer_, n_deaths = NA_integer_,
+                                       note = coalesce(note, control$note)))
+  })) %>% unnest(fits) %>%
+  mutate(population = LAMBDA_POPULATIONS[population],
+         outcome = coalesce(OUTCOMES[outcome_key], paste0("invasive ventilation within ", HORIZON_DAYS, " days, control only (cause-specific Cox)")),
+         ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+         hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "log OR or log HR per log unit of log PBW/V(lambda); ratio_per_0.1 is per 0.1 log units", site = site_name) %>%
+  select(population, outcome, lambda, quantity, log_ratio, se, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, n_patients, n_deaths, note, scale, site)
+implied_lambda <- map_dfr(c(`TLC (GLI 2021)` = "ptlc", `alveolar volume (GLI 2017)` = "pva"), function(volume) {
+  dat <- both_cohorts %>% filter(race_category == "WHITE", age_at_admission <= REFERENCE_MAX_AGE, is.finite(log(.data[[volume]])))
+  fit <- lm(I(log(dat[[volume]]) - dat$log_pfvc_age25) ~ I(dat$log_pfvc - dat$log_pfvc_age25))
+  tibble(implied_lambda = unname(coef(fit)[2]), r2 = summary(fit)$r.squared, n_patients = nrow(dat))
+}, .id = "denominator") %>% mutate(sample = paste0("White, age <= ", REFERENCE_MAX_AGE), site = site_name)
+message("\nThe lambda sweep, everyone, ventilated minus no support (per 0.1 log units):")
+print(as.data.frame(lambda_sweep %>% filter(population == "everyone", quantity == DIFFERENCE) %>%
+                      select(outcome, lambda, ratio_per_0.1, lo_per_0.1, hi_per_0.1) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+message("Implied lambda of the reference volumes:")
+print(as.data.frame(implied_lambda), row.names = FALSE)
+
+# =============================================================================
+# 2g. Does the structural strain error matter less in older patients?
+# =============================================================================
+# If the link from lung injury to death is blurred in older patients (many other
+# causes of death, decisions about goals of care), every strain effect on death should
+# weaken with age, the age-free one included. If instead the age-related fall in FVC
+# is not strain, the age-free contrast should hold across age. The section-2 contrast
+# (no dose) for the age-25 strain error, and for the full one beside it, within age
+# bands, with a test of equality across bands (Cochran's Q on the ventilated-minus-
+# control differences, which share no patients between bands).
+AGE_BANDS <- c(18, 60, 75, Inf)
+AGE_BAND_LABELS <- c("18-59", "60-74", "75+")
+AGE_BAND_OUTCOMES <- c("inhosp_logistic", "day60_censor_escalation", "day60_all")
+AGE_BAND_EXPOSURES <- c(log_ratio_age25 = "log PBW/PFVC at age 25", log_ratio = "log PBW/PFVC")
+both_cohorts <- both_cohorts %>% mutate(age_band = cut(age_at_admission, AGE_BANDS, labels = AGE_BAND_LABELS, right = FALSE))
+age_band_contrast <- expand_grid(population = names(POPULATIONS), outcome_key = AGE_BAND_OUTCOMES,
+                                 exposure = names(AGE_BAND_EXPOSURES), age_band = AGE_BAND_LABELS) %>%
+  mutate(fits = pmap(list(population, outcome_key, exposure, age_band), function(population, outcome_key, exposure, band) {
+    in_band <- function(cohort_now) population_data(population, cohort_now) %>% filter(.data$age_band == band)
+    ventilated <- fit_term(in_band("Ventilated"), outcome_key, exposure) %>% mutate(quantity = "Ventilated")
+    control <- fit_term(in_band("No support"), outcome_key, exposure) %>% mutate(quantity = "No support")
+    bind_rows(ventilated, control,
+              ventilated %>% transmute(quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                       se = sqrt(se^2 + control$se^2), n_patients = NA_integer_, n_deaths = NA_integer_,
+                                       note = coalesce(note, control$note)))
+  })) %>% unnest(fits)
+age_band_heterogeneity <- age_band_contrast %>% filter(quantity == DIFFERENCE, !is.na(log_ratio)) %>%
+  group_by(population, outcome_key, exposure) %>%
+  summarise(n_bands = n(), pooled = sum(log_ratio / se^2) / sum(1 / se^2),
+            q = sum((log_ratio - pooled)^2 / se^2), .groups = "drop") %>%
+  mutate(q_df = n_bands - 1, q_p = pchisq(q, q_df, lower.tail = FALSE))
+age_band_contrast <- age_band_contrast %>%
+  left_join(age_band_heterogeneity %>% select(population, outcome_key, exposure, q, q_df, q_p),
+            by = c("population", "outcome_key", "exposure")) %>%
+  mutate(across(c(q, q_df, q_p), ~ if_else(quantity == DIFFERENCE, .x, NA_real_)),
+         population = POPULATIONS[population], outcome = OUTCOMES[outcome_key], exposure = AGE_BAND_EXPOSURES[exposure],
+         ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+         hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "log OR or log HR per log unit of the exposure; ratio_per_0.1 is per 0.1 log units; q_p tests equal differences across age bands",
+         site = site_name) %>%
+  select(population, outcome, exposure, age_band, quantity, log_ratio, se, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p,
+         q, q_df, q_p, n_patients, n_deaths, note, scale, site)
+message("\nThe structural strain error by age band, everyone, ventilated minus no support (per 0.1 log units):")
+print(as.data.frame(age_band_contrast %>% filter(population == "everyone", quantity == DIFFERENCE) %>%
+                      select(outcome, exposure, age_band, ratio_per_0.1, lo_per_0.1, hi_per_0.1, q_p) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
+
+# =============================================================================
+# 2h. When does the contrast arise? Deaths by time window
+# =============================================================================
+# The age-free strain error's mortality contrast sits largely in patients who die or
+# leave follow-up within two days (the landmark rows of 2f). In ARMA the survival
+# curves part within days but most of the separation accrues later, so a strain
+# effect with that timing should be as large or larger after day 2; depletion of the
+# most susceptible patients instead predicts a large early contrast that fades. Each
+# cohort's hazard ratio is estimated within TIME_WINDOWS (days from the index) from one
+# Cox model with the exposure split by window (survSplit), and the ventilated-minus-
+# control difference is taken window by window.
+TIME_WINDOWS <- c(0, 2, 7, 28, HORIZON_DAYS)
+WINDOW_LABELS <- c("days 0-2", "days 2-7", "days 7-28", "days 28-60")
+WINDOW_LAMBDAS <- c(0, 0.5, 1)
+WINDOW_OUTCOMES <- c("day60_censor_escalation", "day60_all", "death_on_support")
+fit_windows <- function(dat, outcome_key, term) {
+  dat <- outcome_data(dat, outcome_key) %>% mutate(x = .data[[term]])
+  split <- survSplit(Surv(end_day, event) ~ sf_z + sofa_z + x, data = dat, cut = TIME_WINDOWS[-c(1, length(TIME_WINDOWS))],
+                     episode = "window", start = "start_day") %>%
+    mutate(window = factor(WINDOW_LABELS[window], levels = WINDOW_LABELS))
+  deaths <- split %>% group_by(window) %>% summarise(n_deaths = sum(event), .groups = "drop")
+  if (any(deaths$n_deaths < MIN_EVENTS))
+    return(tibble(window = WINDOW_LABELS, log_ratio = NA_real_, se = NA_real_, n_deaths = deaths$n_deaths,
+                  note = paste("skipped: a window has fewer than", MIN_EVENTS, "deaths")))
+  fit <- fit_or_separation(fit_strict(coxph(Surv(start_day, end_day, event) ~ sf_z + sofa_z + x:window, data = split)))
+  terms <- paste0("x:window", WINDOW_LABELS)
+  if (separated(fit)) return(tibble(window = WINDOW_LABELS, log_ratio = NA_real_, se = NA_real_, n_deaths = deaths$n_deaths,
+                                    note = conditionMessage(fit)))
+  tibble(window = WINDOW_LABELS, log_ratio = unname(coef(fit)[terms]), se = unname(sqrt(diag(vcov(fit))[terms])),
+         n_deaths = deaths$n_deaths, note = NA_character_)
+}
+window_populations <- c(everyone = "everyone", if (HAS_CODE_STATUS) c(eligible = ELIGIBLE_LABEL))
+time_windows <- expand_grid(population = names(window_populations), outcome_key = WINDOW_OUTCOMES, lambda = WINDOW_LAMBDAS) %>%
+  mutate(fits = pmap(list(population, outcome_key, lambda), function(population, outcome_key, lambda) {
+    term <- lambda_key(lambda)
+    ventilated <- fit_windows(population_data(population, "Ventilated"), outcome_key, term) %>% mutate(quantity = "Ventilated")
+    control <- fit_windows(population_data(population, "No support"), outcome_key, term) %>% mutate(quantity = "No support")
+    bind_rows(ventilated, control,
+              ventilated %>% transmute(window, quantity = DIFFERENCE, log_ratio = log_ratio - control$log_ratio,
+                                       se = sqrt(se^2 + control$se^2), n_deaths = NA_integer_, note = coalesce(note, control$note)))
+  })) %>% unnest(fits) %>%
+  mutate(population = window_populations[population], outcome = OUTCOMES[outcome_key],
+         ratio_per_0.1 = exp(0.1 * log_ratio), lo_per_0.1 = exp(0.1 * (log_ratio - 1.96 * se)),
+         hi_per_0.1 = exp(0.1 * (log_ratio + 1.96 * se)), p = 2 * pnorm(-abs(log_ratio / se)),
+         scale = "log HR per log unit of log PBW/V(lambda) within the window; ratio_per_0.1 is per 0.1 log units", site = site_name) %>%
+  select(population, outcome, lambda, window, quantity, log_ratio, se, ratio_per_0.1, lo_per_0.1, hi_per_0.1, p, n_deaths, note, scale, site)
+message("\nThe contrast by time window, everyone, ventilated minus no support (per 0.1 log units):")
+print(as.data.frame(time_windows %>% filter(population == "everyone", quantity == DIFFERENCE) %>%
+                      select(outcome, lambda, window, ratio_per_0.1, lo_per_0.1, hi_per_0.1) %>%
+                      mutate(across(where(is.numeric), ~ signif(.x, 3)))), row.names = FALSE)
 
 # =============================================================================
 # 3. Placebo formulas
@@ -880,6 +1167,11 @@ write_csv(dosing, file.path(final_dir, paste0("strain_invariance_dosing_", site_
 write_csv(contrast, file.path(final_dir, paste0("strain_invariance_contrast_", site_name, ".csv")))
 write_csv(censoring_check, file.path(final_dir, paste0("strain_invariance_censoring_", site_name, ".csv")))
 write_csv(age25_pieces, file.path(final_dir, paste0("strain_invariance_age25_pieces_", site_name, ".csv")))
+write_csv(reference_volumes, file.path(final_dir, paste0("strain_invariance_reference_volumes_", site_name, ".csv")))
+write_csv(lambda_sweep, file.path(final_dir, paste0("strain_invariance_lambda_", site_name, ".csv")))
+write_csv(age_band_contrast, file.path(final_dir, paste0("strain_invariance_age_bands_", site_name, ".csv")))
+write_csv(time_windows, file.path(final_dir, paste0("strain_invariance_time_windows_", site_name, ".csv")))
+write_csv(implied_lambda, file.path(final_dir, paste0("strain_invariance_lambda_implied_", site_name, ".csv")))
 if (!is.null(death_modes)) {
   write_csv(death_modes, file.path(final_dir, paste0("strain_invariance_death_modes_", site_name, ".csv")))
   write_csv(death_mode_counts, file.path(final_dir, paste0("strain_invariance_death_mode_counts_", site_name, ".csv")))

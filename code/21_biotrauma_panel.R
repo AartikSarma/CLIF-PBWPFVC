@@ -462,7 +462,7 @@ surv <- base %>%
   select(hospitalization_id, t0, icu_day0, sf_index, entry_day, event, event_time, event_factor,
          event_rrt, event_time_rrt, event_factor_rrt,
          death_day, death_time, extub_time, rrt_day, rrt_time, rrt_period, rrt_before_index,
-         pfvc_gli, pfvc_age25, pbw, disc, disc_grp, age_grp, height_grp,
+         pfvc_gli, pfvc_age25, pva, ptlc, pfrc, pbw, disc, disc_grp, age_grp, height_grp,
          age10, sex_category, race_category, sofa_total, np_sofa, sofa_cv_97, sofa_coag, sofa_liver, sofa_renal, bmi, height_cm,
          vtpbw_idx, log_pfvc, log_pbw, ldisc_c, log_pfvc_sd, ldisc_sd, vtpfvc_c, vtpfvc_idx,
          vtpfvc_0, vtpfvc_pt_mean, vtpfvc_pt_n,
