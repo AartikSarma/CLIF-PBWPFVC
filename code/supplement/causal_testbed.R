@@ -74,6 +74,13 @@
 #   PBWPFVC_CAUSAL_MARKERS     platelets,creatinine
 #   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,timecourse,illness_death,multisite,crosscheck
 #   PBWPFVC_CAUSAL_WORKERS     parallel R processes (default: cores - 1, at most 8)
+#   PBWPFVC_CAUSAL_RESUME      1 = reuse the stage results a stopped run left behind
+# Each marker's stages are saved under causal_testbed_checkpoints/ as they finish (Monte
+# Carlo summaries only, no patient-level row). A run that stops late is finished with
+# PBWPFVC_CAUSAL_RESUME=1 and the same settings. A saved stage is reused only if the
+# replicates, effect, seed and stages match; it is NOT checked against the code, so
+# after changing the generator or an estimator run without RESUME. Do not edit this
+# file while it runs: Rscript reads it as it goes.
 # Runtime: about 0.4 s per simulated site per process; the default is roughly 50,000
 # sites per marker (a few hours on four cores). PBWPFVC_CAUSAL_REPS=100 is a fast look.
 # Needs scripts 01-03 for the ventilated cohort and for PBWPFVC_COHORT=nosupport.
@@ -110,6 +117,10 @@ N_REPS_CROSSCHECK <- min(100L, N_REPS)
 N_REALISM <- 20L                 # simulated sites averaged for the realism table
 TESTBED_SEED <- 20261111L
 ALPHA <- 0.05
+RESUME <- Sys.getenv("PBWPFVC_CAUSAL_RESUME", "0") == "1"
+CHECKPOINT_DIR <- file.path(final_dir, "causal_testbed_checkpoints")
+dir.create(CHECKPOINT_DIR, showWarnings = FALSE, recursive = TRUE)
+SCENARIO_STAGES <- c("matched", "realistic", "stress", "power")
 z_crit <- qnorm(1 - ALPHA / 2)
 # the generator makes a log-scale lab; the vasopressor and OSI outcomes are not simulated
 stopifnot(all(MARKERS %in% CAUSAL_MARKERS$marker[CAUSAL_MARKERS$source == "lab"]),
@@ -320,6 +331,21 @@ if (WORKERS > 1) {
   parallel::clusterExport(cluster, setdiff(ls(globalenv()), c("cluster", "config")))
 }
 
+# A stage's result for one marker: read from the checkpoint when resuming and the
+# settings match, otherwise computed (value is evaluated only then) and saved.
+checkpoint <- function(marker, stage, value) {
+  path <- file.path(CHECKPOINT_DIR, paste0(marker, "_", stage, ".rds"))
+  settings <- list(reps = N_REPS, effect = EFFECT, seed = TESTBED_SEED, sites = N_SITES, site_cv = SITE_EFFECT_CV,
+                   stages = if (stage == "scenarios") sort(intersect(STAGES, SCENARIO_STAGES)))
+  if (RESUME && file.exists(path)) {
+    saved <- readRDS(path)
+    if (identical(saved$settings, settings)) { message("  ", stage, ": reused from ", path); return(saved$value) }
+    message("  ", stage, ": the saved result has other settings; running it again")
+  }
+  saveRDS(list(settings = settings, value = value), path)
+  value
+}
+
 # ---- Run ----------------------------------------------------------------------------------
 operating <- list(); decision <- list(); scenario_log <- list(); realism <- list(); multisite <- list(); crosscheck <- list()
 timecourse <- list(); illness_death <- list()
@@ -357,6 +383,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
 
   if (nrow(cells)) {
   # --- the scenarios ---
+  saved <- checkpoint(marker, "scenarios", {
   jobs <- expand.grid(rep = seq_len(N_REPS), cell = cells$cell)
   results <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
     sc <- cells$params[[job$cell]]
@@ -365,21 +392,24 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   })
   fits <- do.call(rbind, lapply(results, `[[`, "fits"))
   rules <- as.data.frame(do.call(rbind, lapply(results, `[[`, "rule")))
-  operating[[marker]] <- fits %>% group_by(cell, vtpbw, design) %>%
+  list(operating = fits %>% group_by(cell, vtpbw, design) %>%
     group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
     left_join(fits %>% group_by(cell, vtpbw, design) %>% summarise(n_not_estimable = sum(is.na(estimate)), .groups = "drop"), by = c("cell", "vtpbw", "design")) %>%
-    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker)
-  decision[[marker]] <- rules %>% pivot_longer(-cell, names_to = "rule", values_to = "supports") %>%
+    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker),
+  decision = rules %>% pivot_longer(-cell, names_to = "rule", values_to = "supports") %>%
     group_by(cell, rule) %>% summarise(n_reps = n(), supports_rate = mean(supports),
                                        supports_mcse = sqrt(supports_rate * (1 - supports_rate) / n_reps), .groups = "drop") %>%
-    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker)
-  scenario_log[[marker]] <- cells %>% mutate(marker = marker, .before = 1) %>%
-    bind_cols(bind_rows(lapply(cells$params, as_tibble))) %>% select(-params)
+    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker),
+  scenario_log = cells %>% mutate(marker = marker, .before = 1) %>%
+    bind_cols(bind_rows(lapply(cells$params, as_tibble))) %>% select(-params))
+  })
+  operating[[marker]] <- saved$operating; decision[[marker]] <- saved$decision; scenario_log[[marker]] <- saved$scenario_log
   message("  scenarios done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 
   # --- the time course: is the segment-by-segment estimate right, and what does it cost? ---
   if ("timecourse" %in% STAGES) {
+    timecourse[[marker]] <- checkpoint(marker, "timecourse", {
     truths <- list(null = scenario(), linear = scenario(beta = sign * EFFECT),
                    saturating = scenario(beta = sign * EFFECT, time_shape = "saturating"),
                    delayed = scenario(beta = sign * EFFECT, time_shape = "delayed"))
@@ -389,15 +419,17 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       out <- one_timecourse_replicate(truths[[job$truth]], calib$realistic, sign, 7000000L + 10000L * job$truth + job$rep)
       out$scenario <- names(truths)[job$truth]; out
     })
-    timecourse[[marker]] <- bind_rows(courses) %>%
+    bind_rows(courses) %>%
       mutate(window = factor(window, levels = unique(window))) %>%
       group_by(scenario, design, quantity, window) %>% group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
       mutate(marker = marker, .before = 1)
+    })
     message("  timecourse done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 
   # --- injury and death as states ---
   if ("illness_death" %in% STAGES) {
+    illness_death[[marker]] <- checkpoint(marker, "illness_death", {
     age <- confounding_equal_to(sign * EFFECT, patients, "age")
     truths <- list(null = scenario(),
                    # death follows the marker (the realistic base), with strain at 1x and 3x the planted effect
@@ -412,7 +444,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       out <- one_illness_death_replicate(truths[[job$truth]], calib$realistic, sign, 8000000L + 10000L * job$truth + job$rep, marker)
       out$scenario <- names(truths)[job$truth]; out
     })
-    illness_death[[marker]] <- bind_rows(states) %>%
+    bind_rows(states) %>%
       mutate(scenario = factor(scenario, levels = names(truths)), transition = factor(transition, levels = unique(transition))) %>%
       group_by(scenario, design, transition) %>%
       summarise(n_reps = sum(!is.na(estimate)), n_not_estimable = sum(is.na(estimate)), mean_events = mean(n_events, na.rm = TRUE),
@@ -422,11 +454,13 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
                 rejection_mcse = sqrt(rejection_rate * (1 - rejection_rate) / n_reps),
                 positive_rate = mean(estimate / se > z_crit, na.rm = TRUE), .groups = "drop") %>%
       mutate(marker = marker, .before = 1)
+    })
     message("  illness_death done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 
   # --- multisite ---
   if ("multisite" %in% STAGES) {
+    multisite[[marker]] <- checkpoint(marker, "multisite", {
     truths <- list(null = scenario(), strain = scenario(beta = sign * EFFECT),
                    strain_plus_age = scenario(beta = sign * EFFECT, d_all = confounding_equal_to(sign * EFFECT, patients, "age")),
                    age_sicker = scenario(d_all = confounding_equal_to(sign * EFFECT, patients, "age"), arm_scale = ARM_SCALE))
@@ -436,17 +470,19 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       out <- one_multisite_replicate(truths[[job$truth]], calib$realistic, sign, 5000000L + 10000L * job$truth + job$rep)
       out$scenario <- names(truths)[job$truth]; out$truth <- truths[[job$truth]]$beta; out
     })
-    multisite[[marker]] <- bind_rows(pooled) %>%
+    bind_rows(pooled) %>%
       pivot_longer(c(fixed, random), names_to = "pooling", values_to = "estimate") %>%
       mutate(se = if_else(pooling == "fixed", fixed_se, random_se),
              pooling = if_else(pooling == "fixed", "common effect", "random effects (DerSimonian-Laird)")) %>%
       group_by(scenario, design, pooling) %>% group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
       mutate(marker = marker, n_sites = N_SITES, site_effect_cv = SITE_EFFECT_CV)
+    })
     message("  multisite done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 
   # --- the within estimator against a mixed model ---
   if ("crosscheck" %in% STAGES) {
+    crosscheck[[marker]] <- checkpoint(marker, "crosscheck", {
     truths <- list(null = scenario(), strain = scenario(beta = sign * EFFECT))
     if (!is.null(cluster)) parallel::clusterExport(cluster, "truths", envir = environment())
     jobs <- expand.grid(rep = seq_len(N_REPS_CROSSCHECK), truth = seq_along(truths))
@@ -455,7 +491,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       if (!is.null(out)) out$scenario <- names(truths)[job$truth]
       out
     })
-    crosscheck[[marker]] <- bind_rows(pairs) %>% group_by(scenario, design) %>%
+    bind_rows(pairs) %>% group_by(scenario, design) %>%
       summarise(n_reps = n(), mixed_failed = sum(is.na(mixed)), truth = mean(truth),
                 within_mean = mean(within[!is.na(mixed)]), mixed_mean = mean(mixed, na.rm = TRUE),
                 mean_difference = mean(mixed - within, na.rm = TRUE),
@@ -463,6 +499,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
                 correlation = cor(mixed, within, use = "complete.obs"),
                 within_se = sqrt(mean(within_se^2)), mixed_se = sqrt(mean(mixed_se^2, na.rm = TRUE)), .groups = "drop") %>%
       mutate(marker = marker, .before = 1)
+    })
     message("  crosscheck done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 }
