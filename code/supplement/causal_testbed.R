@@ -1,57 +1,69 @@
 # =============================================================================
-# Supplement (causal): a planted-truth test of the complementary designs
+# Supplement (causal): a planted-truth simulation study of the complementary designs
 # =============================================================================
 #
-# causal_triangulation.R lays several designs side by side, each failing under a
-# different assumption. This script asks what each of them returns when the truth is
-# known. It keeps the site's own patients, cohorts, phases and measurement times, and
-# replaces only the marker values with a simulated trajectory (plant_outcome() in
-# causal_common.R) under each of these scenarios:
+# causal_triangulation.R lays fifteen designs side by side, each failing under a
+# different assumption. This script reports what each returns, and what the
+# pre-specified decision rule concludes, when the truth is known. The protocol
+# (aims, data-generating mechanisms, estimand, methods, performance measures) is
+# code/supplement/CAUSAL_TESTBED_PROTOCOL.md; this header is the short form.
 #
-#   null             no strain effect, no demographic effect
-#   strain           the hypothesis: the slope on the ventilator follows
-#                    log VT/PFVC (= lambda + log VT/PBW); nothing else
-#   age_everywhere   NO strain effect. Older patients' markers move faster in every
-#                    phase and in both cohorts
-#   age_sicker       NO strain effect. The same, but weaker in the controls
-#                    (arm_scale): the age gradient scales with how sick a cohort is
-#   age_acute        NO strain effect. The age gradient appears at t0 (intubation, or
-#                    the control's ICU admission) in both cohorts: it follows the
-#                    acute illness, not the ventilator
-#   age_ventilation  NO strain effect. The age gradient exists only on the ventilator,
-#                    by a path that is not strain (sedation, say)
-#   sex_ventilation  NO strain effect. The same through sex
-#   strain_plus_age  the strain effect and age_everywhere together
+# The generator (causal_generator.R) keeps the site's patients and generates the
+# marker, its measurement times and the patients' exits. It is tuned so that the
+# analysis reads the same noise, mean slopes and sampling off a simulated site as off
+# the real one (causal_testbed_realism_). Stages, each a set of scenarios:
 #
-# Every confounded scenario is sized so that the unadjusted model sees exactly the
-# gradient a strain effect of the planted size would give: the naive analysis cannot
-# tell them from the hypothesis. A design passes a scenario when it rejects at the
-# nominal rate under "NO strain effect" and recovers beta under strain. No design
-# passes all of them; the table shows which combination of results each truth leaves
-# behind, which is what the observed estimates are then read against. Two things to
-# read off it before trusting a row of causal_triangulation: a rung of the ladder
-# removes its own input's confounding and AMPLIFIES every other input's (the lambda it
-# keeps is a smaller share of the same confounded demographics), so the rungs are read
-# together, never one alone; and a design marked underpowered cannot speak against the
-# hypothesis at this site.
+#   matched     the generator reduced to the analysis model, under eight truths (no
+#               effect; strain; five confounders with no strain effect, each sized to
+#               look to the unadjusted model exactly like the strain effect; strain
+#               with a confounder). A check that the estimators are right.
+#   realistic   the same truths, and more confounders (several inputs at once, the
+#               inputs in GLI's own proportions, an age effect that starts at 65, half
+#               and twice the size, and the age gradient observed in the controls),
+#               from a generator with curved trajectories, autocorrelated heavy-tailed
+#               errors, an unmeasured severity, unmodelled variation in lung size, and
+#               measurement, liberation and death that depend on the marker.
+#   stress      one departure at a time from the realistic base, with and without a
+#               strain effect: strongly informative dropout or measurement, heavier
+#               tails, stronger autocorrelation, a threshold in dose, an effect that
+#               saturates or is delayed, an effect that differs in the patients a
+#               within-person design can use, positive pressure before the recorded
+#               intubation, a tidal volume set by size and severity (with and without
+#               the 6-8 gate), error in charted height, more variation in true lung
+#               size, and strain that follows another denominator (GLI at age 25, GLI
+#               without race).
+#   power       the strain effect at 0.25 to 1.5 times the planted size.
+#   multisite   four sites that differ in effect, confounding and noise, pooled by
+#               common-effect and by random-effects inverse variance.
+#   crosscheck  the within estimator against a linear mixed model (nlme) on the same
+#               simulated sites.
 #
-# The planted strain effect is PBWPFVC_CAUSAL_EFFECT (default 0.15 log units per day
-# per log unit of VT/PFVC, in the direction of injury: about 2% a day per SD of
-# lambda). Noise comes from the site's observed marker (residual SD about each
-# patient-phase line, between-patient SD of level and slope), so power and the
-# minimum detectable effect are this site's, at its sample and its sampling density.
+# Every figure in the tables carries its Monte Carlo standard error.
 #
 # Writes to final/supplement/ (final/ungated/supplement/ with PBWPFVC_VTPBW_GATE=0):
-#   causal_testbed_scenarios_<site>.csv   the planted parameters of each scenario
-#   causal_testbed_operating_<site>.csv   per marker x scenario x design: truth, mean
-#                                         estimate, bias, empirical SD, mean SE,
-#                                         coverage, rejection rate, MDE at 80% power
-#   causal_testbed_<site>.pdf             rejection rate and bias, scenario x design
+#   causal_testbed_scenarios_<site>.csv    every scenario's parameters
+#   causal_testbed_operating_<site>.csv    marker x scenario x design: truth, bias,
+#                                          empirical and model SE, coverage, rejection
+#                                          rate, MDE, verdict; each with its MCSE
+#   causal_testbed_decision_<site>.csv     how often the decision rule, and two
+#                                          single-analysis comparators, say "supports"
+#   causal_testbed_power_<site>.csv        rejection rate by effect size
+#   causal_testbed_multisite_<site>.csv    pooled bias, coverage and rejection rate
+#   causal_testbed_realism_<site>.csv      observed against simulated summaries
+#   causal_testbed_crosscheck_<site>.csv   within estimator against the mixed model
+#   causal_testbed_<site>.pdf              the tables as figures
 # No patient-level row is written.
 #
-# Runtime: about a minute per 100 replicates. PBWPFVC_CAUSAL_REPS sets the number
-# (default 200). Needs scripts 01-03 for the ventilated cohort and for
-# PBWPFVC_COHORT=nosupport.
+# Settings (environment):
+#   PBWPFVC_CAUSAL_REPS        replicates per scenario (default 1000)
+#   PBWPFVC_CAUSAL_EFFECT      the planted strain effect, log units per day per log
+#                              unit of VT/PFVC, in the direction of injury (0.15)
+#   PBWPFVC_CAUSAL_MARKERS     platelets,creatinine
+#   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,multisite,crosscheck
+#   PBWPFVC_CAUSAL_WORKERS     parallel R processes (default: cores - 1, at most 8)
+# Runtime: about 0.4 s per simulated site per process; the default is roughly 50,000
+# sites per marker (a few hours on four cores). PBWPFVC_CAUSAL_REPS=100 is a fast look.
+# Needs scripts 01-03 for the ventilated cohort and for PBWPFVC_COHORT=nosupport.
 #
 # Usage: uvr run code/supplement/causal_testbed.R
 # =============================================================================
@@ -66,110 +78,387 @@ rm(list = ls())
 source("utils/config.R")
 site_name <- config$site_name
 final_dir <- final_dir_for("supplement")
-source(here::here("code", "20_biotrauma_grid.R"))            # height_fingerprint(), sorted_term()
+source(here::here("code", "20_biotrauma_grid.R"))            # height_fingerprint(), pfvc_channels(), sorted_term()
 source(here::here("code", "supplement", "causal_common.R"))
+source(here::here("code", "supplement", "causal_generator.R"))
 if (!CAUSAL_VTPBW) { final_dir <- file.path(final_dir, "novtpbw"); dir.create(final_dir, showWarnings = FALSE) }
 
-N_REPS <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_REPS", "200"))
-EFFECT <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_EFFECT", "0.15"))
-ARM_SCALE <- 0.3            # age_sicker: the control's share of the ventilated age gradient
-TESTBED_SEED <- 20261111
+env_list <- function(name, default) strsplit(Sys.getenv(name, default), ",")[[1]]
+N_REPS   <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_REPS", "1000"))
+EFFECT   <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_EFFECT", "0.15"))
+MARKERS  <- env_list("PBWPFVC_CAUSAL_MARKERS", "platelets,creatinine")
+STAGES   <- env_list("PBWPFVC_CAUSAL_STAGES", "matched,realistic,stress,power,multisite,crosscheck")
+WORKERS  <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_WORKERS", min(8L, max(1L, parallel::detectCores() - 1L))))
+ARM_SCALE <- 0.3                 # age_sicker: the control's share of the ventilated age gradient
+POWER_GRID <- c(0.25, 0.5, 0.75, 1, 1.5)
+N_SITES <- 4L                    # multisite
+SITE_EFFECT_CV <- 0.3            # between-site SD of the strain effect, as a share of it
+N_REPS_MULTISITE  <- max(N_REPS %/% 4L, min(N_REPS, 100L))   # each replicate is N_SITES sites
+N_REPS_CROSSCHECK <- min(100L, N_REPS)
+N_REALISM <- 20L                 # simulated sites averaged for the realism table
+TESTBED_SEED <- 20261111L
 ALPHA <- 0.05
+z_crit <- qnorm(1 - ALPHA / 2)
+stopifnot(all(MARKERS %in% CAUSAL_MARKERS$marker),
+          all(STAGES %in% c("matched", "realistic", "stress", "power", "multisite", "crosscheck")))
 
-patients <- load_causal_patients(config)
+patients <- as.data.frame(load_causal_patients(config))
 designs  <- causal_designs()
 
-# the scenarios for a strain effect of size beta (signed: negative for platelets)
-scenarios_for <- function(beta) {
-  d_age <- confounding_equal_to(beta, patients, "age")
-  d_sex <- confounding_equal_to(beta, patients, "sex")
-  s <- function(scenario, beta = 0, index = "age", d_all = 0, d_acute = 0, d_vent = 0, arm_scale = 1)
-    tibble(scenario, beta, index, d_all, d_acute, d_vent, arm_scale)
-  bind_rows(
-    s("null"),
-    s("strain", beta = beta),
-    s("age_everywhere", d_all = d_age),
-    s("age_sicker", d_all = d_age, arm_scale = ARM_SCALE),
-    s("age_acute", d_acute = d_age),
-    s("age_ventilation", d_vent = d_age),
-    s("sex_ventilation", index = "sex", d_vent = d_sex),
-    s("strain_plus_age", beta = beta, d_all = d_age))
+# ---- The scenarios -------------------------------------------------------------------
+# One row per scenario: its stage, whether a strain effect is planted, and its
+# parameters. beta is signed (negative for platelets).
+scenario_table <- function(beta, control_age_gradient) {
+  d <- function(index) confounding_equal_to(beta, patients, index)
+  truths <- function(base) list(
+    null            = scenario(base = base),
+    strain          = scenario(beta = beta, base = base),
+    age_everywhere  = scenario(d_all = d("age"), base = base),
+    age_sicker      = scenario(d_all = d("age"), arm_scale = ARM_SCALE, base = base),
+    age_acute       = scenario(d_acute = d("age"), base = base),
+    age_ventilation = scenario(d_vent = d("age"), base = base),
+    sex_ventilation = scenario(index = "sex", d_vent = d("sex"), base = base),
+    strain_plus_age = scenario(beta = beta, d_all = d("age"), base = base))
+  realistic_more <- list(
+    composite_ventilation = scenario(index = "composite", d_vent = d("composite")),
+    gli_ventilation       = scenario(index = "gli", d_vent = d("gli")),
+    age65_everywhere      = scenario(index = "age_hinge", d_all = d("age_hinge")),
+    age_everywhere_half   = scenario(d_all = 0.5 * d("age")),
+    age_everywhere_double = scenario(d_all = 2 * d("age")),
+    # the age gradient of the marker's slope observed in the site's own controls
+    age_as_in_controls    = scenario(d_all = control_age_gradient))
+  # one departure from the realistic base at a time; `null` says whether the scenario
+  # is also run without a strain effect (those that can move a null result)
+  stress <- list(
+    dropout_strong     = list(over = list(info_off = 1, info_death = 1.5), null = TRUE),
+    measurement_strong = list(over = list(info_measure = 1), null = TRUE),
+    heavy_tails        = list(over = list(error_df = 3), null = TRUE),
+    autocorrelation    = list(over = list(ar_share = 0.8, ar_rho = 0.9), null = TRUE),
+    vt_by_indication   = list(over = list(vt_model = "indication", u_slope = 1.5), null = TRUE),
+    vt_gate_collider   = list(over = list(vt_model = "indication", gate = TRUE, u_slope = 1.5), null = TRUE),
+    dose_threshold     = list(over = list(dose_shape = "threshold"), null = FALSE),
+    time_saturating    = list(over = list(time_shape = "saturating"), null = FALSE),
+    time_delayed       = list(over = list(time_shape = "delayed"), null = FALSE),
+    effect_differs_pre = list(over = list(het_pre = 0.3), null = FALSE),
+    pressure_before_t0 = list(over = list(pre_exposure = 0.4), null = FALSE),
+    height_error       = list(over = list(height_error_cm = 3), null = FALSE),
+    lung_size_varies   = list(over = list(sd_lung = 0.25), null = FALSE),
+    denominator_age25  = list(over = list(denominator = "age25"), null = FALSE),
+    denominator_norace = list(over = list(denominator = "norace"), null = FALSE))
+  rows <- list()
+  add <- function(stage, name, sc, effect = sc$beta != 0, multiple = NA_real_)
+    rows[[length(rows) + 1]] <<- tibble(stage = stage, scenario = name, has_effect = effect, effect_multiple = multiple, params = list(sc))
+  if ("matched" %in% STAGES) for (nm in names(truths("matched"))) add("matched", nm, truths("matched")[[nm]])
+  if ("realistic" %in% STAGES) {
+    for (nm in names(truths("realistic"))) add("realistic", nm, truths("realistic")[[nm]])
+    for (nm in names(realistic_more)) add("realistic", nm, realistic_more[[nm]])
+  }
+  if ("stress" %in% STAGES) {
+    for (nm in names(stress)) {
+      over <- stress[[nm]]$over
+      if (stress[[nm]]$null) add("stress", paste0(nm, " | null"), do.call(scenario, over))
+      add("stress", paste0(nm, " | strain"), do.call(scenario, c(list(beta = beta), over)))
+    }
+    add("stress", "dropout_strong | age_everywhere", scenario(d_all = d("age"), info_off = 1, info_death = 1.5))
+  }
+  if ("power" %in% STAGES) for (k in POWER_GRID)
+    add("power", paste0("strain x ", k), scenario(beta = k * beta), multiple = k)
+  bind_rows(rows) %>% mutate(cell = row_number(), .before = 1)
 }
 
-operating <- list(); scenario_log <- list()
-for (m in seq_len(nrow(CAUSAL_MARKERS))) {
-  marker <- CAUSAL_MARKERS$marker[m]
-  panel  <- load_causal_panel(config, patients, CAUSAL_MARKERS$lab_category[m])
-  noise  <- observed_noise(panel)
-  scenarios <- scenarios_for(CAUSAL_MARKERS$injury_sign[m] * EFFECT)
-  scenario_log[[marker]] <- scenarios %>%
-    mutate(marker = marker, sd_resid = noise$sd_resid, sd_slope = noise$sd_slope, sd_level = noise$sd_level, .before = 1)
-  preps <- lapply(seq_len(nrow(designs)), function(i) prepare_design(designs[i, ], patients, panel))
-  rows  <- lapply(preps, function(p) if (p$ok) match(p$row_key, paste(panel$id, panel$phase, panel$t)) else integer(0))
-  message(marker, ": ", sum(vapply(preps, function(p) p$ok, logical(1))), " of ", length(preps),
-          " designs estimable; residual SD ", signif(noise$sd_resid, 3), ", slope SD ", signif(noise$sd_slope, 3))
-  for (s in seq_len(nrow(scenarios))) {
-    truth <- as.list(scenarios[s, ])
-    fits <- vector("list", N_REPS)
-    for (r in seq_len(N_REPS)) {
-      sim <- plant_outcome(panel, patients, truth, noise, rng_seed = TESTBED_SEED + 1000L * s + r)
-      fits[[r]] <- bind_rows(lapply(seq_along(preps), function(i) fit_design(preps[[i]], sim$y_sim[rows[[i]]])))
+# the marker's age gradient in the site's controls, per ventilated SD of age: a
+# confounder of an observed size, not one sized to the hypothesis
+control_age_gradient <- function(panel) {
+  d <- tibble(design = "control_age", arms = list("no support"), phases = list("on"),
+              formula = "~ age10 + sofa_z + sf_z", target = "age10", sign = 1, fails_if = "")
+  prep <- prepare_design(d, patients, panel)
+  if (!prep$ok) return(0)
+  fit_design(prep, align_outcome(prep, panel))$estimate * sd(patients$age10[patients$vent == 1])
+}
+
+# ---- One replicate --------------------------------------------------------------------
+# simulate a site, fit every design, apply the decision rule
+one_replicate <- function(sc, calib, sign, seed, pats = patients) {
+  sim <- simulate_site(pats, calib, sc, sign, seed)
+  fits <- fit_all_designs(designs, sim$patients, sim$panel)
+  list(fits = data.frame(design = fits$design, estimate = fits$estimate, se = fits$se, truth = sim$truth),
+       rule = triangulation_supports(fits, sign))
+}
+# A site of a multisite replicate: the site's patients resampled, its own effect,
+# confounder size and noise
+one_multisite_replicate <- function(sc, calib, sign, seed) {
+  set.seed(seed)
+  site_fits <- lapply(seq_len(N_SITES), function(k) {
+    pats <- patients[sample.int(nrow(patients), replace = TRUE), ]
+    pats$id <- sprintf("s%05d", seq_len(nrow(pats)))
+    sck <- sc
+    sck$beta  <- sc$beta * (1 + SITE_EFFECT_CV * rnorm(1))
+    sck$d_all <- sc$d_all * exp(rnorm(1, 0, 0.3))
+    cal <- calib; cal$scale$resid <- cal$scale$resid * runif(1, 0.8, 1.25)
+    out <- one_replicate(sck, cal, sign, seed * 10L + k, pats)$fits
+    out$site <- k; out
+  })
+  d <- do.call(rbind, site_fits); d <- d[!is.na(d$estimate), ]
+  do.call(rbind, lapply(split(d, d$design), function(x) {
+    w <- 1 / x$se^2; fixed <- sum(w * x$estimate) / sum(w); k <- nrow(x)
+    q <- sum(w * (x$estimate - fixed)^2)
+    tau2 <- if (k > 1) max((q - (k - 1)) / (sum(w) - sum(w^2) / sum(w)), 0) else 0      # DerSimonian-Laird
+    wr <- 1 / (x$se^2 + tau2)
+    data.frame(design = x$design[1], n_sites = k, fixed = fixed, fixed_se = sqrt(1 / sum(w)),
+               random = sum(wr * x$estimate) / sum(wr), random_se = sqrt(1 / sum(wr)))
+  }))
+}
+# the same simulated site by the within estimator and by a linear mixed model
+CROSSCHECK_DESIGNS <- c("unadjusted", "control_did", "free_age_did", "within_onoff")
+one_crosscheck_replicate <- function(sc, calib, sign, seed) {
+  sim <- simulate_site(patients, calib, sc, sign, seed)
+  do.call(rbind, lapply(CROSSCHECK_DESIGNS, function(dn) {
+    design <- designs[designs$design == dn, ]
+    prep <- prepare_design(design, sim$patients, sim$panel)
+    if (!prep$ok) return(NULL)
+    within <- fit_design(prep, align_outcome(prep, sim$panel))
+    d <- cbind(sim$panel[prep$rows, ], sim$patients[match(sim$panel$id[prep$rows], sim$patients$id), setdiff(names(sim$patients), "id")])
+    d$on <- as.numeric(d$phase == "on"); d$lv_on <- d$lv0 * d$on
+    # levels and slopes both follow the design's covariates; a random level and slope per patient
+    form <- as.formula(paste0("y ~ (", sub("^~", "", design$formula), ") * t"))
+    mixed <- tryCatch(nlme::lme(form, random = ~ t | id, data = d, method = "REML",
+                                control = nlme::lmeControl(opt = "optim", returnObject = TRUE)), error = function(e) NULL)
+    est <- NA_real_; se <- NA_real_
+    if (!is.null(mixed)) {
+      tab <- summary(mixed)$tTable
+      hit <- which(sorted_term(rownames(tab)) == sorted_term(paste0(design$target, ":t")))
+      if (length(hit) == 1) { est <- tab[hit, "Value"]; se <- tab[hit, "Std.Error"] }
     }
-    operating[[length(operating) + 1]] <- bind_rows(fits) %>% filter(!is.na(estimate)) %>%
-      group_by(design) %>%
-      summarise(n_reps = n(), mean_estimate = mean(estimate), empirical_sd = sd(estimate), mean_se = mean(se),
-                coverage = mean(abs(estimate - truth$beta) <= qnorm(1 - ALPHA / 2) * se),
-                rejection_rate = mean(abs(estimate / se) > qnorm(1 - ALPHA / 2)), .groups = "drop") %>%
-      mutate(marker = marker, scenario = truth$scenario, truth = truth$beta, bias = mean_estimate - truth,
-             # the effect a design would detect with 80% power at this site's sample
-             mde_80 = (qnorm(1 - ALPHA / 2) + qnorm(0.80)) * empirical_sd)
-    message("  ", truth$scenario, " done")
+    data.frame(design = dn, within = within$estimate, within_se = within$se, mixed = est, mixed_se = se, truth = sim$truth)
+  }))
+}
+
+# ---- Parallel workers -------------------------------------------------------------------
+run_jobs <- function(jobs, fun, ...) {
+  if (is.null(cluster)) lapply(jobs, fun, ...) else parallel::parLapplyLB(cluster, jobs, fun, ..., chunk.size = 10)
+}
+# replicate r of cell c always has the same seed, whatever the number of workers
+seed_for <- function(cell, rep) TESTBED_SEED + 100000L * cell + rep
+
+# Monte Carlo summaries of one design in one scenario
+performance <- function(estimate, se, truth) {
+  ok <- !is.na(estimate) & !is.na(se); n <- sum(ok)
+  if (n < 2) return(tibble(n_reps = n))
+  e <- estimate[ok]; s <- se[ok]; tr <- truth[ok]
+  covered <- abs(e - tr) <= z_crit * s; rejected <- abs(e / s) > z_crit
+  emp <- sd(e); model <- sqrt(mean(s^2))
+  tibble(n_reps = n, truth = mean(tr), mean_estimate = mean(e), bias = mean(e - tr), bias_mcse = sd(e - tr) / sqrt(n),
+         empirical_se = emp, empirical_se_mcse = emp / sqrt(2 * (n - 1)), model_se = model,
+         # the model SE relative to the empirical one: below 1, the intervals are too narrow
+         se_ratio = model / emp, coverage = mean(covered), coverage_mcse = sqrt(mean(covered) * (1 - mean(covered)) / n),
+         rejection_rate = mean(rejected), rejection_mcse = sqrt(mean(rejected) * (1 - mean(rejected)) / n),
+         mde_80 = (z_crit + qnorm(0.80)) * emp)
+}
+
+# Separate R processes (not forks), so the same code runs on Windows, macOS and Linux.
+cluster <- NULL
+if (WORKERS > 1) {
+  # one thread per process: a multithreaded BLAS in every worker makes them fight for
+  # the same cores and run many times slower than one process alone
+  thread_vars <- c("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+  old_threads <- Sys.getenv(thread_vars, unset = NA)
+  do.call(Sys.setenv, as.list(setNames(rep("1", length(thread_vars)), thread_vars)))
+  cluster <- parallel::makePSOCKcluster(WORKERS)
+  for (v in thread_vars) if (is.na(old_threads[[v]])) Sys.unsetenv(v) else do.call(Sys.setenv, setNames(list(old_threads[[v]]), v))
+  on.exit(parallel::stopCluster(cluster), add = TRUE)
+  invisible(parallel::clusterCall(cluster, function(paths) .libPaths(paths), .libPaths()))
+  invisible(parallel::clusterEvalQ(cluster, suppressPackageStartupMessages({ library(dplyr); library(tibble) })))
+  parallel::clusterExport(cluster, setdiff(ls(globalenv()), c("cluster", "config")))
+}
+
+# ---- Run ----------------------------------------------------------------------------------
+operating <- list(); decision <- list(); scenario_log <- list(); realism <- list(); multisite <- list(); crosscheck <- list()
+started <- Sys.time()
+for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
+  marker <- CAUSAL_MARKERS$marker[m]; sign <- CAUSAL_MARKERS$injury_sign[m]
+  panel_raw <- as.data.frame(load_causal_panel(config, patients, CAUSAL_MARKERS$lab_category[m], complete = FALSE))
+  panel <- complete_phases(panel_raw)
+  calib0 <- calibrate_site(patients, panel_raw, panel)
+  calib <- list(matched   = tune_generator(patients, calib0, "matched", sign, TESTBED_SEED),
+                realistic = tune_generator(patients, calib0, "realistic", sign, TESTBED_SEED))
+  cells <- scenario_table(sign * EFFECT, control_age_gradient(panel))
+  message("\n", marker, ": generator tuned after ", round(as.numeric(difftime(Sys.time(), started, units = "mins")), 1), " min; ",
+          nrow(cells), " scenarios x ", N_REPS, " replicates on ", WORKERS, " process(es)")
+  if (!is.null(cluster)) parallel::clusterExport(cluster, c("calib", "cells", "sign"), envir = environment())
+
+  # --- realism: what the analysis reads off the real site and off simulated ones ---
+  observed <- panel_summaries(panel, patients)
+  for (base in names(calib)) {
+    sims <- lapply(seq_len(N_REALISM), function(r) {
+      sim <- simulate_site(patients, calib[[base]], scenario(base = base), sign, TESTBED_SEED + r)
+      rbind(panel_summaries(sim$panel, sim$patients),
+            data.frame(arm = c("ventilated", "ventilated"), phase = "on",
+                       statistic = c("liberated within the window", "died within the window"), value = unname(sim$ended)))
+    })
+    expo <- phase_exposure(patients); v <- patients$vent == 1
+    observed_all <- rbind(observed, data.frame(arm = "ventilated", phase = "on",
+                                               statistic = c("liberated within the window", "died within the window"),
+                                               value = c(mean(expo$ended[v] == "off"), mean(expo$ended[v] == "death"))))
+    realism[[paste(marker, base)]] <- bind_rows(sims) %>% group_by(arm, phase, statistic) %>%
+      summarise(simulated = mean(value, na.rm = TRUE), simulated_sd = sd(value, na.rm = TRUE), .groups = "drop") %>%
+      inner_join(observed_all %>% rename(observed = value), by = c("arm", "phase", "statistic")) %>%
+      mutate(marker = marker, generator = base, .before = 1)
+  }
+
+  # --- the scenarios ---
+  jobs <- expand.grid(rep = seq_len(N_REPS), cell = cells$cell)
+  results <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
+    sc <- cells$params[[job$cell]]
+    out <- one_replicate(sc, calib[[sc$base]], sign, seed_for(job$cell, job$rep))
+    out$fits$cell <- job$cell; out$rule <- c(cell = job$cell, out$rule); out
+  })
+  fits <- do.call(rbind, lapply(results, `[[`, "fits"))
+  rules <- as.data.frame(do.call(rbind, lapply(results, `[[`, "rule")))
+  operating[[marker]] <- fits %>% group_by(cell, design) %>%
+    group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
+    left_join(fits %>% group_by(cell, design) %>% summarise(n_not_estimable = sum(is.na(estimate)), .groups = "drop"), by = c("cell", "design")) %>%
+    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker)
+  decision[[marker]] <- rules %>% pivot_longer(-cell, names_to = "rule", values_to = "supports") %>%
+    group_by(cell, rule) %>% summarise(n_reps = n(), supports_rate = mean(supports),
+                                       supports_mcse = sqrt(supports_rate * (1 - supports_rate) / n_reps), .groups = "drop") %>%
+    left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker)
+  scenario_log[[marker]] <- cells %>% mutate(marker = marker, .before = 1) %>%
+    bind_cols(bind_rows(lapply(cells$params, as_tibble))) %>% select(-params)
+  message("  scenarios done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+
+  # --- multisite ---
+  if ("multisite" %in% STAGES) {
+    truths <- list(null = scenario(), strain = scenario(beta = sign * EFFECT),
+                   strain_plus_age = scenario(beta = sign * EFFECT, d_all = confounding_equal_to(sign * EFFECT, patients, "age")),
+                   age_sicker = scenario(d_all = confounding_equal_to(sign * EFFECT, patients, "age"), arm_scale = ARM_SCALE))
+    if (!is.null(cluster)) parallel::clusterExport(cluster, "truths", envir = environment())
+    jobs <- expand.grid(rep = seq_len(N_REPS_MULTISITE), truth = seq_along(truths))
+    pooled <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
+      out <- one_multisite_replicate(truths[[job$truth]], calib$realistic, sign, 5000000L + 10000L * job$truth + job$rep)
+      out$scenario <- names(truths)[job$truth]; out$truth <- truths[[job$truth]]$beta; out
+    })
+    multisite[[marker]] <- bind_rows(pooled) %>%
+      pivot_longer(c(fixed, random), names_to = "pooling", values_to = "estimate") %>%
+      mutate(se = if_else(pooling == "fixed", fixed_se, random_se),
+             pooling = if_else(pooling == "fixed", "common effect", "random effects (DerSimonian-Laird)")) %>%
+      group_by(scenario, design, pooling) %>% group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
+      mutate(marker = marker, n_sites = N_SITES, site_effect_cv = SITE_EFFECT_CV)
+    message("  multisite done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+  }
+
+  # --- the within estimator against a mixed model ---
+  if ("crosscheck" %in% STAGES) {
+    truths <- list(null = scenario(), strain = scenario(beta = sign * EFFECT))
+    if (!is.null(cluster)) parallel::clusterExport(cluster, "truths", envir = environment())
+    jobs <- expand.grid(rep = seq_len(N_REPS_CROSSCHECK), truth = seq_along(truths))
+    pairs <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
+      out <- one_crosscheck_replicate(truths[[job$truth]], calib$realistic, sign, 9000000L + 10000L * job$truth + job$rep)
+      if (!is.null(out)) out$scenario <- names(truths)[job$truth]
+      out
+    })
+    crosscheck[[marker]] <- bind_rows(pairs) %>% group_by(scenario, design) %>%
+      summarise(n_reps = n(), mixed_failed = sum(is.na(mixed)), truth = mean(truth),
+                within_mean = mean(within[!is.na(mixed)]), mixed_mean = mean(mixed, na.rm = TRUE),
+                mean_difference = mean(mixed - within, na.rm = TRUE),
+                difference_mcse = sd(mixed - within, na.rm = TRUE) / sqrt(sum(!is.na(mixed))),
+                correlation = cor(mixed, within, use = "complete.obs"),
+                within_se = sqrt(mean(within_se^2)), mixed_se = sqrt(mean(mixed_se^2, na.rm = TRUE)), .groups = "drop") %>%
+      mutate(marker = marker, .before = 1)
+    message("  crosscheck done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 }
+
+# ---- Tables ---------------------------------------------------------------------------------
+tag <- function(d) d %>% mutate(site = site_name, cohort = if (config$vtpbw_gate == "0") "ungated" else "gated", .before = 1)
 operating <- bind_rows(operating) %>%
-  left_join(designs %>% select(design, fails_if), by = "design") %>%
-  mutate(site = site_name, cohort = if (config$vtpbw_gate == "0") "ungated" else "gated",
-         planted_effect = EFFECT,
-         # a design's verdict on a scenario. "biased": the mean estimate is off by more
-         # than a quarter of the planted effect and by more than three Monte Carlo
-         # standard errors. "underpowered": not biased, but this site's sample would
-         # detect the planted effect less than 80% of the time, so a null from this
-         # design is not evidence against strain.
-         mc_se = empirical_sd / sqrt(n_reps),
-         verdict = case_when(abs(bias) > 0.25 * EFFECT & abs(bias) > 3 * mc_se ~ "biased",
+  mutate(planted_effect = EFFECT,
+         # A design's verdict on a scenario.
+         #   biased        off by more than a quarter of the planted effect and by more
+         #                 than three Monte Carlo standard errors
+         #   undercovers   not biased, but its 95% interval covers the truth less than 90%
+         #                 of the time (beyond Monte Carlo error)
+         #   underpowered  neither, but this site would detect the planted effect less
+         #                 than 80% of the time: its null is not evidence against strain
+         verdict = case_when(is.na(bias) ~ "not estimable",
+                             abs(bias) > 0.25 * EFFECT & abs(bias) > 3 * bias_mcse ~ "biased",
+                             coverage + 3 * coverage_mcse < 0.90 ~ "undercovers",
                              mde_80 > EFFECT ~ "underpowered",
                              TRUE ~ "ok")) %>%
-  select(site, cohort, marker, scenario, design, truth, mean_estimate, bias, empirical_sd, mean_se,
-         coverage, rejection_rate, mde_80, mc_se, verdict, n_reps, planted_effect, fails_if)
-scenario_log <- bind_rows(scenario_log) %>% mutate(site = site_name, planted_effect = EFFECT, n_reps = N_REPS, .before = 1)
+  left_join(designs %>% select(design, fails_if), by = "design") %>%
+  select(marker, stage, scenario, has_effect, effect_multiple, design, truth, mean_estimate, bias, bias_mcse,
+         empirical_se, empirical_se_mcse, model_se, se_ratio, coverage, coverage_mcse, rejection_rate, rejection_mcse,
+         mde_80, verdict, n_reps, n_not_estimable, planted_effect, fails_if) %>% tag()
+decision <- bind_rows(decision) %>%
+  mutate(rule = recode(rule, rule = "decision rule", unadjusted_alone = "unadjusted model alone", control_did_alone = "control contrast alone"),
+         # with an effect, "supports" is a correct call; without one, a false positive
+         reading = if_else(has_effect, "power", "false positive")) %>%
+  select(marker, stage, scenario, has_effect, effect_multiple, rule, reading, supports_rate, supports_mcse, n_reps) %>% tag()
+scenario_log <- bind_rows(scenario_log) %>% mutate(planted_effect = EFFECT, n_reps = N_REPS) %>% tag()
+realism <- bind_rows(realism) %>% tag()
 
 write_csv(operating, file.path(final_dir, paste0("causal_testbed_operating_", site_name, ".csv")))
+write_csv(decision, file.path(final_dir, paste0("causal_testbed_decision_", site_name, ".csv")))
 write_csv(scenario_log, file.path(final_dir, paste0("causal_testbed_scenarios_", site_name, ".csv")))
+write_csv(realism, file.path(final_dir, paste0("causal_testbed_realism_", site_name, ".csv")))
+if ("power" %in% STAGES)
+  write_csv(operating %>% filter(stage == "power") %>%
+              select(site, cohort, marker, design, effect_multiple, truth, rejection_rate, rejection_mcse, bias, bias_mcse, n_reps) %>%
+              bind_rows(decision %>% filter(stage == "power") %>%
+                          transmute(site, cohort, marker, design = rule, effect_multiple, rejection_rate = supports_rate,
+                                    rejection_mcse = supports_mcse, n_reps)),
+            file.path(final_dir, paste0("causal_testbed_power_", site_name, ".csv")))
+if (length(multisite)) write_csv(bind_rows(multisite) %>% tag(), file.path(final_dir, paste0("causal_testbed_multisite_", site_name, ".csv")))
+if (length(crosscheck)) write_csv(bind_rows(crosscheck) %>% tag(), file.path(final_dir, paste0("causal_testbed_crosscheck_", site_name, ".csv")))
 
-plot_data <- operating %>%
-  mutate(design = factor(design, levels = rev(designs$design)),
-         scenario = factor(scenario, levels = unique(scenario_log$scenario)),
-         label = sprintf("%.2f\n(%+.2f)", rejection_rate, bias / EFFECT))
-p <- ggplot(plot_data, aes(scenario, design, fill = verdict)) +
-  geom_tile(colour = "white") +
-  geom_text(aes(label = label), size = 2.3, lineheight = 0.85) +
-  facet_wrap(~ marker) +
-  scale_fill_manual(values = c(ok = "#cfe8d5", underpowered = "#f3e9c0", biased = "#f1c9c5"), name = NULL) +
-  labs(x = NULL, y = NULL,
-       title = paste0("Planted-truth test of the designs, ", site_name, " (", N_REPS, " replicates)"),
-       subtitle = paste0("Rejection rate at 5%, and (bias as a share of the planted effect, ", EFFECT,
-                         " log units/day per log unit). Only strain and strain_plus_age hold a true effect.")) +
-  theme_bw(base_size = 9) +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "bottom", panel.grid = element_blank())
-ggsave(file.path(final_dir, paste0("causal_testbed_", site_name, ".pdf")), p, width = 13, height = 7)
-
-message("\nVerdicts (rows: design; columns: scenario), by marker:")
-for (mk in unique(operating$marker)) {
-  message("\n", mk, ": rejection rate (bias / planted effect)")
-  tab <- operating %>% filter(marker == mk) %>%
-    transmute(design = factor(design, levels = designs$design), scenario = factor(scenario, levels = unique(scenario_log$scenario)),
-              cell = sprintf("%.2f (%+.2f)", rejection_rate, bias / EFFECT)) %>%
-    arrange(design) %>% pivot_wider(names_from = scenario, values_from = cell)
-  print(as.data.frame(tab), row.names = FALSE)
+# ---- Figures -----------------------------------------------------------------------------------
+verdict_colours <- c(ok = "#cfe8d5", underpowered = "#f3e9c0", undercovers = "#f6d6b0", biased = "#f1c9c5", "not estimable" = "grey90")
+pdf(file.path(final_dir, paste0("causal_testbed_", site_name, ".pdf")), width = 14, height = 8.5)
+for (st in intersect(c("matched", "realistic", "stress"), STAGES)) {
+  d <- operating %>% filter(stage == st) %>%
+    mutate(design = factor(design, levels = rev(designs$design)), scenario = factor(scenario, levels = unique(scenario)),
+           label = if_else(is.na(bias), "", sprintf("%.2f\n(%+.2f)", rejection_rate, bias / EFFECT)))
+  print(ggplot(d, aes(scenario, design, fill = verdict)) + geom_tile(colour = "white") +
+          geom_text(aes(label = label), size = 2, lineheight = 0.85) + facet_wrap(~ marker, ncol = 1) +
+          scale_fill_manual(values = verdict_colours, name = NULL) +
+          labs(x = NULL, y = NULL, title = paste0("Stage: ", st, " (", site_name, ", ", N_REPS, " replicates)"),
+               subtitle = paste0("Rejection rate at 5%, and (bias as a share of the planted effect, ", EFFECT, " log units/day per log unit)")) +
+          theme_bw(base_size = 9) + theme(axis.text.x = element_text(angle = 35, hjust = 1), legend.position = "bottom", panel.grid = element_blank()))
 }
-message("\ncausal_testbed complete: ", final_dir)
+d <- decision %>% filter(stage != "power") %>% mutate(scenario = factor(paste(stage, scenario, sep = ": "), levels = rev(unique(paste(stage, scenario, sep = ": ")))))
+print(ggplot(d, aes(supports_rate, scenario, colour = rule, shape = rule)) +
+        geom_vline(xintercept = ALPHA, linetype = 2, colour = "grey50") +
+        geom_pointrange(aes(xmin = supports_rate - 1.96 * supports_mcse, xmax = supports_rate + 1.96 * supports_mcse), size = 0.25) +
+        facet_grid(reading ~ marker, scales = "free_y", space = "free_y") + scale_colour_brewer(palette = "Dark2", name = NULL) + scale_shape(name = NULL) +
+        labs(x = "Share of simulated sites called \"supports the hypothesis\" (95% Monte Carlo interval)", y = NULL,
+             title = "The decision rule against single analyses",
+             subtitle = "Top: scenarios with no strain effect (every call is a false positive). Bottom: scenarios with one (power).") +
+        theme_bw(base_size = 9) + theme(legend.position = "bottom"))
+if ("power" %in% STAGES) {
+  d <- bind_rows(operating %>% filter(stage == "power") %>% transmute(marker, line = design, effect_multiple, rate = rejection_rate, mcse = rejection_mcse),
+                 decision %>% filter(stage == "power", rule == "decision rule") %>% transmute(marker, line = rule, effect_multiple, rate = supports_rate, mcse = supports_mcse)) %>%
+    filter(line %in% c("decision rule", "control_did", "within_onoff", "within_triple", "off_reversal", "free_age_did", "adjusted"))
+  print(ggplot(d, aes(effect_multiple * EFFECT, rate, colour = line)) + geom_line() + geom_point(size = 1) +
+          geom_errorbar(aes(ymin = rate - 1.96 * mcse, ymax = rate + 1.96 * mcse), width = 0) +
+          geom_hline(yintercept = 0.8, linetype = 2, colour = "grey50") + facet_wrap(~ marker) +
+          scale_colour_brewer(palette = "Dark2", name = NULL) +
+          labs(x = "Planted strain effect (log units per day per log unit of VT/PFVC)", y = "Rejection rate (decision rule: share called \"supports\")",
+               title = "Power by effect size, realistic generator") + theme_bw(base_size = 10) + theme(legend.position = "bottom"))
+}
+d <- realism %>% filter(generator == "realistic", is.finite(observed), is.finite(simulated))
+print(ggplot(d, aes(observed, simulated, colour = paste(arm, phase))) + geom_abline(linetype = 2, colour = "grey50") +
+        geom_pointrange(aes(ymin = simulated - 2 * simulated_sd, ymax = simulated + 2 * simulated_sd), size = 0.3) +
+        facet_wrap(~ paste(marker, statistic, sep = ": "), scales = "free", ncol = 5) + scale_colour_brewer(palette = "Dark2", name = NULL) +
+        labs(title = "Realism: what the analysis reads off the real site and off simulated ones (realistic generator, no effect)",
+             x = "Observed", y = paste0("Simulated (mean of ", N_REALISM, " sites, +/- 2 SD)")) +
+        theme_bw(base_size = 8) + theme(legend.position = "bottom"))
+invisible(dev.off())
+
+# ---- Console summary -------------------------------------------------------------------------------
+message("\nDecision rule: share of simulated sites called \"supports\" (MCSE)")
+print(as.data.frame(decision %>% filter(stage != "power") %>%
+                      transmute(marker, stage, scenario, reading, rule, cell = sprintf("%.3f (%.3f)", supports_rate, supports_mcse)) %>%
+                      pivot_wider(names_from = rule, values_from = cell)), row.names = FALSE)
+message("\nDesigns that are biased or undercover, by stage:")
+print(as.data.frame(operating %>% filter(verdict %in% c("biased", "undercovers"), stage != "power") %>%
+                      count(marker, stage, design, verdict) %>% pivot_wider(names_from = stage, values_from = n, values_fill = 0)), row.names = FALSE)
+message("\ncausal_testbed complete after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min: ", final_dir)

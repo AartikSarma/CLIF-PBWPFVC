@@ -1,7 +1,7 @@
 # =============================================================================
-# causal_common: the within-person and ladder designs, and the planted-truth
-# generator that tests them. Sourced by causal_triangulation.R and
-# causal_testbed.R; never run; writes nothing.
+# causal_common: the data and the within-person and ladder designs. Sourced by
+# causal_triangulation.R, causal_testbed.R and causal_tests.R; never run; writes
+# nothing. The planted-truth generator that tests the designs is causal_generator.R.
 # =============================================================================
 #
 # The hypothesis: at a fixed VT/PBW, a high VT/PFVC causes biotrauma. At a fixed
@@ -50,7 +50,7 @@
 #   free_<input>_did  the same rung as a ventilated-minus-control contrast.
 #
 # The estimate is always the same quantity, so the designs can be laid side by side
-# and each can be scored against a planted truth (causal_testbed.R).
+# and each can be scored against a planted truth (causal_generator.R, causal_testbed.R).
 #
 # The model. Every design is one regression of log marker on time with a separate
 # intercept for every patient-phase (so levels, and everything fixed about a patient,
@@ -102,7 +102,8 @@ load_causal_patients <- function(config) {
   if (!file.exists(vent_file)) stop("missing ", vent_file, ": run scripts 01-03 first")
   if (!file.exists(ctrl_file)) stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
   keep <- c("hospitalization_id", "patient_id", "index_dttm", "age_at_admission", "sex_category",
-            "race_category", "height_cm", "pbw", "pfvc", "sf_ratio", "sofa_total", "discharge_dttm")
+            "race_category", "height_cm", "pbw", "pfvc", "pfvc_age25", "sf_ratio", "sofa_total",
+            "admission_dttm", "discharge_dttm", "death_dttm")
   vent <- arrow::read_parquet(vent_file) %>%
     select(all_of(keep), vtpbw, last_imv_dttm) %>% mutate(arm = "ventilated")
   ctrl <- arrow::read_parquet(ctrl_file) %>%
@@ -124,6 +125,9 @@ load_causal_patients <- function(config) {
            !is.na(sf_ratio), !is.na(sofa_total), is.na(vtpbw) | vtpbw > 0) %>%
     mutate(id = hospitalization_id, vent = as.numeric(arm == "ventilated"),
            t_off_d = days(t_off, t0), stay_end_d = days(discharge_dttm, t0),
+           # hospital time before t0 (what a pre phase can be drawn from) and the day of death
+           pre_avail_d = pmin(pmax(days(t0, admission_dttm), 0), PRE_DAYS),
+           death_d = days(death_dttm, t0),
            age10 = age_at_admission / 10,
            sex_category = factor(as.character(sex_category), levels = c("Male", "Female")),
            race_category = factor(as.character(race_category), levels = c("WHITE", "BLACK", "OTHER")),
@@ -133,13 +137,19 @@ load_causal_patients <- function(config) {
            lv0 = if_else(vent == 1, log(vtpbw) - mean(log(vtpbw[vent == 1]), na.rm = TRUE), 0),
            sofa_z = as.numeric(scale(sofa_total)), sf_z = as.numeric(scale(sf_ratio)),
            age_z = as.numeric(scale(age10))) %>%
-    mutate(ldisc = ldisc - mean(ldisc[vent == 1])) %>%
-    select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, age10, age_z, sex_category, race_category,
-           height_cm, ldisc, fp, lv0, sofa_z, sf_z)
+    mutate(# the same ratio on two other denominators, for the testbed's wrong-denominator
+           # scenarios: GLI at age 25 (no age term) and GLI without its race term
+           ldisc25 = log(pbw / pfvc_age25),
+           ldisc_norace = ldisc + pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_race) %>%
+    mutate(across(c(ldisc, ldisc25, ldisc_norace), ~ .x - mean(.x[vent == 1]))) %>%
+    select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, pre_avail_d, death_d, age10, age_z,
+           sex_category, race_category, height_cm, pbw, ldisc, ldisc25, ldisc_norace, fp, lv0, sofa_z, sf_z)
 }
 
 # Every measurement of one marker in the window, with its phase. t is days from t0.
-load_causal_panel <- function(config, patients, lab_category) {
+# complete = FALSE keeps the patient-phases with a single measurement too (the testbed
+# calibrates its measurement rate on them).
+load_causal_panel <- function(config, patients, lab_category, complete = TRUE) {
   read_labs <- function(dir) {
     f <- file.path(dir, "cohort_labs_clean.parquet")
     if (!file.exists(f)) stop("missing ", f, ": run script 02 first")
@@ -160,8 +170,15 @@ load_causal_panel <- function(config, patients, lab_category) {
     filter(!is.na(phase), is.finite(value), value > 0) %>%
     transmute(id, phase, t, y = log(value)) %>%
     distinct() %>%
-    group_by(id, phase) %>% filter(n() >= 2, max(t) - min(t) >= MIN_SPAN_D) %>% ungroup() %>%
+    complete_phases(complete) %>%
     arrange(id, phase, t)
+}
+# a patient-phase enters a design with two measurements at least MIN_SPAN_D apart
+complete_phases <- function(panel, complete = TRUE) {
+  if (!complete || !nrow(panel)) return(panel)
+  key <- paste(panel$id, panel$phase)
+  ok <- tapply(panel$t, key, function(t) length(t) >= 2 && max(t) - min(t) >= MIN_SPAN_D)
+  panel[ok[key], , drop = FALSE]
 }
 
 # ---- The designs ----------------------------------------------------------------
@@ -205,31 +222,40 @@ causal_designs <- function(vtpbw = CAUSAL_VTPBW) {
 }
 
 # Prepare one design on one panel: everything that does not depend on the outcome.
-# Returns NULL-estimable (ok = FALSE) when too few patients have the phases.
+# Not estimable (ok = FALSE) when an arm has too few patients with the phases. `rows`
+# are the panel rows the design reads, in the order of its outcome vector.
 prepare_design <- function(design, patients, panel) {
   arms <- design$arms[[1]]; phases <- design$phases[[1]]
-  pat <- patients %>% filter(arm %in% arms)
-  pan <- panel %>% filter(phase %in% phases, id %in% pat$id)
-  if (length(phases) > 1) {                      # a within-person design needs both phases
-    both <- pan %>% distinct(id, phase) %>% count(id) %>% filter(n == length(phases))
-    pan <- pan %>% filter(id %in% both$id)
+  pid <- match(panel$id, patients$id)             # the patient row of each measurement
+  phase_code <- match(panel$phase, c("pre", "on", "post"))
+  rows <- which(panel$phase %in% phases & (patients$arm %in% arms)[pid])
+  if (length(phases) > 1) {                      # a within-person design needs every phase
+    n_phases <- tabulate(unique(pid[rows] * 4L + phase_code[rows]) %/% 4L, nbins = nrow(patients))
+    rows <- rows[n_phases[pid[rows]] == length(phases)]
   }
-  n_by_arm <- pan %>% distinct(id) %>% inner_join(pat %>% select(id, arm), by = "id") %>% count(arm)
-  empty <- list(ok = FALSE, design = design$design, n_patients = n_distinct(pan$id), n_obs = nrow(pan))
-  if (nrow(n_by_arm) < length(arms) || any(n_by_arm$n < MIN_PATIENTS)) return(empty)
-  pan <- pan %>% inner_join(pat, by = "id") %>%
-    mutate(on = as.numeric(phase == "on"), lv_on = lv0 * on,
-           group = paste(id, phase))
+  i <- pid[rows]
+  patient_rows <- unique(i)
+  n_by_arm <- table(factor(patients$arm[patient_rows], levels = arms))
+  empty <- list(ok = FALSE, design = design$design, n_patients = length(patient_rows), n_obs = length(rows))
+  if (any(n_by_arm < MIN_PATIENTS)) return(empty)
+  # the design's rows of the patient table, built column by column (row-subsetting a
+  # data frame is the slow step when this runs thousands of times)
+  pan <- lapply(patients[all.vars(as.formula(design$formula)) %>% intersect(names(patients)) %>% union("lv0")], `[`, i)
+  pan$t <- panel$t[rows]
+  pan$on <- as.numeric(panel$phase[rows] == "on")
+  pan$lv_on <- pan$lv0 * pan$on
+  pan <- structure(pan, class = "data.frame", row.names = .set_row_names(length(rows)))
   X <- model.matrix(as.formula(design$formula), data = pan)
   if (!design$target %in% colnames(X)) {         # R may write an interaction in another order
     alt <- colnames(X)[sorted_term(colnames(X)) == sorted_term(design$target)]
     if (length(alt) != 1) stop("design ", design$design, ": no coefficient ", design$target)
     colnames(X)[colnames(X) == alt] <- design$target
   }
-  g <- as.integer(factor(pan$group)); n_g <- tabulate(g)
+  key <- i * 4L + phase_code[rows]
+  g <- match(key, unique(key)); n_g <- tabulate(g)   # the patient-phase of each row
   centre <- function(m) m - (rowsum(m, g, reorder = TRUE) / n_g)[g, , drop = FALSE]   # within patient-phase
   Z <- centre(X * pan$t)                          # slopes: every column times time
-  keep <- which(apply(Z, 2, function(z) sum(z^2)) > 1e-10)
+  keep <- which(colSums(Z^2) > 1e-10)
   qrz <- qr(Z[, keep, drop = FALSE])
   keep <- keep[qrz$pivot[seq_len(qrz$rank)]]
   if (!design$target %in% colnames(Z)[keep]) return(empty)
@@ -239,8 +265,8 @@ prepare_design <- function(design, patients, panel) {
   # how much of the target's own variation is left beside the other terms
   partial_r2 <- if (ncol(Z) > 1) 1 - 1 / (ZtZ_inv[k, k] * sum(Z[, k]^2)) else 0
   list(ok = TRUE, design = design$design, sign = design$sign, Z = Z, ZtZ_inv = ZtZ_inv, k = k,
-       centre = centre, cluster = as.integer(factor(pan$id)), row_key = paste(pan$id, pan$phase, pan$t),
-       n_patients = n_distinct(pan$id), n_obs = nrow(pan), n_by_arm = n_by_arm,
+       centre = centre, cluster = match(i, patient_rows), rows = rows,
+       n_patients = length(patient_rows), n_obs = length(rows), n_by_arm = n_by_arm,
        partial_r2 = partial_r2, df_resid = nrow(Z) - ncol(Z) - max(g))
 }
 
@@ -257,58 +283,18 @@ fit_design <- function(prep, y) {
          resid_sd = sqrt(sum(resid^2) / max(prep$df_resid, 1)))
 }
 # the outcome of a panel in a prepared design's row order
-align_outcome <- function(prep, panel, column = "y")
-  panel[[column]][match(prep$row_key, paste(panel$id, panel$phase, panel$t))]
+align_outcome <- function(prep, panel, column = "y") panel[[column]][prep$rows]
 
-# ---- The planted truth ----------------------------------------------------------
-# A semisynthetic outcome on the site's own patients, phases and measurement times:
-# only the marker values are replaced. Slopes are in log units per day; A is the
-# confounding demographic index (standardised age by default). The trajectory is
-# continuous and piecewise linear, with these slopes:
-#   every phase   illness + sev * severity + d_all * A * (arm_scale in the control)
-#   after t0      + acute + d_acute * A                        (both arms)
-#   ventilated    + d_vent * A + beta * (lambda + log VT/PBW)  (on the ventilator only)
-#   after t_off   the after-t0 terms stay; the ventilated terms stop
-# beta is the truth every design is scored against: the lambda gradient of the slope
-# while ventilated, at a fixed VT/PBW.
-plant_outcome <- function(panel, patients, truth, noise, rng_seed) {
-  set.seed(rng_seed)
-  A <- switch(truth$index, age = patients$age_z,
-              sex = as.numeric(patients$sex_category == "Female") - mean(patients$sex_category == "Female"),
-              stop("unknown confounding index ", truth$index))
-  n <- nrow(patients); vent <- patients$vent
-  u_level <- rnorm(n, 0, noise$sd_level)
-  s_all  <- noise$illness + noise$sev * patients$sofa_z + rnorm(n, 0, noise$sd_slope) +
-    truth$d_all * A * ifelse(vent == 1, 1, truth$arm_scale)
-  s_t0   <- noise$acute + truth$d_acute * A
-  s_vent <- vent * (truth$d_vent * A + truth$beta * (patients$ldisc + patients$lv0))
-  i <- match(panel$id, patients$id)
-  t_on  <- pmax(panel$t, 0)                                           # time since t0
-  t_vnt <- pmin(t_on, dplyr::coalesce(patients$t_off_d[i], Inf))      # time on the ventilator
-  panel$y_sim <- u_level[i] + s_all[i] * panel$t + s_t0[i] * t_on + s_vent[i] * t_vnt +
-    rnorm(nrow(panel), 0, noise$sd_resid)
-  panel
-}
-# The slope per unit of the confounding index that gives the unadjusted model the same
-# lambda gradient as a strain effect of size beta: beta * var(lambda) / cov(lambda, A),
-# in the ventilated patients.
-confounding_equal_to <- function(beta, patients, index) {
-  v <- patients[patients$vent == 1, ]
-  A <- switch(index, age = v$age_z, sex = as.numeric(v$sex_category == "Female") - mean(v$sex_category == "Female"))
-  beta * var(v$ldisc) / cov(v$ldisc, A)
-}
-
-# Noise for the planted outcome, read off the site's observed marker: the residual SD
-# around each patient-phase line and the between-patient SDs of level and slope.
-observed_noise <- function(panel) {
-  per <- panel %>% group_by(id, phase) %>%
-    summarise(n = n(), sxx = sum((t - mean(t))^2), level = mean(y),
-              slope = sum((t - mean(t)) * (y - mean(y))) / sxx,
-              rss = sum((y - mean(y) - slope * (t - mean(t)))^2), .groups = "drop")
-  sd_resid <- sqrt(sum(per$rss) / max(sum(per$n - 2), 1))
-  on <- per %>% filter(phase == "on")
-  # slope variance beyond what measurement noise alone would give a fitted line
-  sd_slope <- sqrt(max(weighted.mean((on$slope - weighted.mean(on$slope, on$sxx))^2 - sd_resid^2 / on$sxx, on$sxx), 0))
-  list(sd_resid = sd_resid, sd_slope = sd_slope, sd_level = sd(on$level),
-       illness = weighted.mean(on$slope, on$sxx), sev = 0, acute = 0)
+# Fit every design to one panel: one row per design (NA where not estimable)
+fit_all_designs <- function(designs, patients, panel, column = "y") {
+  out <- vector("list", nrow(designs))
+  for (i in seq_len(nrow(designs))) {
+    prep <- prepare_design(designs[i, ], patients, panel)
+    fit <- if (prep$ok) fit_design(prep, align_outcome(prep, panel, column)) else
+      tibble(design = prep$design, estimate = NA_real_, se = NA_real_, resid_sd = NA_real_)
+    fit$n_patients <- prep$n_patients; fit$n_obs <- prep$n_obs
+    fit$partial_r2 <- if (prep$ok) prep$partial_r2 else NA_real_
+    out[[i]] <- fit
+  }
+  dplyr::bind_rows(out)
 }

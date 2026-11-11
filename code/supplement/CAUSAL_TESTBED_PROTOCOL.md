@@ -1,0 +1,183 @@
+# Simulation protocol: the planted-truth test of the causal designs
+
+This is the protocol for `causal_testbed.R`. It follows the ADEMP layout for simulation
+studies (Morris, White and Crowther, *Statistics in Medicine* 2019): aims,
+data-generating mechanisms, estimand, methods, performance measures. The scenarios, the
+decision rule and the performance measures below were fixed before the full run. They
+were developed on single simulated sites and on runs of 8 to 12 replicates, which were
+used to find coding errors and to check run time, not to choose scenarios by their
+results.
+
+## 1. Aims
+
+The hypothesis is that, at a fixed VT/PBW, a high VT/PFVC causes organ injury. At a fixed
+VT/PBW, VT/PFVC moves only with λ = log(PBW/PFVC), which age, sex and race explain almost
+entirely (R² about 0.99). `causal_triangulation.R` therefore estimates one quantity from
+fifteen designs that fail under different assumptions. The simulation asks:
+
+1. Is each estimator correct when its model is true? (stage `matched`)
+2. What does each design return under confounders it was and was not built for, when the
+   data are not generated from its model? (stages `realistic`, `stress`)
+3. Does a single rule fixed in advance, applied to all fifteen estimates, separate a strain
+   effect from confounding, and how often is it wrong in each direction? (the decision rule)
+4. What effect can a site of this size detect? (stage `power`)
+5. Does pooling across sites keep its nominal error rates when sites differ? (stage `multisite`)
+
+## 2. Data-generating mechanisms
+
+**Kept from the site.** Each patient's cohort (ventilated or no support), age, sex, race,
+height, PBW, λ, index VT/PBW, SOFA and SpO2/FiO2, and their hospital time before t0. No
+marker value, measurement time or exit time is kept.
+
+**Generated.** For patient *i* at time *t* (days from t0), the log marker is
+
+    y_i(t) = level_i + m_c(t) + [u_i·t + a_i(t) + c_i(t) + s_i(t)] + AR_i(t) + e_i(t)
+
+| Term | Meaning | Matched | Realistic base |
+|---|---|---|---|
+| `m_c(t)` | the cohort's mean path: its observed mean slope in each phase, joined at t0 and at liberation | yes | yes |
+| `u_i` | a slope of the patient's own, plus `u_slope` × an unmeasured severity | severity off | `u_slope` 0.5 slope-SDs |
+| `a_i(t)` | curvature: an acute change at t0 that recovers by day 7, with a patient-specific bend | off | on |
+| `c_i(t)` | confounding: an index of the demographics times a slope, in every phase (`d_all`, scaled by `arm_scale` in the control), after t0 in both cohorts (`d_acute`), or on the ventilator only (`d_vent`) | per scenario | per scenario |
+| `s_i(t)` | strain: β × dose × accrued ventilator time. Dose is log VT over the patient's true lung size, λ + log VT/PBW − (lung-size deviation) | linear, no deviation | linear, deviation SD 0.13 |
+| `AR_i(t)` | a stationary autocorrelated process (correlation 0.7 per day) carrying `ar_share` of the residual variance | 0 | 0.5 |
+| `e_i(t)` | measurement error, Gaussian or Student t with `error_df` degrees of freedom | Gaussian | t, 5 df |
+
+**Measurement.** Two parts: whether a marker is followed at all in a phase, and then a
+schedule of draws at roughly regular intervals. With `info_measure` > 0 the interval
+shortens when the marker is worse than expected for that patient (0 matched, 0.3
+realistic, 1 under stress).
+
+**Exits.** On a 6-hour grid a ventilated patient may be liberated or die, and a control may
+escalate or die, with hazards calibrated to the site. With `info_off` and `info_death` > 0,
+liberation is slower, and escalation and death faster, when the marker is worse (0 matched;
+0.3 and 0.5 realistic; 1 and 1.5 under stress). The analysis does not model exits.
+
+**Calibration.** Residual SD and mean slope are read from the site by cohort and phase;
+the slope SD, level SD, exit hazards, share of patients followed and draws per phase are
+read from the site. The generator is then tuned (eight damped passes, at no effect) so that
+the *analysis* reads the same residual SD, mean slope, slope SD and sampling off a simulated
+site as off the real one. `causal_testbed_realism_<site>.csv` reports observed against
+simulated for every summary, including two that are not tuned (the span of a phase and the
+lag-1 autocorrelation of the residuals).
+
+**Confounder size.** Unless stated, a confounder's slope is set so that the unadjusted
+model sees exactly the λ gradient a strain effect β would give:
+`d = β · var(λ) / cov(λ, index)`. Three scenarios depart from that: half, double, and the
+age gradient estimated in the site's own controls.
+
+**Scenarios.**
+
+| Stage | Scenarios |
+|---|---|
+| `matched` (8) | null; strain; age in every phase; age, weaker in controls (30%); age from t0 in both cohorts; age on the ventilator only; sex on the ventilator only; strain plus age in every phase |
+| `realistic` (14) | the same eight; a composite of age, sex, race and height on the ventilator; the demographics in GLI's own proportions on the ventilator; an age effect that starts at 65; age at half and at twice the size; age as observed in the controls |
+| `stress` (22) | one change from the realistic base. With and without strain: strongly informative exits; strongly informative measurement; t errors with 3 df; autocorrelation 0.9 with 80% of the variance; VT set by predicted size and unmeasured severity; the same with the VT/PBW 6–8 gate. With strain only: a threshold in dose; an effect that saturates (3-day constant); an effect delayed by a day; an effect 0.3 times as large in patients with hospital time before intubation; positive pressure before the recorded intubation in 40%; 3 cm error in charted height; lung-size deviation SD 0.25; strain following GLI at age 25; strain following GLI without race. And strongly informative exits with age in every phase |
+| `power` (5) | strain at 0.25, 0.5, 0.75, 1 and 1.5 times the planted effect |
+
+The planted effect is 0.15 log units per day per log unit of VT/PFVC in the direction of
+injury (about 2% a day per SD of λ).
+
+## 3. Estimand
+
+The ventilation-specific change in the marker's slope per log unit of λ, at a fixed VT/PBW.
+In every scenario the truth is computed from the planted quantities with no noise: the
+least-squares gradient, on the λ the analysis uses and with log VT/PBW held, of each
+ventilated patient's planted strain effect per day over the 7-day window. With a linear
+effect on GLI's λ this is β. With a threshold, a saturating or delayed time course, or
+another denominator, it is the linear summary a design can at best return, and it is
+reported for each scenario (`truth`).
+
+## 4. Methods
+
+The fifteen designs of `causal_common.R`, each a least-squares regression with an intercept
+for every patient-phase and standard errors clustered on the patient: `unadjusted`,
+`adjusted`, `fingerprint`, `control_did`, `within_onoff`, `within_triple`, `off_reversal`,
+and `free_age`, `free_sex`, `free_race`, `free_height`, each also as a
+ventilated-minus-control contrast (`_did`). A design needs 50 patients per arm with the
+phases it reads; otherwise it is not estimable in that replicate and is counted
+(`n_not_estimable`).
+
+## 5. Performance measures
+
+Per marker, scenario and design, over the replicates in which the design was estimable:
+
+| Measure | Definition | Monte Carlo SE |
+|---|---|---|
+| Bias | mean(estimate − truth) | SD(estimate − truth) / √n |
+| Empirical SE | SD(estimate) | SE / √(2(n − 1)) |
+| Model SE | √mean(SE²), and its ratio to the empirical SE | |
+| Coverage | share of 95% intervals containing the truth | √(p(1 − p)/n) |
+| Rejection rate | share with \|estimate / SE\| > 1.96 | √(p(1 − p)/n) |
+| MDE | 2.80 × empirical SE (80% power, two-sided 5%) | |
+
+With 1,000 replicates the Monte Carlo SE of a coverage of 95% is 0.7 percentage points and
+of any rate at most 1.6. A design is labelled, per scenario: **biased** (bias above a
+quarter of the planted effect and above three Monte Carlo SEs), **undercovers** (not biased,
+coverage below 90% beyond three Monte Carlo SEs), **underpowered** (neither, MDE above the
+planted effect), or **ok**.
+
+## 6. The decision rule
+
+One site's fifteen estimates support the hypothesis only if all of these hold, in the
+direction of injury, at two-sided 5%:
+
+1. **Between cohorts.** `control_did` is significant.
+2. **Within patients.** `off_reversal` or `within_onoff` is significant, and neither is
+   significant in the opposite direction.
+3. **Not age, not sex.** `free_age_did` and `free_sex_did` are each significant.
+4. **The rungs agree.** All four `free_*_did` estimates have the sign of injury and lie
+   within a factor of two of `control_did`.
+
+A design that is not estimable counts as not significant. The rule is scored as a whole:
+the share of simulated sites it calls "supports", which is a false-positive rate where no
+strain effect was planted and power where one was. It is compared with two single analyses
+a reader might otherwise rely on: the unadjusted model alone and the control contrast alone.
+
+The rule cannot separate strain from a path that acts only during ventilation through the
+demographics in GLI's own proportions. That scenario (`gli_ventilation`) is included so that
+its false-positive rate is reported, not hidden.
+
+## 7. Multisite
+
+Four sites per replicate. Each is the site's patients resampled with replacement, with its
+own strain effect (between-site SD 30% of β), confounder size (log-normal, SD 0.3) and
+residual SD (uniform 0.8 to 1.25). Each design is pooled by common-effect inverse variance
+(the repository's convention for two or three sites) and by DerSimonian–Laird random
+effects, under four truths (null, strain, strain plus age, age weaker in controls), and
+scored against the mean effect β with the measures of section 5.
+
+## 8. Verification
+
+- `causal_tests.R` (no patient data): the estimator and its clustered standard error
+  against least squares with a dummy for every patient-phase; exact recovery of the planted
+  effect by all fifteen designs when there is no noise; exact removal of an age confounder
+  by the designs that free age; the generator's own rules; the per-phase lines used for
+  calibration against `lm`; the decision rule against its definition.
+- Stage `crosscheck`: `unadjusted`, `control_did`, `free_age_did` and `within_onoff` are
+  refitted with a linear mixed model (`nlme::lme`, random level and slope per patient) on
+  the same simulated sites, and the two estimates are compared.
+
+## 9. Reproducibility
+
+Replicate *r* of scenario *c* has seed `20261111 + 100000·c + r`, whatever the number of
+parallel processes. Parallel work uses separate R processes (PSOCK), not forks, so the same
+code runs on Windows, macOS and Linux. Packages are pinned in `uvr.lock`.
+
+    uvr run code/supplement/causal_tests.R
+    uvr run code/supplement/causal_testbed.R
+
+Settings are environment variables listed in the script's header; in PowerShell set them
+with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
+
+## 10. Limits
+
+- The generator is calibrated to whichever site runs it. Until it is run at a site with
+  real data, the measurement grid, noise and exit rates are those of synthetic CLIF data.
+- Hazards are log-linear in how much worse the marker is than expected; other forms of
+  informative exit are not covered.
+- Whether a marker is followed is drawn independently in each phase.
+- Confounders act on the slope, not on the level or on the chance of being measured.
+- The two markers are simulated separately, so no joint verdict across markers is scored.
+- The analysis under test is the longitudinal model alone. The joint model of
+  `22_biotrauma_fit.R` is not part of this study.

@@ -77,16 +77,9 @@ for (m in seq_len(nrow(CAUSAL_MARKERS))) {
   phases[[marker]] <- panel %>% inner_join(patients %>% select(id, arm), by = "id") %>%
     group_by(arm, phase) %>% summarise(n_patients = n_distinct(id), n_measurements = n(), .groups = "drop") %>%
     mutate(marker = marker, .before = 1)
-  for (i in seq_len(nrow(designs))) {
-    prep <- prepare_design(designs[i, ], patients, panel)
-    fit  <- if (prep$ok) fit_design(prep, align_outcome(prep, panel)) else
-      tibble(design = prep$design, estimate = NA_real_, se = NA_real_)
-    estimates[[length(estimates) + 1]] <- fit %>%
-      mutate(marker = marker, injury_sign = CAUSAL_MARKERS$injury_sign[m],
-             n_patients = prep$n_patients, n_obs = prep$n_obs,
-             partial_r2 = if (prep$ok) prep$partial_r2 else NA_real_,
-             formula = designs$formula[i], target = designs$target[i], fails_if = designs$fails_if[i])
-  }
+  estimates[[marker]] <- fit_all_designs(designs, patients, panel) %>%
+    mutate(marker = marker, injury_sign = CAUSAL_MARKERS$injury_sign[m]) %>%
+    left_join(designs %>% select(design, formula, target, fails_if), by = "design")
 }
 estimates <- bind_rows(estimates) %>%
   mutate(site = site_name, cohort = if (config$vtpbw_gate == "0") "ungated" else "gated",
