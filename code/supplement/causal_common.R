@@ -580,3 +580,165 @@ triangulation_supports_both <- function(fits_held, fits_dropped, sign) {
   c(rule_both = held[["rule"]] && dropped[["rule"]], rule_held = held[["rule"]], rule_dropped = dropped[["rule"]],
     unadjusted_alone = held[["unadjusted_alone"]], control_did_alone = held[["control_did_alone"]])
 }
+
+# ---- Injury and death as states (causal_illness_death.R) ---------------------------
+# A threshold turns a marker into a state a patient enters once; death is then the
+# state after it, or the state reached without it. See causal_illness_death.R for the
+# reading. Settings:
+HORIZON_DAYS   <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_HORIZON", "28"))    # death is followed this long
+INJURY_GRACE_H <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_GRACE_H", "6"))     # labs up to here are baseline
+AKI_STAGE      <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_AKI_STAGE", "2"))   # KDIGO stage counted as injury: 2 or 1
+PLT_BELOW      <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_PLT_BELOW", "100"))
+PLT_FALL       <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_PLT_FALL", "0.5"))
+PRESSOR_MIN    <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_PRESSOR_MIN", "0"))
+MIN_EVENTS     <- 20L           # a transition with fewer events in an arm is not estimated
+if (!AKI_STAGE %in% 1:2) stop("PBWPFVC_CAUSAL_AKI_STAGE must be 1 or 2")
+INJURY_MARKERS <- c(
+  creatinine = if (AKI_STAGE == 2) "KDIGO stage 2 or worse: creatinine at least 2x baseline, or renal replacement started" else
+    "KDIGO stage 1 or worse: creatinine at least 1.5x baseline or up 0.3 mg/dL within 48 h, or renal replacement started",
+  platelets = paste0("platelet count below ", PLT_BELOW, ", or a fall of at least ", 100 * PLT_FALL, "% from baseline"),
+  pressor = if (PRESSOR_MIN > 0) paste0("norepinephrine-equivalent rate of at least ", PRESSOR_MIN, " mcg/kg/min after t0") else
+    "any vasopressor after t0")
+ILLNESS_DEATH_TRANSITIONS <- c("injury", "death without injury", "death after injury", "death, any")
+CONTRAST <- "contrast: injury minus death without injury"
+
+# When each patient is first injured: one row per patient with
+#   eligible   has a baseline and is not already past the threshold at the end of it
+#   reason     why not, otherwise "eligible"
+#   t_injury   days from t0 of the first crossing in the on phase; NA if none
+# `values` (id, t, value) may be given in place of the site's files (the testbed does).
+load_injury_times <- function(config, patients, marker, values = NULL, rrt = NULL) {
+  grace <- INJURY_GRACE_H / 24
+  who <- patients %>% transmute(id, t0, on_end = pmin(dplyr::coalesce(t_off_d, Inf), ON_DAYS))
+  days_from_t0 <- function(d, time) d %>% inner_join(who %>% select(id, t0), by = "id") %>%
+    mutate(t = as.numeric(difftime(.data[[time]], t0, units = "days"))) %>% select(-t0)
+  if (marker == "pressor") {
+    if (is.null(values)) values <- purrr::map_dfr(both_cohorts(config, "ne_equiv_admin.parquet"), function(f)
+      arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, value = ne_equiv_total)) %>% days_from_t0("dttm")
+    running <- values %>% filter(is.finite(value), value > 0, value >= PRESSOR_MIN)
+    out <- who %>%
+      left_join(running %>% filter(t >= -1, t < 0) %>% distinct(id) %>% mutate(before = TRUE), by = "id") %>%
+      left_join(running %>% filter(t >= 0) %>% group_by(id) %>% summarise(first = min(t), .groups = "drop"), by = "id") %>%
+      mutate(eligible = is.na(before), reason = if_else(eligible, "eligible", "already injured at baseline"))
+  } else {
+    lab <- c(creatinine = "creatinine", platelets = "platelet_count")[[marker]]
+    if (is.null(values)) values <- purrr::map_dfr(both_cohorts(config, "cohort_labs_clean.parquet"), function(f) {
+      labs <- arrow::read_parquet(f)
+      col <- intersect(c("lab_value_numeric", "lab_value"), names(labs))[1]
+      labs %>% filter(lab_category == lab) %>%
+        transmute(id = hospitalization_id, dttm = lab_result_dttm, value = suppressWarnings(as.numeric(.data[[col]])))
+    }) %>% days_from_t0("dttm")
+    values <- values %>% filter(is.finite(value), value > 0) %>% arrange(id, t)
+    best <- if (marker == "creatinine") min else max
+    base <- values %>% filter(t <= grace) %>% group_by(id) %>%
+      summarise(baseline = best(value), last = dplyr::last(value), .groups = "drop")
+    later <- values %>% filter(t > grace) %>% inner_join(base, by = "id")
+    if (marker == "creatinine") {
+      ratio <- if (AKI_STAGE == 2) 2 else 1.5
+      base <- base %>% mutate(already = last >= ratio * baseline)
+      later <- later %>% mutate(crossed = value >= ratio * baseline)
+      if (AKI_STAGE == 1) {                       # or up 0.3 mg/dL on the lowest value of the 48 hours before
+        low48 <- function(t, v) vapply(seq_along(t), function(k) { w <- t < t[k] & t >= t[k] - 2; if (any(w)) min(v[w]) else NA_real_ }, numeric(1))
+        rise <- values %>% group_by(id) %>% mutate(low = low48(t, value)) %>% ungroup() %>%
+          filter(!is.na(low), value - low >= 0.3)
+        base <- base %>% mutate(already = already | id %in% rise$id[rise$t <= grace])
+        later <- later %>% left_join(rise %>% transmute(id, t, rose = TRUE), by = c("id", "t")) %>%
+          mutate(crossed = crossed | dplyr::coalesce(rose, FALSE))
+      }
+      # renal replacement: script 01's CRRT and dialysis records, where the site has them
+      if (is.null(rrt) && !is.null(config)) rrt <- purrr::map_dfr(c("cohort_crrt.parquet", "cohort_dialysis.parquet"), function(file)
+        purrr::map_dfr(c(config$output_dir, file.path(config$output_dir, "controls", "nosupport")), function(dir) {
+          f <- file.path(dir, file)
+          if (!file.exists(f)) return(NULL)
+          arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = recorded_dttm)
+        })) %>% { if (nrow(.)) days_from_t0(., "dttm") else tibble(id = character(), t = numeric()) }
+      if (!is.null(rrt) && nrow(rrt)) {
+        base <- base %>% mutate(already = already | id %in% rrt$id[rrt$t <= grace])
+        later <- bind_rows(later, rrt %>% filter(t > grace, id %in% base$id) %>% mutate(crossed = TRUE))
+      }
+    } else {
+      base <- base %>% mutate(already = last < PLT_BELOW | last <= (1 - PLT_FALL) * baseline)
+      later <- later %>% mutate(crossed = value < PLT_BELOW | value <= (1 - PLT_FALL) * baseline)
+    }
+    out <- who %>% left_join(base %>% select(id, baseline, already), by = "id") %>%
+      left_join(later %>% filter(crossed) %>% group_by(id) %>% summarise(first = min(t), .groups = "drop"), by = "id") %>%
+      mutate(eligible = !is.na(baseline) & !already,
+             reason = case_when(is.na(baseline) ~ "no baseline value", already ~ "already injured at baseline", TRUE ~ "eligible"))
+  }
+  out %>% transmute(id, eligible, reason, t_injury = if_else(eligible & !is.na(first) & first < on_end, first, NA_real_))
+}
+
+# One row per patient with the three states' times, days from t0:
+#   t_injury   first injury, if before death and the end of follow-up
+#   t_death    death within the horizon and the follow-up; NA otherwise
+#   t_end      end of follow-up: death, the horizon, or (control) escalation of support
+illness_death_states <- function(patients, injury, horizon = HORIZON_DAYS) {
+  patients %>% inner_join(injury, by = "id") %>%
+    mutate(follow = if_else(vent == 1, horizon, pmin(horizon, dplyr::coalesce(t_off_d, Inf))),
+           t_death = if_else(!is.na(death_d) & death_d <= follow, pmax(death_d, 1e-3), NA_real_),
+           t_end = pmin(follow, dplyr::coalesce(t_death, Inf)),
+           t_injury = if_else(!is.na(t_injury) & t_injury < t_end, pmax(t_injury, 1e-4), NA_real_)) %>%
+    filter(t_end > 0)
+}
+illness_death_counts <- function(states) {
+  states %>% group_by(arm) %>%
+    summarise(n_patients = n(), no_baseline = sum(reason == "no baseline value"),
+              already_injured = sum(reason == "already injured at baseline"), eligible = sum(eligible),
+              injured = sum(!is.na(t_injury[reason == "eligible"])),
+              died_without_injury = sum(reason == "eligible" & is.na(t_injury) & !is.na(t_death)),
+              died_after_injury = sum(reason == "eligible" & !is.na(t_injury) & !is.na(t_death)), .groups = "drop")
+}
+# the counting-process rows of one transition, eligible patients only
+transition_rows <- function(states, transition) {
+  s <- states[states$eligible, , drop = FALSE]
+  on_end <- pmin(dplyr::coalesce(s$t_off_d, Inf), ON_DAYS)
+  injured <- !is.na(s$t_injury); died <- !is.na(s$t_death)
+  s$start <- 0
+  if (transition == "injury") {
+    s$stop <- pmin(dplyr::coalesce(s$t_injury, Inf), on_end, s$t_end); s$event <- as.numeric(injured)
+  } else if (transition == "death without injury") {
+    s$stop <- pmin(dplyr::coalesce(s$t_injury, Inf), s$t_end); s$event <- as.numeric(died & !injured)
+  } else if (transition == "death after injury") {
+    s <- s[injured, , drop = FALSE]; s$start <- s$t_injury; s$stop <- s$t_end; s$event <- as.numeric(!is.na(s$t_death))
+  } else if (transition == "death, any") {
+    s$stop <- s$t_end; s$event <- as.numeric(died)
+  } else stop("unknown transition ", transition)
+  s[s$stop > s$start, , drop = FALSE]
+}
+# The lambda gradient of every transition's hazard under every single-phase design: a
+# Cox model stratified by cohort, robust standard errors from each patient's influence.
+fit_illness_death <- function(designs, states) {
+  designs <- designs[vapply(designs$phases, function(p) identical(p, "on"), logical(1)), ]
+  states$lv_on <- states$lv0; states$on <- 1
+  one <- function(design, transition) {
+    arms <- design$arms[[1]]
+    d <- transition_rows(states[states$arm %in% arms, , drop = FALSE], transition)
+    out <- tibble::tibble(design = design$design, transition = transition, estimate = NA_real_, se = NA_real_,
+                          n_patients = nrow(d), n_events = sum(d$event))
+    events <- table(factor(d$arm[d$event == 1], levels = arms))
+    if (any(events < MIN_EVENTS)) return(list(row = out, influence = NULL))
+    # the cohort is a stratum, so its own term goes; everything else is the design's formula
+    rhs <- update(as.formula(design$formula), ~ . - vent)
+    form <- as.formula(paste("survival::Surv(start, stop, event) ~", paste(deparse(rhs[[2]], width.cutoff = 500), collapse = " "),
+                             "+ survival::strata(vent)"))
+    fit <- tryCatch(suppressWarnings(survival::coxph(form, data = d, ties = "efron")), error = function(e) NULL)
+    k <- if (is.null(fit)) integer() else which(sorted_term(names(coef(fit))) == sorted_term(design$target))
+    if (length(k) != 1 || is.na(coef(fit)[[k]])) return(list(row = out, influence = NULL))
+    infl <- residuals(fit, type = "dfbeta"); if (is.null(dim(infl))) infl <- matrix(infl, ncol = 1)
+    out$estimate <- coef(fit)[[k]]; out$se <- sqrt(sum(infl[, k]^2))
+    list(row = out, influence = setNames(infl[, k], d$id))
+  }
+  dplyr::bind_rows(lapply(seq_len(nrow(designs)), function(i) {
+    fits <- lapply(setNames(ILLNESS_DEATH_TRANSITIONS, ILLNESS_DEATH_TRANSITIONS), function(tr) one(designs[i, ], tr))
+    rows <- dplyr::bind_rows(lapply(fits, `[[`, "row"))
+    a <- fits[["injury"]]; b <- fits[["death without injury"]]
+    contrast <- tibble::tibble(design = designs$design[i], transition = CONTRAST, estimate = NA_real_, se = NA_real_,
+                               n_patients = a$row$n_patients, n_events = NA_integer_)
+    if (!is.null(a$influence) && !is.null(b$influence)) {
+      ids <- union(names(a$influence), names(b$influence)); diff <- setNames(numeric(length(ids)), ids)
+      diff[names(a$influence)] <- a$influence; diff[names(b$influence)] <- diff[names(b$influence)] - b$influence
+      contrast$estimate <- a$row$estimate - b$row$estimate; contrast$se <- sqrt(sum(diff^2))
+    }
+    dplyr::bind_rows(rows, contrast)
+  }))
+}

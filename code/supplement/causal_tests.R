@@ -18,6 +18,8 @@
 #      cumulative effect is the planted effect times the days, and its standard error
 #      from added influences equals the direct one where the two can be compared
 #   8. the VT/PBW gradient equals the lambda gradient when strain is planted
+#   9. injury and death as states: the thresholds, who is left out, which transition
+#      each patient's events are counted in, and the gradients of a simulated site
 # Stops at the first failure; prints "all tests passed" otherwise.
 #
 # Usage: uvr run code/supplement/causal_tests.R
@@ -198,5 +200,46 @@ message("8. The gradient on VT/PBW")
 f <- fit_design(prepare_design(designs[designs$design == "unadjusted", ], exact$patients, exact$panel),
                 exact$panel$y[exact$panel$phase == "on" & exact$panel$id %in% exact$patients$id[exact$patients$vent == 1]])
 check(abs(f$vt_gradient + 0.15) < 1e-6, "with strain planted on log VT - log size, the VT/PBW gradient equals the lambda gradient")
+
+# ---- 9. injury and death as states ---------------------------------------------------------------
+message("9. Injury and death as states")
+six <- data.frame(id = paste0("q", 1:6), t0 = 0, t_off_d = c(NA, NA, NA, NA, 3, NA), stringsAsFactors = FALSE)
+creat <- data.frame(id = c("q1", "q1", "q1", "q2", "q2", "q3", "q4", "q4", "q5", "q5", "q6", "q6"),
+                    t  = c(-1, 0.1, 2,    -1, 0.2,   1,    0, 5,      0, 4,       0, 8),
+                    value = c(1, 1.1, 2.3, 1, 2.5,   3,    1, 1.9,    1, 2.5,     1, 3))
+inj <- load_injury_times(NULL, six, "creatinine", values = creat)
+check(identical(inj$reason, c("eligible", "already injured at baseline", "no baseline value", "eligible", "eligible", "eligible")),
+      "creatinine: eligible, already injured at baseline, and no baseline are told apart")
+check(isTRUE(all.equal(inj$t_injury, c(2, NA, NA, NA, NA, NA))),
+      "creatinine doubles from the lowest baseline value: injured then; 1.9x, after liberation, or after the window: not")
+plt <- data.frame(id = c("q1", "q1", "q2", "q2", "q3", "q3", "q4", "q4"), t = c(0, 1, 0, 2, 0, 1, 0, 1),
+                  value = c(200, 90, 400, 190, 80, 70, 200, 150))
+inj_p <- load_injury_times(NULL, six[1:4, ], "platelets", values = plt)
+check(isTRUE(all.equal(inj_p$t_injury, c(1, 2, NA, NA))) && inj_p$reason[3] == "already injured at baseline",
+      "platelets: below 100, or half of baseline; a count already below 100 is left out")
+ne <- data.frame(id = c("q1", "q2", "q2", "q3"), t = c(1.5, -0.5, 1, 0.2), value = c(0.1, 0.05, 0.1, 0))
+inj_v <- load_injury_times(NULL, six[1:4, ], "pressor", values = ne)
+check(isTRUE(all.equal(inj_v$t_injury, c(1.5, NA, NA, NA))) && inj_v$reason[2] == "already injured at baseline",
+      "pressor: the first rate above zero after t0; one running the day before is left out")
+st <- data.frame(id = paste0("r", 1:5), arm = "ventilated", vent = 1, t_off_d = NA_real_, death_d = c(NA, 5, 5, 40, 2),
+                 eligible = TRUE, reason = "eligible", t_injury = c(NA, NA, 2, 3, 4), stringsAsFactors = FALSE)
+st <- illness_death_states(st[setdiff(names(st), c("eligible", "reason", "t_injury"))], st[c("id", "eligible", "reason", "t_injury")], horizon = 28)
+ev <- function(tr) { r <- transition_rows(st, tr); setNames(r$event, r$id) }
+check(identical(unname(ev("injury")), c(0, 0, 1, 1, 0)), "an injury after death is not an injury")
+check(identical(unname(ev("death without injury")), c(0, 1, 0, 0, 1)), "death without injury: the patients who died uninjured")
+check(identical(ev("death after injury"), c(r3 = 1, r4 = 0)), "death after injury: the injured only, a death past the horizon not counted")
+check(sum(ev("death, any")) == sum(ev("death without injury")) + sum(ev("death after injury")), "every death is counted in exactly one route")
+big <- simulate_site(fab, fab_calib(0.1), scenario(beta = 1.5, base = "matched", info_death = 0.3), sign = 1, seed = 41)
+vals <- rbind(data.frame(id = big$patients$id, t = 0, value = exp(big$patients$level0)),
+              data.frame(id = big$panel$id, t = big$panel$t, value = exp(big$panel$y)))
+big$patients$t0 <- 0
+sts <- illness_death_states(big$patients, load_injury_times(NULL, big$patients, "creatinine", values = vals), horizon = ON_DAYS)
+idm <- fit_illness_death(designs[designs$design == "unadjusted", ], sts)
+check(idm$estimate[idm$transition == "injury"] / idm$se[idm$transition == "injury"] > 3,
+      "a simulated site with a large strain effect: the gradient on injury is clearly positive")
+one_fit <- survival::coxph(survival::Surv(start, stop, event) ~ ldisc + sofa_z + sf_z + lv0, data = transition_rows(sts[sts$vent == 1, ], "injury"), cluster = id)
+check(abs(idm$estimate[idm$transition == "injury"] - coef(one_fit)[["ldisc"]]) < 1e-8 &&
+        abs(idm$se[idm$transition == "injury"] - sqrt(one_fit$var[1, 1])) < 1e-8,
+      "the injury gradient and its robust standard error equal coxph's")
 
 message("\nall tests passed")

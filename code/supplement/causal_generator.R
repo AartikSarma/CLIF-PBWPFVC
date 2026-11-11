@@ -54,6 +54,9 @@ SCENARIO_DEFAULTS <- list(
   curvature = 0, time_shape = "linear", dose_shape = "linear",
   ar_share = 0, ar_rho = 0.7, error_df = Inf, u_slope = 0,
   info_measure = 0, info_off = 0, info_death = 0,
+  # death by routes other than the marker: log hazard per log unit of strain dose in the
+  # ventilated (a direct path from strain to death), and per SD of age in both cohorts
+  death_direct = 0, death_age = 0,
   het_pre = 1, pre_exposure = 0,
   vt_model = "observed", vt_lambda = 0.5, vt_severity = 0.08, vt_sd = 0.12, gate = FALSE,
   sd_lung = 0, height_error_cm = 0, denominator = "gli")
@@ -286,6 +289,7 @@ simulate_site <- function(patients, calib, sc, sign, seed) {
   # --- the clock: measurements and events, one grid step at a time ---
   rate <- calib$rate
   ended <- rep(FALSE, n)                          # dead, or a control escalated
+  t_death <- rep(NA_real_, n)
   extubated <- rep(FALSE, n)
   grid <- seq(-PRE_DAYS, ON_DAYS + POST_DAYS - GRID_STEP, by = GRID_STEP)
   out_id <- out_phase <- out_t <- out_y <- vector("list", length(grid))
@@ -318,10 +322,11 @@ simulate_site <- function(patients, calib, sc, sign, seed) {
     if (t >= 0) {                                 # events take effect at the end of the step
       on <- which(phase == 2L)
       p <- function(h, a) 1 - exp(-h * GRID_STEP * exp(a * worse[on]))
-      dies <- runif(length(on)) < p(calib$death_hazard[arm_i[on]], sc$info_death)
+      other_routes <- exp(sc$death_direct * strain[on] * vent[on] + sc$death_age * patients$age_z[on])
+      dies <- runif(length(on)) < p(calib$death_hazard[arm_i[on]] * other_routes, sc$info_death)
       # liberation is slower when the marker is worse; a control's escalation is faster
       off  <- runif(length(on)) < p(calib$off_hazard[arm_i[on]], ifelse(vent[on], -sc$info_off, sc$info_off))
-      ended[on[dies]] <- TRUE
+      ended[on[dies]] <- TRUE; t_death[on[dies]] <- t + GRID_STEP
       left <- on[off & !dies]
       t_off[left] <- t + GRID_STEP
       extubated[left[vent[left]]] <- TRUE
@@ -336,6 +341,7 @@ simulate_site <- function(patients, calib, sc, sign, seed) {
 
   sim <- patients[keep, , drop = FALSE]
   sim$lv0 <- lv[keep]; sim$t_off_d <- ifelse(is.finite(t_off[keep]), t_off[keep], NA_real_)
+  sim$death_d <- t_death[keep]; sim$level0 <- level[keep]      # the simulated death, and the marker at t0
   # the truth: the planted strain effect per day over the window, as a gradient on
   # the lambda the analysis uses, at a fixed VT/PBW
   v <- vent & keep

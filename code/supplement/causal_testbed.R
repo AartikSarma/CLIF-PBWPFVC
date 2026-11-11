@@ -36,6 +36,11 @@
 #   timecourse  the segment-by-segment estimate of fit_time_course() and its
 #               cumulative effect, beside the straight line, when the effect accrues
 #               steadily, saturates, or starts late.
+#   illness_death  causal_illness_death.R's analysis on simulated sites: the marker as an
+#               injury state, death following the marker, strain directly, or age
+#               alone. There is no closed-form truth for a hazard gradient, so the
+#               table gives the mean estimate, whether the standard error is right,
+#               and how often each transition's gradient is called non-zero.
 #   multisite   four sites that differ in effect, confounding and noise, pooled by
 #               common-effect and by random-effects inverse variance.
 #   crosscheck  the within estimator against a linear mixed model (nlme) on the same
@@ -55,6 +60,7 @@
 #                                          single-analysis comparators, say "supports"
 #   causal_testbed_power_<site>.csv        rejection rate by effect size
 #   causal_testbed_timecourse_<site>.csv   segments, cumulative effect and straight line
+#   causal_testbed_illness_death_<site>.csv  the illness-death gradients under each truth
 #   causal_testbed_multisite_<site>.csv    pooled bias, coverage and rejection rate
 #   causal_testbed_realism_<site>.csv      observed against simulated summaries
 #   causal_testbed_crosscheck_<site>.csv   within estimator against the mixed model
@@ -66,7 +72,7 @@
 #   PBWPFVC_CAUSAL_EFFECT      the planted strain effect, log units per day per log
 #                              unit of VT/PFVC, in the direction of injury (0.15)
 #   PBWPFVC_CAUSAL_MARKERS     platelets,creatinine
-#   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,timecourse,multisite,crosscheck
+#   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,timecourse,illness_death,multisite,crosscheck
 #   PBWPFVC_CAUSAL_WORKERS     parallel R processes (default: cores - 1, at most 8)
 # Runtime: about 0.4 s per simulated site per process; the default is roughly 50,000
 # sites per marker (a few hours on four cores). PBWPFVC_CAUSAL_REPS=100 is a fast look.
@@ -93,7 +99,7 @@ env_list <- function(name, default) strsplit(Sys.getenv(name, default), ",")[[1]
 N_REPS   <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_REPS", "1000"))
 EFFECT   <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_EFFECT", "0.15"))
 MARKERS  <- env_list("PBWPFVC_CAUSAL_MARKERS", "platelets,creatinine")
-STAGES   <- env_list("PBWPFVC_CAUSAL_STAGES", "matched,realistic,stress,power,timecourse,multisite,crosscheck")
+STAGES   <- env_list("PBWPFVC_CAUSAL_STAGES", "matched,realistic,stress,power,timecourse,illness_death,multisite,crosscheck")
 WORKERS  <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_WORKERS", min(8L, max(1L, parallel::detectCores() - 1L))))
 ARM_SCALE <- 0.3                 # age_sicker: the control's share of the ventilated age gradient
 POWER_GRID <- c(0.25, 0.5, 0.75, 1, 1.5)
@@ -107,7 +113,7 @@ ALPHA <- 0.05
 z_crit <- qnorm(1 - ALPHA / 2)
 # the generator makes a log-scale lab; the vasopressor and OSI outcomes are not simulated
 stopifnot(all(MARKERS %in% CAUSAL_MARKERS$marker[CAUSAL_MARKERS$source == "lab"]),
-          all(STAGES %in% c("matched", "realistic", "stress", "power", "timecourse", "multisite", "crosscheck")))
+          all(STAGES %in% c("matched", "realistic", "stress", "power", "timecourse", "illness_death", "multisite", "crosscheck")))
 TIMECOURSE_DESIGNS <- c("unadjusted", "control_did", "free_age_did", "within_onoff", "off_reversal")
 
 patients <- as.data.frame(load_causal_patients(config))
@@ -215,6 +221,18 @@ one_timecourse_replicate <- function(sc, calib, sign, seed) {
                      estimate = line$estimate, se = line$se, truth = sim$truth))
   }))
 }
+# the illness-death analysis of one simulated site. The marker at t0 is the baseline;
+# death is followed over the simulated window.
+ILLNESS_DEATH_DESIGNS <- c("unadjusted", "control_did", "free_age_did")
+one_illness_death_replicate <- function(sc, calib, sign, seed, marker) {
+  sim <- simulate_site(patients, calib, sc, sign, seed)
+  values <- rbind(data.frame(id = sim$patients$id, t = 0, value = exp(sim$patients$level0)),
+                  data.frame(id = sim$panel$id, t = sim$panel$t, value = exp(sim$panel$y)))
+  injury <- load_injury_times(NULL, sim$patients, marker, values = values)
+  states <- illness_death_states(sim$patients, injury, horizon = ON_DAYS)
+  out <- fit_illness_death(designs[designs$design %in% ILLNESS_DEATH_DESIGNS, ], states)
+  data.frame(design = out$design, transition = out$transition, estimate = out$estimate, se = out$se, n_events = out$n_events)
+}
 # A site of a multisite replicate: the site's patients resampled, its own effect,
 # confounder size and noise
 one_multisite_replicate <- function(sc, calib, sign, seed) {
@@ -304,7 +322,7 @@ if (WORKERS > 1) {
 
 # ---- Run ----------------------------------------------------------------------------------
 operating <- list(); decision <- list(); scenario_log <- list(); realism <- list(); multisite <- list(); crosscheck <- list()
-timecourse <- list()
+timecourse <- list(); illness_death <- list()
 started <- Sys.time()
 for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   marker <- CAUSAL_MARKERS$marker[m]; sign <- CAUSAL_MARKERS$injury_sign[m]
@@ -337,6 +355,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       mutate(marker = marker, generator = base, .before = 1)
   }
 
+  if (nrow(cells)) {
   # --- the scenarios ---
   jobs <- expand.grid(rep = seq_len(N_REPS), cell = cells$cell)
   results <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
@@ -357,6 +376,7 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   scenario_log[[marker]] <- cells %>% mutate(marker = marker, .before = 1) %>%
     bind_cols(bind_rows(lapply(cells$params, as_tibble))) %>% select(-params)
   message("  scenarios done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+  }
 
   # --- the time course: is the segment-by-segment estimate right, and what does it cost? ---
   if ("timecourse" %in% STAGES) {
@@ -374,6 +394,35 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
       group_by(scenario, design, quantity, window) %>% group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
       mutate(marker = marker, .before = 1)
     message("  timecourse done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+  }
+
+  # --- injury and death as states ---
+  if ("illness_death" %in% STAGES) {
+    age <- confounding_equal_to(sign * EFFECT, patients, "age")
+    truths <- list(null = scenario(),
+                   # death follows the marker (the realistic base), with strain at 1x and 3x the planted effect
+                   strain = scenario(beta = sign * EFFECT), strain_x3 = scenario(beta = 3 * sign * EFFECT),
+                   # and strain also kills by a route the marker does not see
+                   strain_x3_direct_death = scenario(beta = 3 * sign * EFFECT, death_direct = 3),
+                   # no strain: age raises death in both cohorts; age steepens the marker in both
+                   frailty_death = scenario(death_age = 0.5), age_on_marker = scenario(d_all = 3 * age))
+    if (!is.null(cluster)) parallel::clusterExport(cluster, c("truths", "marker"), envir = environment())
+    jobs <- expand.grid(rep = seq_len(N_REPS), truth = seq_along(truths))
+    states <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
+      out <- one_illness_death_replicate(truths[[job$truth]], calib$realistic, sign, 8000000L + 10000L * job$truth + job$rep, marker)
+      out$scenario <- names(truths)[job$truth]; out
+    })
+    illness_death[[marker]] <- bind_rows(states) %>%
+      mutate(scenario = factor(scenario, levels = names(truths)), transition = factor(transition, levels = unique(transition))) %>%
+      group_by(scenario, design, transition) %>%
+      summarise(n_reps = sum(!is.na(estimate)), n_not_estimable = sum(is.na(estimate)), mean_events = mean(n_events, na.rm = TRUE),
+                mean_estimate = mean(estimate, na.rm = TRUE), mean_mcse = sd(estimate, na.rm = TRUE) / sqrt(n_reps),
+                empirical_se = sd(estimate, na.rm = TRUE), model_se = sqrt(mean(se^2, na.rm = TRUE)), se_ratio = model_se / empirical_se,
+                rejection_rate = mean(abs(estimate / se) > z_crit, na.rm = TRUE),
+                rejection_mcse = sqrt(rejection_rate * (1 - rejection_rate) / n_reps),
+                positive_rate = mean(estimate / se > z_crit, na.rm = TRUE), .groups = "drop") %>%
+      mutate(marker = marker, .before = 1)
+    message("  illness_death done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
   }
 
   # --- multisite ---
@@ -420,6 +469,10 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
 
 # ---- Tables ---------------------------------------------------------------------------------
 tag <- function(d) d %>% mutate(site = site_name, cohort = if (config$vtpbw_gate == "0") "ungated" else "gated", .before = 1)
+# the scenario tables and figures, when a scenario stage was run (a run of the other
+# stages alone leaves the earlier tables in place)
+has_scenarios <- length(operating) > 0
+if (has_scenarios) {
 operating <- bind_rows(operating) %>%
   mutate(planted_effect = EFFECT,
          # A design's verdict on a scenario.
@@ -458,10 +511,13 @@ if ("power" %in% STAGES)
                           transmute(site, cohort, marker, design = rule, effect_multiple, rejection_rate = supports_rate,
                                     rejection_mcse = supports_mcse, n_reps)),
             file.path(final_dir, paste0("causal_testbed_power_", site_name, ".csv")))
+}
 if (length(multisite)) write_csv(bind_rows(multisite) %>% tag(), file.path(final_dir, paste0("causal_testbed_multisite_", site_name, ".csv")))
 if (length(timecourse)) write_csv(bind_rows(timecourse) %>% tag(), file.path(final_dir, paste0("causal_testbed_timecourse_", site_name, ".csv")))
+if (length(illness_death)) write_csv(bind_rows(illness_death) %>% tag(), file.path(final_dir, paste0("causal_testbed_illness_death_", site_name, ".csv")))
 if (length(crosscheck)) write_csv(bind_rows(crosscheck) %>% tag(), file.path(final_dir, paste0("causal_testbed_crosscheck_", site_name, ".csv")))
 
+if (has_scenarios) {
 # ---- Figures -----------------------------------------------------------------------------------
 verdict_colours <- c(ok = "#cfe8d5", underpowered = "#f3e9c0", undercovers = "#f6d6b0", biased = "#f1c9c5", "not estimable" = "grey90")
 pdf(file.path(final_dir, paste0("causal_testbed_", site_name, ".pdf")), width = 14, height = 8.5)
@@ -504,8 +560,10 @@ print(ggplot(d, aes(observed, simulated, colour = paste(arm, phase))) + geom_abl
              x = "Observed", y = paste0("Simulated (mean of ", N_REALISM, " sites, +/- 2 SD)")) +
         theme_bw(base_size = 8) + theme(legend.position = "bottom"))
 invisible(dev.off())
+}
 
 # ---- Console summary -------------------------------------------------------------------------------
+if (has_scenarios) {
 message("\nDecision rule: share of simulated sites called \"supports\" (MCSE)")
 print(as.data.frame(decision %>% filter(stage != "power") %>%
                       transmute(marker, stage, scenario, reading, rule, cell = sprintf("%.3f (%.3f)", supports_rate, supports_mcse)) %>%
@@ -513,4 +571,5 @@ print(as.data.frame(decision %>% filter(stage != "power") %>%
 message("\nDesigns that are biased or undercover, by stage:")
 print(as.data.frame(operating %>% filter(verdict %in% c("biased", "undercovers"), stage != "power") %>%
                       count(marker, stage, vtpbw, design, verdict) %>% pivot_wider(names_from = stage, values_from = n, values_fill = 0)), row.names = FALSE)
+}
 message("\ncausal_testbed complete after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min: ", final_dir)

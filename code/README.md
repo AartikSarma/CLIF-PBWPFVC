@@ -172,11 +172,19 @@ to change; that stops once sites have returned `final/` folders.
   with VT/PBW held and dropped, against relying on the unadjusted model or the control
   contrast alone. Only the two labs are simulated; the vasopressor and OSI models have
   unit tests and no simulation yet.
+  `causal_illness_death.R` gives death its own place instead of treating it as censoring:
+  each marker becomes an injury state by a threshold (KDIGO stage 2 or renal replacement;
+  platelets below 100 or halved; any vasopressor), and the PBW/PFVC gradient is estimated
+  on the hazards of injury, of death without injury and of death after injury, by the
+  same single-phase designs. Strain predicts a larger gradient on injury than on death
+  without injury; frailty predicts one on every route. The testbed's `illness_death`
+  stage runs it on simulated sites where death follows the marker, strain directly, or
+  age alone.
   `causal_tests.R` holds the unit tests and needs no data. All of these are the
   longitudinal model alone, with no joint model for death or liberation. Not in a
-  runner; `causal_triangulation.R` and `causal_testbed.R` each need scripts 01-03 for the
-  ventilated and no-support cohorts, and write `causal_triangulation_` and
-  `causal_testbed_` tables.
+  runner; `causal_triangulation.R`, `causal_illness_death.R` and `causal_testbed.R` each
+  need scripts 01-03 for the ventilated and no-support cohorts, and write
+  `causal_triangulation_`, `causal_illness_death_` and `causal_testbed_` tables.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC, predicted TLC and alveolar volume, and the
   delivered VT on each scale, by arm for an external trial table, `creatinine_positive_control.R` checks that creatinine rises

@@ -78,6 +78,7 @@ age gradient estimated in the site's own controls.
 | `stress` (22) | one change from the realistic base. With and without strain: strongly informative exits; strongly informative measurement; t errors with 3 df; autocorrelation 0.9 with 80% of the variance; VT set by predicted size and unmeasured severity; the same with the VT/PBW 6–8 gate. With strain only: a threshold in dose; an effect that saturates (3-day constant); an effect delayed by a day; an effect 0.3 times as large in patients with hospital time before intubation; positive pressure before the recorded intubation in 40%; 3 cm error in charted height; lung-size deviation SD 0.25; strain following GLI at age 25; strain following GLI without race. And strongly informative exits with age in every phase |
 | `power` (5) | strain at 0.25, 0.5, 0.75, 1 and 1.5 times the planted effect |
 | `timecourse` (4) | realistic base: null; strain accruing steadily; saturating (3-day constant); delayed by a day |
+| `illness_death` (6) | realistic base, in which death already follows the marker: null; strain at 1 and 3 times the planted effect; strain at 3 times with a direct path from strain to death (log hazard 3 per log unit of dose); no strain, age raising death in both cohorts (log hazard 0.5 per SD); no strain, age steepening the marker in both cohorts (3 times the usual size) |
 
 The planted effect is 0.15 log units per day per log unit of VT/PFVC in the direction of
 injury (about 2% a day per SD of λ).
@@ -118,6 +119,15 @@ of segment gradient × segment length, with a standard error from the patients'
 influences added across segments. It is run for `unadjusted`, `control_did`,
 `free_age_did`, `within_onoff` and `off_reversal`, beside the straight line over the
 whole window.
+
+`causal_illness_death.R`'s analysis is run on the `illness_death` scenarios: the simulated
+marker at t0 is the baseline, injury is the first measured crossing of the threshold on
+the ventilator, death is followed over the 7 simulated days, and the λ gradient of each
+transition's hazard is fitted by `unadjusted`, `control_did` and `free_age_did` (VT/PBW
+held). A hazard gradient has no closed-form truth under this generator, so that stage
+reports the mean estimate, the ratio of model to empirical standard error, and the
+rejection rate; the scenarios without strain are where the rejection rate has a
+target (5%).
 
 ## 5. Performance measures
 
@@ -209,6 +219,9 @@ with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
 - Only log-scale labs are simulated. The vasopressor outcomes (zero-inflated, charted
   continuously) and OSI (on the ventilator only) are fitted by `causal_triangulation.R`
   and unit-tested, but their error rates under this generator are unknown.
+- In the `illness_death` stage death is simulated only on the ventilator and within 7
+  days, so few controls die: the control contrast on the death transitions is often not
+  estimable there. Injury is seen only when the marker is measured.
 - The denominator comparison of `causal_triangulation.R` is not simulated beyond the two
   wrong-denominator stress scenarios.
 
@@ -226,7 +239,9 @@ applied with VT/PBW held only. Its results led to these changes:
    Both versions are therefore fitted and reported, and the rule requires both.
 2. **A truth for the designs without the VT/PBW term** (section 3), so that they are
    scored against what they estimate.
-3. **The `timecourse` stage and estimator**, because a saturating effect cost the rule
+3. **The `illness_death` stage**, and the generator's two further routes to death
+   (`death_direct`, `death_age`), added with `causal_illness_death.R`.
+4. **The `timecourse` stage and estimator**, because a saturating effect cost the rule
    most of its power (26% to 35%) and markers are expected to differ in speed.
 
 Because these were chosen with results in hand, the second run's error rates for the
