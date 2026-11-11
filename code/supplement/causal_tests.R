@@ -11,7 +11,13 @@
 #      not by the unadjusted model
 #   4. the generator keeps its own rules (phase windows, complete phases, the gate,
 #      reproducibility by seed) and reports the planted truth
-#   5. the decision rule returns what its definition says
+#   5. the decision rule returns what its definition says, one way and both ways
+#   6. the Poisson model for an outcome with zeros equals glm(poisson) with a dummy
+#      for every patient-phase, coefficient and cluster-robust standard error
+#   7. the time course: every segment returns the planted effect without noise, the
+#      cumulative effect is the planted effect times the days, and its standard error
+#      from added influences equals the direct one where the two can be compared
+#   8. the VT/PBW gradient equals the lambda gradient when strain is planted
 # Stops at the first failure; prints "all tests passed" otherwise.
 #
 # Usage: uvr run code/supplement/causal_tests.R
@@ -146,5 +152,51 @@ check(!verdict(list(within_onoff = -3)), "a within-person design significant the
 check(!verdict(list(), est = c(free_sex_did = -0.45)), "a rung three times the control contrast: does not support")
 na <- tibble(design = designs$design, estimate = -0.15, se = 0.15 / 4); na$estimate[na$design == "within_onoff"] <- NA
 check(triangulation_supports(na, -1)[["rule"]], "a design that is not estimable counts as not significant, no more")
+
+good <- tibble(design = designs$design, estimate = -0.15, se = 0.15 / 4)
+bad <- good; bad$se[bad$design == "control_did"] <- 0.15
+check(triangulation_supports_both(good, good, -1)[["rule_both"]], "supported with VT/PBW held and dropped: supports")
+check(!triangulation_supports_both(good, bad, -1)[["rule_both"]] && !triangulation_supports_both(bad, good, -1)[["rule_both"]],
+      "supported one way only: does not support")
+
+# ---- 6. the Poisson model -----------------------------------------------------------------
+message("6. The Poisson model for an outcome with zeros")
+set.seed(31)
+pp <- sim$panel[sim$panel$id %in% small_ids & sim$panel$phase == "on", ]
+pat <- sim$patients[match(pp$id, sim$patients$id), ]
+pp$y <- rpois(nrow(pp), exp(-0.5 + 0.2 * pp$t * pat$ldisc * 5 + 0.1 * pp$t * pat$sofa_z)) * rgamma(nrow(pp), 2, 2)   # zeros, not Poisson
+prep <- prepare_design(designs[designs$design == "unadjusted", ], sim$patients, pp, raw = TRUE)
+fit  <- fit_design(prep, align_outcome(prep, pp), family = "poisson")
+d <- cbind(pp, pat[c("ldisc", "sofa_z", "sf_z", "lv0")])
+d <- d[d$id %in% names(which(tapply(d$y, d$id, sum) > 0)), ]
+dummy <- suppressWarnings(glm(y ~ 0 + factor(id) + t + t:ldisc + t:sofa_z + t:sf_z + t:lv0, family = quasipoisson, data = d))
+check(mean(pp$y == 0) > 0.2, "the fabricated outcome has zeros")
+check(abs(fit$estimate - coef(dummy)[["t:ldisc"]]) < 1e-6, "coefficient equals the dummy-variable Poisson regression")
+X <- model.matrix(dummy); mu <- fitted(dummy); bread <- solve(crossprod(X * sqrt(mu)))
+scores <- rowsum(X * (d$y - mu), d$id); G <- nrow(scores)
+se_dummy <- sqrt((bread %*% crossprod(scores) %*% bread * G / (G - 1))["t:ldisc", "t:ldisc"])
+check(abs(fit$se / se_dummy - 1) < 1e-4, "cluster-robust standard error equals the dummy-variable sandwich")
+
+# ---- 7. the time course ---------------------------------------------------------------------
+message("7. The time course")
+tc <- fit_time_course(designs[designs$design == "control_did", ], exact$patients, exact$panel)
+seg <- tc[tc$quantity == "segment", ]; cum <- tc[tc$quantity == "cumulative", ]
+check(max(abs(seg$estimate + 0.15)) < 1e-6, "every segment returns the planted effect without noise")
+check(max(abs(cum$estimate + 0.15 * cum$to)) < 1e-5, "the cumulative effect is the planted effect times the days")
+check(all(abs(exact$truth_by_day + 0.15 * as.numeric(names(exact$truth_by_day))) < 1e-9), "the reported cumulative truth agrees")
+noisy <- fit_time_course(designs[designs$design == "unadjusted", ], sim$patients, sim$panel)
+first <- noisy[noisy$quantity == "segment", ][1, ]; first_cum <- noisy[noisy$quantity == "cumulative", ][1, ]
+check(abs(first_cum$se - first$se * first$to) < 1e-12, "over one segment the added influences give the segment's own standard error")
+sat <- simulate_site(fab, fab_calib(0), scenario(beta = -0.15, time_shape = "saturating", base = "matched"), sign = -1, seed = 15)
+tc <- fit_time_course(designs[designs$design == "unadjusted", ], sat$patients, sat$panel)
+cum <- tc[tc$quantity == "cumulative", ]
+check(all(abs(cum$estimate / sat$truth_by_day - 1) < 0.1), "a saturating effect: the cumulative estimate is within 10% of the accrued truth at every cut")
+check(abs(tc$estimate[tc$quantity == "segment"][1]) > 1.5 * abs(tc$estimate[tc$quantity == "segment"][3]), "and the first segment is steeper than the last")
+
+# ---- 8. the VT/PBW gradient -------------------------------------------------------------------
+message("8. The gradient on VT/PBW")
+f <- fit_design(prepare_design(designs[designs$design == "unadjusted", ], exact$patients, exact$panel),
+                exact$panel$y[exact$panel$phase == "on" & exact$panel$id %in% exact$patients$id[exact$patients$vent == 1]])
+check(abs(f$vt_gradient + 0.15) < 1e-6, "with strain planted on log VT - log size, the VT/PBW gradient equals the lambda gradient")
 
 message("\nall tests passed")

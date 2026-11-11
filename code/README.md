@@ -133,8 +133,10 @@ to change; that stops once sites have returned `final/` folders.
   log PBW/PFVC, which age, sex and race explain almost entirely (R² about 0.99), so the
   adjusted contrast rests on height within sex alone and the unadjusted one carries
   every other effect of the demographics. `causal_triangulation.R` estimates one
-  quantity, the ventilation-specific change in a marker's slope per log unit of PBW/PFVC
-  (platelets, creatinine), from designs that fail under different assumptions: the
+  quantity, the ventilation-specific change in an outcome's slope per log unit of PBW/PFVC,
+  for platelets, creatinine, the vasopressor dose (a model of the expected dose with its
+  zero bins kept, and whether any pressor runs) and the oxygen saturation index (on the
+  ventilator only), from designs that fail under different assumptions: the
   paper's own (unadjusted, adjusted, height fingerprint, ventilated minus control), and
   three kinds it did not have. The within-person designs compare each ventilated
   patient's days before intubation with their days on the ventilator (`within_onoff`),
@@ -143,7 +145,13 @@ to change; that stops once sites have returned `final/` folders.
   demographics do not change at intubation, so nothing is adjusted. The ladder
   (`free_age`, `free_sex`, `free_race`, `free_height`, each also as a
   ventilated-minus-control contrast) frees one input at a time and identifies the
-  gradient from the other three. `causal_testbed.R` is a simulation study of those designs with a planted
+  gradient from the other three. Every design is fitted with the index VT/PBW held and
+  with it dropped, because holding it lets severity into the estimate where tidal volume
+  is chosen by how sick the lung is; a second table repeats the designs with other
+  strain denominators (PFVC at age 25, TLC, alveolar volume, FRC) and tests each against
+  PFVC in one model, and a third cuts the ventilator days into segments so that a marker
+  that responds early and plateaus can be read beside one that responds late.
+  `causal_testbed.R` is a simulation study of those designs with a planted
   truth; its protocol (aims, data-generating mechanisms, estimand, methods, performance
   measures) is [`supplement/CAUSAL_TESTBED_PROTOCOL.md`](supplement/CAUSAL_TESTBED_PROTOCOL.md).
   It keeps the site's patients and generates the marker, its measurement times and the
@@ -156,11 +164,14 @@ to change; that stops once sites have returned `final/` folders.
   unadjusted model; one-at-a-time stress scenarios (strongly informative exits or
   measurement, a tidal volume set by size and severity with and without the 6-8 gate,
   thresholds, saturating or delayed effects, error in charted height, strain on another
-  denominator, and more); power by effect size; four heterogeneous sites pooled; and a
+  denominator, and more); power by effect size; the segment-by-segment time course
+  against a straight line under steady, saturating and delayed effects; four heterogeneous sites pooled; and a
   cross-check of the estimator against a mixed model. It scores each design (bias,
   coverage, rejection rate, minimum detectable effect, each with its Monte Carlo standard
-  error) and a decision rule fixed in advance that reads all fifteen estimates together,
-  against relying on the unadjusted model or the control contrast alone.
+  error) and a decision rule that reads all fifteen estimates together and must hold
+  with VT/PBW held and dropped, against relying on the unadjusted model or the control
+  contrast alone. Only the two labs are simulated; the vasopressor and OSI models have
+  unit tests and no simulation yet.
   `causal_tests.R` holds the unit tests and needs no data. All of these are the
   longitudinal model alone, with no joint model for death or liberation. Not in a
   runner; `causal_triangulation.R` and `causal_testbed.R` each need scripts 01-03 for the

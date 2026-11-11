@@ -1,6 +1,6 @@
 # =============================================================================
 # causal_generator: the planted-truth data generator, its calibration to a site,
-# the realism summaries and the pre-specified decision rule. Sourced by
+# and the realism summaries (the decision rule is in causal_common.R). Sourced by
 # causal_testbed.R and causal_tests.R after causal_common.R; never run; writes nothing.
 # =============================================================================
 #
@@ -341,7 +341,13 @@ simulate_site <- function(patients, calib, sc, sign, seed) {
   v <- vent & keep
   per_day <- beta_i[v] * dose[v] * accrue(ON_DAYS) / ON_DAYS
   truth <- if (sc$beta == 0) 0 else unname(coef(lm(per_day ~ patients$ldisc[v] + lv[v]))[2])
-  list(patients = sim, panel = panel, truth = truth,
+  # the same gradient with VT/PBW not held (what the designs without that term estimate),
+  # and of the total effect accrued by each cut of the time course
+  truth_dropped <- if (sc$beta == 0) 0 else unname(coef(lm(per_day ~ patients$ldisc[v]))[2])
+  cuts <- c(CAUSAL_KNOTS[CAUSAL_KNOTS > 0 & CAUSAL_KNOTS < ON_DAYS], ON_DAYS)
+  truth_by_day <- setNames(vapply(cuts, function(b) if (sc$beta == 0) 0 else
+    unname(coef(lm(I(beta_i[v] * dose[v] * accrue(b)) ~ patients$ldisc[v] + lv[v]))[2]), numeric(1)), cuts)
+  list(patients = sim, panel = panel, truth = truth, truth_dropped = truth_dropped, truth_by_day = truth_by_day,
        ended = c(off = mean(is.finite(t_off[v])), dead = mean(ended[v])))
 }
 
@@ -390,33 +396,4 @@ panel_summaries <- function(panel, patients) {
                          sqrt(sum(d$rss) / max(sum(d$n - 2), 1)),
                          if (sum(d$lag_xx) > 0) sum(d$lag_xy) / sum(d$lag_xx) else NA_real_))
   }))
-}
-
-# ---- The decision rule --------------------------------------------------------------
-# One verdict from one site's fifteen estimates, fixed before any data are read
-# (CAUSAL_TESTBED_PROTOCOL.md, section 6). The data support the hypothesis only if
-# ALL of these hold, in the direction of injury at two-sided 5%:
-#   1. between cohorts    control_did is significant
-#   2. within patients    off_reversal or within_onoff is significant, and neither is
-#                         significant the other way
-#   3. not age, not sex   free_age_did and free_sex_did are each significant
-#   4. the rungs agree    all four free_*_did rungs have the sign of injury and lie
-#                         within a factor of two of control_did
-# A design that is not estimable counts as not significant. The rule is scored as a
-# whole: how often it says "supports" under each truth.
-RULE_Z <- qnorm(0.975)
-RULE_BAND <- 2
-triangulation_supports <- function(fits, sign) {
-  z <- setNames(sign * fits$estimate / fits$se, fits$design)
-  est <- setNames(sign * fits$estimate, fits$design)
-  up   <- function(d) isTRUE(z[[d]] > RULE_Z)
-  down <- function(d) isTRUE(z[[d]] < -RULE_Z)
-  rungs <- paste0("free_", c("age", "sex", "race", "height"), "_did")
-  ratio <- est[rungs] / est[["control_did"]]
-  c(rule = up("control_did") &&
-      (up("off_reversal") || up("within_onoff")) && !down("off_reversal") && !down("within_onoff") &&
-      up("free_age_did") && up("free_sex_did") &&
-      all(!is.na(ratio)) && all(est[rungs] > 0) && all(ratio >= 1 / RULE_BAND & ratio <= RULE_BAND),
-    # the comparators: what a reader concludes from one familiar analysis alone
-    unadjusted_alone = up("unadjusted"), control_did_alone = up("control_did"))
 }

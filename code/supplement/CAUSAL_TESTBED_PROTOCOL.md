@@ -3,10 +3,11 @@
 This is the protocol for `causal_testbed.R`. It follows the ADEMP layout for simulation
 studies (Morris, White and Crowther, *Statistics in Medicine* 2019): aims,
 data-generating mechanisms, estimand, methods, performance measures. The scenarios, the
-decision rule and the performance measures below were fixed before the full run. They
+decision rule and the performance measures were fixed before the first full run. They
 were developed on single simulated sites and on runs of 8 to 12 replicates, which were
 used to find coding errors and to check run time, not to choose scenarios by their
-results.
+results. Section 11 lists what was changed after the first full run and why; those
+changes were made with its results in hand and are not pre-specified.
 
 ## 1. Aims
 
@@ -21,7 +22,9 @@ fifteen designs that fail under different assumptions. The simulation asks:
 3. Does a single rule fixed in advance, applied to all fifteen estimates, separate a strain
    effect from confounding, and how often is it wrong in each direction? (the decision rule)
 4. What effect can a site of this size detect? (stage `power`)
-5. Does pooling across sites keep its nominal error rates when sites differ? (stage `multisite`)
+5. When the effect does not accrue steadily, does a segment-by-segment estimate recover
+   the time course, and what does it cost against a straight line? (stage `timecourse`)
+6. Does pooling across sites keep its nominal error rates when sites differ? (stage `multisite`)
 
 ## 2. Data-generating mechanisms
 
@@ -74,6 +77,7 @@ age gradient estimated in the site's own controls.
 | `realistic` (14) | the same eight; a composite of age, sex, race and height on the ventilator; the demographics in GLI's own proportions on the ventilator; an age effect that starts at 65; age at half and at twice the size; age as observed in the controls |
 | `stress` (22) | one change from the realistic base. With and without strain: strongly informative exits; strongly informative measurement; t errors with 3 df; autocorrelation 0.9 with 80% of the variance; VT set by predicted size and unmeasured severity; the same with the VT/PBW 6–8 gate. With strain only: a threshold in dose; an effect that saturates (3-day constant); an effect delayed by a day; an effect 0.3 times as large in patients with hospital time before intubation; positive pressure before the recorded intubation in 40%; 3 cm error in charted height; lung-size deviation SD 0.25; strain following GLI at age 25; strain following GLI without race. And strongly informative exits with age in every phase |
 | `power` (5) | strain at 0.25, 0.5, 0.75, 1 and 1.5 times the planted effect |
+| `timecourse` (4) | realistic base: null; strain accruing steadily; saturating (3-day constant); delayed by a day |
 
 The planted effect is 0.15 log units per day per log unit of VT/PFVC in the direction of
 injury (about 2% a day per SD of λ).
@@ -88,6 +92,12 @@ effect on GLI's λ this is β. With a threshold, a saturating or delayed time co
 another denominator, it is the linear summary a design can at best return, and it is
 reported for each scenario (`truth`).
 
+Two further truths are computed the same way. For the designs fitted without the VT/PBW
+term, the gradient with log VT/PBW not held: the effect as practice delivers it, which
+differs from the first when tidal volume follows λ. For the time course, the gradient of
+the total effect accrued by days 2, 4 and 7; a segment's truth is the difference between
+two of them over the segment's length.
+
 ## 4. Methods
 
 The fifteen designs of `causal_common.R`, each a least-squares regression with an intercept
@@ -97,6 +107,17 @@ and `free_age`, `free_sex`, `free_race`, `free_height`, each also as a
 ventilated-minus-control contrast (`_did`). A design needs 50 patients per arm with the
 phases it reads; otherwise it is not estimable in that replicate and is counted
 (`n_not_estimable`).
+
+Every design is fitted twice: with the index log VT/PBW as a slope term on the ventilator
+("held"), and without it ("dropped"). Each is scored against its own truth (section 3).
+
+The time course (`fit_time_course()`) assumes no shape. The ventilator days are cut at
+days 2 and 4; a design is fitted with the on-ventilator phase restricted to each segment
+in turn, each segment with its own intercept; the cumulative effect by a cut is the sum
+of segment gradient × segment length, with a standard error from the patients'
+influences added across segments. It is run for `unadjusted`, `control_did`,
+`free_age_did`, `within_onoff` and `off_reversal`, beside the straight line over the
+whole window.
 
 ## 5. Performance measures
 
@@ -119,8 +140,8 @@ planted effect), or **ok**.
 
 ## 6. The decision rule
 
-One site's fifteen estimates support the hypothesis only if all of these hold, in the
-direction of injury, at two-sided 5%:
+One site's estimates support the hypothesis only if all of these hold, in the direction
+of injury, at two-sided 5%, **with VT/PBW held and again with it dropped** (section 11):
 
 1. **Between cohorts.** `control_did` is significant.
 2. **Within patients.** `off_reversal` or `within_onoff` is significant, and neither is
@@ -131,8 +152,9 @@ direction of injury, at two-sided 5%:
 
 A design that is not estimable counts as not significant. The rule is scored as a whole:
 the share of simulated sites it calls "supports", which is a false-positive rate where no
-strain effect was planted and power where one was. It is compared with two single analyses
-a reader might otherwise rely on: the unadjusted model alone and the control contrast alone.
+strain effect was planted and power where one was. It is compared with the rule applied
+one way only (VT/PBW held; VT/PBW dropped) and with two single analyses a reader might
+otherwise rely on: the unadjusted model alone and the control contrast alone.
 
 The rule cannot separate strain from a path that acts only during ventilation through the
 demographics in GLI's own proportions. That scenario (`gli_ventilation`) is included so that
@@ -153,7 +175,10 @@ scored against the mean effect β with the measures of section 5.
   against least squares with a dummy for every patient-phase; exact recovery of the planted
   effect by all fifteen designs when there is no noise; exact removal of an age confounder
   by the designs that free age; the generator's own rules; the per-phase lines used for
-  calibration against `lm`; the decision rule against its definition.
+  calibration against `lm`; the decision rule against its definition; the Poisson model
+  for an outcome with zeros against `glm` with a dummy for every patient-phase; the time
+  course (exact recovery segment by segment, the cumulative standard error, a saturating
+  effect); the VT/PBW gradient.
 - Stage `crosscheck`: `unadjusted`, `control_did`, `free_age_did` and `within_onoff` are
   refitted with a linear mixed model (`nlme::lme`, random level and slope per patient) on
   the same simulated sites, and the two estimates are compared.
@@ -181,3 +206,28 @@ with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
 - The two markers are simulated separately, so no joint verdict across markers is scored.
 - The analysis under test is the longitudinal model alone. The joint model of
   `22_biotrauma_fit.R` is not part of this study.
+- Only log-scale labs are simulated. The vasopressor outcomes (zero-inflated, charted
+  continuously) and OSI (on the ventilator only) are fitted by `causal_triangulation.R`
+  and unit-tested, but their error rates under this generator are unknown.
+- The denominator comparison of `causal_triangulation.R` is not simulated beyond the two
+  wrong-denominator stress scenarios.
+
+## 11. Changes after the first full run
+
+The first full run (1,000 replicates, both markers) was made with the rule of section 6
+applied with VT/PBW held only. Its results led to these changes:
+
+1. **The rule must hold with VT/PBW held and dropped.** Where tidal volume was set by
+   predicted size and unmeasured severity and no effect was planted, the rule with VT/PBW
+   held called 20% (platelets) and 55% (creatinine) of sites "supports"; a re-run of the
+   platelet stress stage with the term dropped gave 0.1%. VT/PBW is then a consequence of
+   both λ and severity, and holding it lets severity into the λ gradient. Dropping it is
+   not right everywhere either: it changes the estimand where tidal volume follows λ.
+   Both versions are therefore fitted and reported, and the rule requires both.
+2. **A truth for the designs without the VT/PBW term** (section 3), so that they are
+   scored against what they estimate.
+3. **The `timecourse` stage and estimator**, because a saturating effect cost the rule
+   most of its power (26% to 35%) and markers are expected to differ in speed.
+
+Because these were chosen with results in hand, the second run's error rates for the
+amended rule are a description of it on these scenarios, not a pre-specified test.

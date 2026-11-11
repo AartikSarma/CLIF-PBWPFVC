@@ -33,12 +33,18 @@
 #               size, and strain that follows another denominator (GLI at age 25, GLI
 #               without race).
 #   power       the strain effect at 0.25 to 1.5 times the planted size.
+#   timecourse  the segment-by-segment estimate of fit_time_course() and its
+#               cumulative effect, beside the straight line, when the effect accrues
+#               steadily, saturates, or starts late.
 #   multisite   four sites that differ in effect, confounding and noise, pooled by
 #               common-effect and by random-effects inverse variance.
 #   crosscheck  the within estimator against a linear mixed model (nlme) on the same
 #               simulated sites.
 #
-# Every figure in the tables carries its Monte Carlo standard error.
+# Every design is fitted with the index VT/PBW held and with it dropped (column vtpbw),
+# each scored against its own truth, and the decision rule requires both.
+# Every figure in the tables carries its Monte Carlo standard error. Only the log-scale
+# labs are simulated: the vasopressor and OSI outcomes are not.
 #
 # Writes to final/supplement/ (final/ungated/supplement/ with PBWPFVC_VTPBW_GATE=0):
 #   causal_testbed_scenarios_<site>.csv    every scenario's parameters
@@ -48,6 +54,7 @@
 #   causal_testbed_decision_<site>.csv     how often the decision rule, and two
 #                                          single-analysis comparators, say "supports"
 #   causal_testbed_power_<site>.csv        rejection rate by effect size
+#   causal_testbed_timecourse_<site>.csv   segments, cumulative effect and straight line
 #   causal_testbed_multisite_<site>.csv    pooled bias, coverage and rejection rate
 #   causal_testbed_realism_<site>.csv      observed against simulated summaries
 #   causal_testbed_crosscheck_<site>.csv   within estimator against the mixed model
@@ -59,7 +66,7 @@
 #   PBWPFVC_CAUSAL_EFFECT      the planted strain effect, log units per day per log
 #                              unit of VT/PFVC, in the direction of injury (0.15)
 #   PBWPFVC_CAUSAL_MARKERS     platelets,creatinine
-#   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,multisite,crosscheck
+#   PBWPFVC_CAUSAL_STAGES      matched,realistic,stress,power,timecourse,multisite,crosscheck
 #   PBWPFVC_CAUSAL_WORKERS     parallel R processes (default: cores - 1, at most 8)
 # Runtime: about 0.4 s per simulated site per process; the default is roughly 50,000
 # sites per marker (a few hours on four cores). PBWPFVC_CAUSAL_REPS=100 is a fast look.
@@ -81,13 +88,12 @@ final_dir <- final_dir_for("supplement")
 source(here::here("code", "20_biotrauma_grid.R"))            # height_fingerprint(), pfvc_channels(), sorted_term()
 source(here::here("code", "supplement", "causal_common.R"))
 source(here::here("code", "supplement", "causal_generator.R"))
-if (!CAUSAL_VTPBW) { final_dir <- file.path(final_dir, "novtpbw"); dir.create(final_dir, showWarnings = FALSE) }
 
 env_list <- function(name, default) strsplit(Sys.getenv(name, default), ",")[[1]]
 N_REPS   <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_REPS", "1000"))
 EFFECT   <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_EFFECT", "0.15"))
 MARKERS  <- env_list("PBWPFVC_CAUSAL_MARKERS", "platelets,creatinine")
-STAGES   <- env_list("PBWPFVC_CAUSAL_STAGES", "matched,realistic,stress,power,multisite,crosscheck")
+STAGES   <- env_list("PBWPFVC_CAUSAL_STAGES", "matched,realistic,stress,power,timecourse,multisite,crosscheck")
 WORKERS  <- as.integer(Sys.getenv("PBWPFVC_CAUSAL_WORKERS", min(8L, max(1L, parallel::detectCores() - 1L))))
 ARM_SCALE <- 0.3                 # age_sicker: the control's share of the ventilated age gradient
 POWER_GRID <- c(0.25, 0.5, 0.75, 1, 1.5)
@@ -99,11 +105,15 @@ N_REALISM <- 20L                 # simulated sites averaged for the realism tabl
 TESTBED_SEED <- 20261111L
 ALPHA <- 0.05
 z_crit <- qnorm(1 - ALPHA / 2)
-stopifnot(all(MARKERS %in% CAUSAL_MARKERS$marker),
-          all(STAGES %in% c("matched", "realistic", "stress", "power", "multisite", "crosscheck")))
+# the generator makes a log-scale lab; the vasopressor and OSI outcomes are not simulated
+stopifnot(all(MARKERS %in% CAUSAL_MARKERS$marker[CAUSAL_MARKERS$source == "lab"]),
+          all(STAGES %in% c("matched", "realistic", "stress", "power", "timecourse", "multisite", "crosscheck")))
+TIMECOURSE_DESIGNS <- c("unadjusted", "control_did", "free_age_did", "within_onoff", "off_reversal")
 
 patients <- as.data.frame(load_causal_patients(config))
-designs  <- causal_designs()
+# every design with the index VT/PBW held and with it dropped
+designs_both <- list(held = causal_designs(TRUE), dropped = causal_designs(FALSE))
+designs <- designs_both$held
 
 # ---- The scenarios -------------------------------------------------------------------
 # One row per scenario: its stage, whether a strain effect is planted, and its
@@ -178,11 +188,32 @@ control_age_gradient <- function(panel) {
 
 # ---- One replicate --------------------------------------------------------------------
 # simulate a site, fit every design, apply the decision rule
-one_replicate <- function(sc, calib, sign, seed, pats = patients) {
+# (both = FALSE: VT/PBW held only, no rule)
+one_replicate <- function(sc, calib, sign, seed, pats = patients, both = TRUE) {
   sim <- simulate_site(pats, calib, sc, sign, seed)
-  fits <- fit_all_designs(designs, sim$patients, sim$panel)
-  list(fits = data.frame(design = fits$design, estimate = fits$estimate, se = fits$se, truth = sim$truth),
-       rule = triangulation_supports(fits, sign))
+  held <- fit_all_designs(designs_both$held, sim$patients, sim$panel)
+  fits <- data.frame(vtpbw = "held", design = held$design, estimate = held$estimate, se = held$se, truth = sim$truth)
+  if (!both) return(list(fits = fits))
+  dropped <- fit_all_designs(designs_both$dropped, sim$patients, sim$panel)
+  list(fits = rbind(fits, data.frame(vtpbw = "dropped", design = dropped$design, estimate = dropped$estimate,
+                                     se = dropped$se, truth = sim$truth_dropped)),
+       rule = triangulation_supports_both(held, dropped, sign))
+}
+# the time course of one simulated site: each segment, the cumulative effect, and the
+# straight line over the whole window beside them
+one_timecourse_replicate <- function(sc, calib, sign, seed) {
+  sim <- simulate_site(patients, calib, sc, sign, seed)
+  by_day <- sim$truth_by_day; before <- c(0, head(by_day, -1)); days <- as.numeric(names(by_day))
+  do.call(rbind, lapply(TIMECOURSE_DESIGNS, function(dn) {
+    design <- designs[designs$design == dn, ]
+    tc <- fit_time_course(design, sim$patients, sim$panel)
+    k <- match(tc$to, days)
+    tc$truth <- ifelse(tc$quantity == "cumulative", by_day[k], (by_day[k] - before[k]) / (tc$to - tc$from))
+    line <- fit_all_designs(design, sim$patients, sim$panel)
+    rbind(data.frame(design = dn, quantity = tc$quantity, window = tc$window, estimate = tc$estimate, se = tc$se, truth = tc$truth),
+          data.frame(design = dn, quantity = "straight line", window = sprintf("days 0 to %g", ON_DAYS),
+                     estimate = line$estimate, se = line$se, truth = sim$truth))
+  }))
 }
 # A site of a multisite replicate: the site's patients resampled, its own effect,
 # confounder size and noise
@@ -195,7 +226,7 @@ one_multisite_replicate <- function(sc, calib, sign, seed) {
     sck$beta  <- sc$beta * (1 + SITE_EFFECT_CV * rnorm(1))
     sck$d_all <- sc$d_all * exp(rnorm(1, 0, 0.3))
     cal <- calib; cal$scale$resid <- cal$scale$resid * runif(1, 0.8, 1.25)
-    out <- one_replicate(sck, cal, sign, seed * 10L + k, pats)$fits
+    out <- one_replicate(sck, cal, sign, seed * 10L + k, pats, both = FALSE)$fits
     out$site <- k; out
   })
   d <- do.call(rbind, site_fits); d <- d[!is.na(d$estimate), ]
@@ -273,6 +304,7 @@ if (WORKERS > 1) {
 
 # ---- Run ----------------------------------------------------------------------------------
 operating <- list(); decision <- list(); scenario_log <- list(); realism <- list(); multisite <- list(); crosscheck <- list()
+timecourse <- list()
 started <- Sys.time()
 for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   marker <- CAUSAL_MARKERS$marker[m]; sign <- CAUSAL_MARKERS$injury_sign[m]
@@ -314,9 +346,9 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   })
   fits <- do.call(rbind, lapply(results, `[[`, "fits"))
   rules <- as.data.frame(do.call(rbind, lapply(results, `[[`, "rule")))
-  operating[[marker]] <- fits %>% group_by(cell, design) %>%
+  operating[[marker]] <- fits %>% group_by(cell, vtpbw, design) %>%
     group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
-    left_join(fits %>% group_by(cell, design) %>% summarise(n_not_estimable = sum(is.na(estimate)), .groups = "drop"), by = c("cell", "design")) %>%
+    left_join(fits %>% group_by(cell, vtpbw, design) %>% summarise(n_not_estimable = sum(is.na(estimate)), .groups = "drop"), by = c("cell", "vtpbw", "design")) %>%
     left_join(cells %>% select(cell, stage, scenario, has_effect, effect_multiple), by = "cell") %>% mutate(marker = marker)
   decision[[marker]] <- rules %>% pivot_longer(-cell, names_to = "rule", values_to = "supports") %>%
     group_by(cell, rule) %>% summarise(n_reps = n(), supports_rate = mean(supports),
@@ -325,6 +357,24 @@ for (m in which(CAUSAL_MARKERS$marker %in% MARKERS)) {
   scenario_log[[marker]] <- cells %>% mutate(marker = marker, .before = 1) %>%
     bind_cols(bind_rows(lapply(cells$params, as_tibble))) %>% select(-params)
   message("  scenarios done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+
+  # --- the time course: is the segment-by-segment estimate right, and what does it cost? ---
+  if ("timecourse" %in% STAGES) {
+    truths <- list(null = scenario(), linear = scenario(beta = sign * EFFECT),
+                   saturating = scenario(beta = sign * EFFECT, time_shape = "saturating"),
+                   delayed = scenario(beta = sign * EFFECT, time_shape = "delayed"))
+    if (!is.null(cluster)) parallel::clusterExport(cluster, "truths", envir = environment())
+    jobs <- expand.grid(rep = seq_len(N_REPS), truth = seq_along(truths))
+    courses <- run_jobs(split(jobs, seq_len(nrow(jobs))), function(job) {
+      out <- one_timecourse_replicate(truths[[job$truth]], calib$realistic, sign, 7000000L + 10000L * job$truth + job$rep)
+      out$scenario <- names(truths)[job$truth]; out
+    })
+    timecourse[[marker]] <- bind_rows(courses) %>%
+      mutate(window = factor(window, levels = unique(window))) %>%
+      group_by(scenario, design, quantity, window) %>% group_modify(~ performance(.x$estimate, .x$se, .x$truth)) %>% ungroup() %>%
+      mutate(marker = marker, .before = 1)
+    message("  timecourse done after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min")
+  }
 
   # --- multisite ---
   if ("multisite" %in% STAGES) {
@@ -385,11 +435,12 @@ operating <- bind_rows(operating) %>%
                              mde_80 > EFFECT ~ "underpowered",
                              TRUE ~ "ok")) %>%
   left_join(designs %>% select(design, fails_if), by = "design") %>%
-  select(marker, stage, scenario, has_effect, effect_multiple, design, truth, mean_estimate, bias, bias_mcse,
+  select(marker, stage, scenario, has_effect, effect_multiple, vtpbw, design, truth, mean_estimate, bias, bias_mcse,
          empirical_se, empirical_se_mcse, model_se, se_ratio, coverage, coverage_mcse, rejection_rate, rejection_mcse,
          mde_80, verdict, n_reps, n_not_estimable, planted_effect, fails_if) %>% tag()
 decision <- bind_rows(decision) %>%
-  mutate(rule = recode(rule, rule = "decision rule", unadjusted_alone = "unadjusted model alone", control_did_alone = "control contrast alone"),
+  mutate(rule = recode(rule, rule_both = "decision rule", rule_held = "rule, VT/PBW held only", rule_dropped = "rule, VT/PBW dropped only",
+                       unadjusted_alone = "unadjusted model alone", control_did_alone = "control contrast alone"),
          # with an effect, "supports" is a correct call; without one, a false positive
          reading = if_else(has_effect, "power", "false positive")) %>%
   select(marker, stage, scenario, has_effect, effect_multiple, rule, reading, supports_rate, supports_mcse, n_reps) %>% tag()
@@ -401,26 +452,27 @@ write_csv(decision, file.path(final_dir, paste0("causal_testbed_decision_", site
 write_csv(scenario_log, file.path(final_dir, paste0("causal_testbed_scenarios_", site_name, ".csv")))
 write_csv(realism, file.path(final_dir, paste0("causal_testbed_realism_", site_name, ".csv")))
 if ("power" %in% STAGES)
-  write_csv(operating %>% filter(stage == "power") %>%
+  write_csv(operating %>% filter(stage == "power", vtpbw == "held") %>%
               select(site, cohort, marker, design, effect_multiple, truth, rejection_rate, rejection_mcse, bias, bias_mcse, n_reps) %>%
               bind_rows(decision %>% filter(stage == "power") %>%
                           transmute(site, cohort, marker, design = rule, effect_multiple, rejection_rate = supports_rate,
                                     rejection_mcse = supports_mcse, n_reps)),
             file.path(final_dir, paste0("causal_testbed_power_", site_name, ".csv")))
 if (length(multisite)) write_csv(bind_rows(multisite) %>% tag(), file.path(final_dir, paste0("causal_testbed_multisite_", site_name, ".csv")))
+if (length(timecourse)) write_csv(bind_rows(timecourse) %>% tag(), file.path(final_dir, paste0("causal_testbed_timecourse_", site_name, ".csv")))
 if (length(crosscheck)) write_csv(bind_rows(crosscheck) %>% tag(), file.path(final_dir, paste0("causal_testbed_crosscheck_", site_name, ".csv")))
 
 # ---- Figures -----------------------------------------------------------------------------------
 verdict_colours <- c(ok = "#cfe8d5", underpowered = "#f3e9c0", undercovers = "#f6d6b0", biased = "#f1c9c5", "not estimable" = "grey90")
 pdf(file.path(final_dir, paste0("causal_testbed_", site_name, ".pdf")), width = 14, height = 8.5)
 for (st in intersect(c("matched", "realistic", "stress"), STAGES)) {
-  d <- operating %>% filter(stage == st) %>%
+  d <- operating %>% filter(stage == st, vtpbw == "held") %>%
     mutate(design = factor(design, levels = rev(designs$design)), scenario = factor(scenario, levels = unique(scenario)),
            label = if_else(is.na(bias), "", sprintf("%.2f\n(%+.2f)", rejection_rate, bias / EFFECT)))
   print(ggplot(d, aes(scenario, design, fill = verdict)) + geom_tile(colour = "white") +
           geom_text(aes(label = label), size = 2, lineheight = 0.85) + facet_wrap(~ marker, ncol = 1) +
           scale_fill_manual(values = verdict_colours, name = NULL) +
-          labs(x = NULL, y = NULL, title = paste0("Stage: ", st, " (", site_name, ", ", N_REPS, " replicates)"),
+          labs(x = NULL, y = NULL, title = paste0("Stage: ", st, ", VT/PBW held (", site_name, ", ", N_REPS, " replicates)"),
                subtitle = paste0("Rejection rate at 5%, and (bias as a share of the planted effect, ", EFFECT, " log units/day per log unit)")) +
           theme_bw(base_size = 9) + theme(axis.text.x = element_text(angle = 35, hjust = 1), legend.position = "bottom", panel.grid = element_blank()))
 }
@@ -431,10 +483,10 @@ print(ggplot(d, aes(supports_rate, scenario, colour = rule, shape = rule)) +
         facet_grid(reading ~ marker, scales = "free_y", space = "free_y") + scale_colour_brewer(palette = "Dark2", name = NULL) + scale_shape(name = NULL) +
         labs(x = "Share of simulated sites called \"supports the hypothesis\" (95% Monte Carlo interval)", y = NULL,
              title = "The decision rule against single analyses",
-             subtitle = "Top: scenarios with no strain effect (every call is a false positive). Bottom: scenarios with one (power).") +
+             subtitle = "The decision rule requires the rule to hold with VT/PBW held and dropped. Top: scenarios with no strain effect (every call is a false positive). Bottom: scenarios with one (power).") +
         theme_bw(base_size = 9) + theme(legend.position = "bottom"))
 if ("power" %in% STAGES) {
-  d <- bind_rows(operating %>% filter(stage == "power") %>% transmute(marker, line = design, effect_multiple, rate = rejection_rate, mcse = rejection_mcse),
+  d <- bind_rows(operating %>% filter(stage == "power", vtpbw == "held") %>% transmute(marker, line = design, effect_multiple, rate = rejection_rate, mcse = rejection_mcse),
                  decision %>% filter(stage == "power", rule == "decision rule") %>% transmute(marker, line = rule, effect_multiple, rate = supports_rate, mcse = supports_mcse)) %>%
     filter(line %in% c("decision rule", "control_did", "within_onoff", "within_triple", "off_reversal", "free_age_did", "adjusted"))
   print(ggplot(d, aes(effect_multiple * EFFECT, rate, colour = line)) + geom_line() + geom_point(size = 1) +
@@ -460,5 +512,5 @@ print(as.data.frame(decision %>% filter(stage != "power") %>%
                       pivot_wider(names_from = rule, values_from = cell)), row.names = FALSE)
 message("\nDesigns that are biased or undercover, by stage:")
 print(as.data.frame(operating %>% filter(verdict %in% c("biased", "undercovers"), stage != "power") %>%
-                      count(marker, stage, design, verdict) %>% pivot_wider(names_from = stage, values_from = n, values_fill = 0)), row.names = FALSE)
+                      count(marker, stage, vtpbw, design, verdict) %>% pivot_wider(names_from = stage, values_from = n, values_fill = 0)), row.names = FALSE)
 message("\ncausal_testbed complete after ", round(as.numeric(difftime(Sys.time(), started, units = "mins"))), " min: ", final_dir)

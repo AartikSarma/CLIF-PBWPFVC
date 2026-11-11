@@ -1,7 +1,7 @@
 # =============================================================================
 # causal_common: the data and the within-person and ladder designs. Sourced by
 # causal_triangulation.R, causal_testbed.R and causal_tests.R; never run; writes
-# nothing. The planted-truth generator that tests the designs is causal_generator.R.
+# nothing. Also here: the outcomes, the time course and the decision rule. The planted-truth generator that tests the designs is causal_generator.R.
 # =============================================================================
 #
 # The hypothesis: at a fixed VT/PBW, a high VT/PFVC causes biotrauma. At a fixed
@@ -84,11 +84,37 @@ MIN_PATIENTS <- 50L         # a design with fewer patients is reported as not es
 # ventilated-versus-control supplements): "1" holds the index VT/PBW fixed, "0" drops it
 CAUSAL_VTPBW <- identical(Sys.getenv("PBWPFVC_DID_VTPBW", "1"), "1")
 
-# marker -> lab_category in cohort_labs_clean (script 02), and the direction of injury
+# The outcomes. source says where the measurements come from, family how the slope
+# model reads them:
+#   gaussian   least squares on y (the log of a lab or of OSI; a 0/1 indicator, which
+#              makes the model a linear probability model)
+#   poisson    a multiplicative model of the MEAN of a non-negative outcome with its
+#              zeros kept: log E[y] = a_(i,phase) + t * (x' gamma), fitted by Poisson
+#              quasi-likelihood with the patient-phase intercepts conditioned out. It
+#              needs only that mean to be right (not Poisson variation), has no added
+#              constant, and its gamma is in the same units as a log marker's.
+# lab markers come from cohort_labs_clean (script 02). The vasopressor dose is the
+# norepinephrine-equivalent rate of script 02's ne_equiv_admin, as the highest rate
+# charted in each PRESSOR_BIN_H-hour bin a patient was under observation, zero when
+# none was charted. OSI is 21_biotrauma_panel.R's definition (FiO2 x mean airway
+# pressure / SpO2, SpO2 clamped to 80-97), as the median of each bin; it exists only
+# on the ventilator, so only the ventilated on-phase designs can be fitted to it.
 CAUSAL_MARKERS <- tibble::tribble(
-  ~marker,      ~lab_category,    ~injury_sign,
-  "platelets",  "platelet_count", -1,
-  "creatinine", "creatinine",     +1)
+  ~marker,        ~source,   ~lab_category,    ~injury_sign, ~family,
+  "platelets",    "lab",     "platelet_count", -1,           "gaussian",
+  "creatinine",   "lab",     "creatinine",     +1,           "gaussian",
+  "pressor_dose", "pressor", NA,               +1,           "poisson",
+  "pressor_any",  "pressor", NA,               +1,           "gaussian",
+  "osi",          "osi",     NA,               +1,           "gaussian")
+PRESSOR_BIN_H <- as.numeric(Sys.getenv("PBWPFVC_CAUSAL_BIN_H", "6"))
+# the on-ventilator phase cut into segments, for the time course (days from t0)
+CAUSAL_KNOTS <- as.numeric(strsplit(Sys.getenv("PBWPFVC_CAUSAL_KNOTS", "2,4"), ",")[[1]])
+
+# The strain denominator. lambda = log(PBW / predicted volume); PFVC is the primary one.
+# The others are script 03's reference volumes, missing above their age limit (80 for
+# GLI 2021), and have no race term.
+CAUSAL_DENOMINATORS <- c(pfvc = "ldisc", pfvc_age25 = "ldisc25", tlc = "ldisc_tlc",
+                         alveolar_volume = "ldisc_va", frc = "ldisc_frc")
 
 # ---- Data -----------------------------------------------------------------------
 # One row per patient, both arms. Columns: id, arm, vent (1/0), t0, t_off_d (days from
@@ -102,7 +128,7 @@ load_causal_patients <- function(config) {
   if (!file.exists(vent_file)) stop("missing ", vent_file, ": run scripts 01-03 first")
   if (!file.exists(ctrl_file)) stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
   keep <- c("hospitalization_id", "patient_id", "index_dttm", "age_at_admission", "sex_category",
-            "race_category", "height_cm", "pbw", "pfvc", "pfvc_age25", "sf_ratio", "sofa_total",
+            "race_category", "height_cm", "pbw", "pfvc", "pfvc_age25", "pva", "ptlc", "pfrc", "sf_ratio", "sofa_total",
             "admission_dttm", "discharge_dttm", "death_dttm")
   vent <- arrow::read_parquet(vent_file) %>%
     select(all_of(keep), vtpbw, last_imv_dttm) %>% mutate(arm = "ventilated")
@@ -140,38 +166,137 @@ load_causal_patients <- function(config) {
     mutate(# the same ratio on two other denominators, for the testbed's wrong-denominator
            # scenarios: GLI at age 25 (no age term) and GLI without its race term
            ldisc25 = log(pbw / pfvc_age25),
-           ldisc_norace = ldisc + pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_race) %>%
-    mutate(across(c(ldisc, ldisc25, ldisc_norace), ~ .x - mean(.x[vent == 1]))) %>%
+           ldisc_norace = ldisc + pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_race,
+           # the other reference volumes (NA above their age limit)
+           ldisc_tlc = log(pbw / ptlc), ldisc_va = log(pbw / pva), ldisc_frc = log(pbw / pfrc)) %>%
+    mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc),
+                  ~ .x - mean(.x[vent == 1], na.rm = TRUE))) %>%
     select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, pre_avail_d, death_d, age10, age_z,
-           sex_category, race_category, height_cm, pbw, ldisc, ldisc25, ldisc_norace, fp, lv0, sofa_z, sf_z)
+           sex_category, race_category, height_cm, pbw, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
+           fp, lv0, sofa_z, sf_z)
 }
 
-# Every measurement of one marker in the window, with its phase. t is days from t0.
+# The patients with lambda on another denominator. `common` keeps only the patients in
+# whom every denominator is defined, so that denominators are compared on one sample.
+# ldiff is PFVC's lambda minus this one: what PFVC adds to the denominator (mostly
+# GLI's age decline in FVC, and its race term).
+use_denominator <- function(patients, denominator, common = TRUE) {
+  col <- CAUSAL_DENOMINATORS[[denominator]]
+  ok <- if (common) stats::complete.cases(patients[unname(CAUSAL_DENOMINATORS)]) else !is.na(patients[[col]])
+  out <- patients[ok, , drop = FALSE]
+  pfvc <- out$ldisc
+  out$ldisc <- out[[col]] - mean(out[[col]][out$vent == 1])
+  out$ldiff <- (pfvc - mean(pfvc[out$vent == 1])) - out$ldisc
+  out
+}
+
+# the phase of a time t (days from t0)
+phase_of <- function(t, vent, t_off_d) {
+  on_end <- pmin(dplyr::coalesce(t_off_d, Inf), ON_DAYS)
+  dplyr::case_when(t >= -PRE_DAYS & t < 0 ~ "pre",
+                   t >= 0 & t < on_end ~ "on",
+                   vent == 1 & !is.na(t_off_d) & t_off_d < ON_DAYS + POST_DAYS &
+                     t >= t_off_d & t < t_off_d + POST_DAYS ~ "post",
+                   TRUE ~ NA_character_)
+}
+both_cohorts <- function(config, file) {
+  dirs <- c(config$output_dir, file.path(config$output_dir, "controls", "nosupport"))
+  lapply(dirs, function(dir) {
+    f <- file.path(dir, file)
+    if (!file.exists(f)) stop("missing ", f, ": run script 02 first")
+    f
+  })
+}
+
+# Every measurement of one lab in the window, with its phase. t is days from t0.
 # complete = FALSE keeps the patient-phases with a single measurement too (the testbed
 # calibrates its measurement rate on them).
 load_causal_panel <- function(config, patients, lab_category, complete = TRUE) {
-  read_labs <- function(dir) {
-    f <- file.path(dir, "cohort_labs_clean.parquet")
-    if (!file.exists(f)) stop("missing ", f, ": run script 02 first")
+  read_labs <- function(f) {
     labs <- arrow::read_parquet(f)
     value <- intersect(c("lab_value_numeric", "lab_value"), names(labs))[1]
     labs %>% filter(lab_category == !!lab_category) %>%
       transmute(id = hospitalization_id, lab_dttm = lab_result_dttm, value = suppressWarnings(as.numeric(.data[[value]])))
   }
-  labs <- bind_rows(read_labs(config$output_dir), read_labs(file.path(config$output_dir, "controls", "nosupport")))
-  labs %>% inner_join(patients %>% select(id, vent, t0, t_off_d), by = "id") %>%
-    mutate(t = as.numeric(difftime(lab_dttm, t0, units = "days")),
-           on_end = pmin(coalesce(t_off_d, Inf), ON_DAYS),
-           phase = case_when(t >= -PRE_DAYS & t < 0 ~ "pre",
-                             t >= 0 & t < on_end ~ "on",
-                             vent == 1 & !is.na(t_off_d) & t_off_d < ON_DAYS + POST_DAYS &
-                               t >= t_off_d & t < t_off_d + POST_DAYS ~ "post",
-                             TRUE ~ NA_character_)) %>%
+  purrr::map_dfr(both_cohorts(config, "cohort_labs_clean.parquet"), read_labs) %>%
+    inner_join(patients %>% select(id, vent, t0, t_off_d), by = "id") %>%
+    mutate(t = as.numeric(difftime(lab_dttm, t0, units = "days")), phase = phase_of(t, vent, t_off_d)) %>%
     filter(!is.na(phase), is.finite(value), value > 0) %>%
     transmute(id, phase, t, y = log(value)) %>%
     distinct() %>%
     complete_phases(complete) %>%
     arrange(id, phase, t)
+}
+
+# The vasopressor dose on a regular grid: one row per patient and bin the patient was
+# under observation for (in hospital, alive, inside one phase), y the highest
+# norepinephrine-equivalent rate charted in the bin and 0 when none was. A continuous
+# infusion is charted when it changes, so a bin with no record is read as no infusion,
+# as scripts 10 and 21 read a day with none.
+load_pressor_panel <- function(config, patients, complete = TRUE) {
+  bin <- PRESSOR_BIN_H / 24
+  dose <- purrr::map_dfr(both_cohorts(config, "ne_equiv_admin.parquet"), function(f)
+    arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, dose = ne_equiv_total)) %>%
+    inner_join(patients %>% select(id, t0), by = "id") %>%
+    mutate(k = floor(as.numeric(difftime(dttm, t0, units = "days")) / bin)) %>%
+    filter(is.finite(dose), dose >= 0) %>%
+    group_by(id, k) %>% summarise(dose = max(dose), .groups = "drop")
+  tidyr::expand_grid(id = patients$id, k = seq(-PRE_DAYS / bin, (ON_DAYS + POST_DAYS) / bin - 1)) %>%
+    inner_join(patients %>% select(id, vent, t_off_d, stay_end_d, death_d, pre_avail_d), by = "id") %>%
+    mutate(start = k * bin, t = start + bin / 2,
+           observed_to = pmin(dplyr::coalesce(stay_end_d, Inf), dplyr::coalesce(death_d, Inf)),
+           phase = phase_of(start, vent, t_off_d)) %>%
+    # the whole bin under observation and inside one phase
+    filter(!is.na(phase), start >= -pre_avail_d, start + bin <= observed_to,
+           phase == phase_of(start + bin - 1e-9, vent, t_off_d)) %>%
+    left_join(dose, by = c("id", "k")) %>%
+    transmute(id, phase, t, y = dplyr::coalesce(dose, 0)) %>%
+    complete_phases(complete) %>%
+    arrange(id, phase, t)
+}
+
+# The oxygen saturation index, log scale, as the median of each bin on the ventilator.
+# 21_biotrauma_panel.R's definition: at each SpO2 (clamped to 80-97), the last FiO2
+# within 4 hours and the nearest recorded mean airway pressure within 1 hour.
+load_osi_panel <- function(config, patients, complete = TRUE) {
+  bin <- PRESSOR_BIN_H / 24
+  vent <- patients %>% filter(vent == 1) %>% select(id, t0, t_off_d)
+  wf <- arrow::read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
+                            col_select = c("hospitalization_id", "recorded_dttm", "fio2_set", "mean_airway_pressure_obs")) %>%
+    rename(id = hospitalization_id) %>% filter(id %in% vent$id) %>% mutate(s = as.numeric(recorded_dttm))
+  fio2 <- data.table::as.data.table(wf %>% filter(!is.na(fio2_set), fio2_set > 0) %>% select(id, s, fio2_set))
+  maw  <- data.table::as.data.table(wf %>% filter(!is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
+                                      transmute(id, s, maw = mean_airway_pressure_obs, s_maw = s))
+  spo2 <- arrow::read_parquet(file.path(config$output_dir, "cohort_vitals_clean.parquet")) %>%
+    filter(vital_category == "spo2", hospitalization_id %in% vent$id, !is.na(vital_value), vital_value >= 50, vital_value <= 100) %>%
+    transmute(id = hospitalization_id, s = as.numeric(recorded_dttm), spo2 = pmin(pmax(vital_value, 80), 97))
+  spo2 <- data.table::as.data.table(spo2)
+  data.table::setkeyv(fio2, c("id", "s")); data.table::setkeyv(maw, c("id", "s")); data.table::setkeyv(spo2, c("id", "s"))
+  pts <- fio2[spo2, roll = 4 * 3600, on = c("id", "s")]
+  pts <- maw[pts, roll = "nearest", on = c("id", "s")]
+  tibble::as_tibble(pts) %>%
+    filter(!is.na(fio2_set), !is.na(maw), abs(s - s_maw) <= 3600) %>%
+    mutate(fio2 = if_else(fio2_set > 1.5, fio2_set / 100, fio2_set), osi = 100 * maw * fio2 / spo2) %>%
+    inner_join(vent, by = "id") %>%
+    mutate(t = (s - as.numeric(t0)) / 86400, phase = phase_of(t, 1, t_off_d)) %>%
+    filter(phase == "on", is.finite(osi), osi > 0) %>%
+    group_by(id, phase, k = floor(t / bin)) %>%
+    summarise(t = (k[1] + 0.5) * bin, y = log(median(osi)), .groups = "drop") %>%
+    select(id, phase, t, y) %>%
+    complete_phases(complete) %>%
+    arrange(id, phase, t)
+}
+
+# one outcome's panel, by its name in CAUSAL_MARKERS
+load_causal_outcome <- function(config, patients, marker, complete = TRUE) {
+  m <- CAUSAL_MARKERS[CAUSAL_MARKERS$marker == marker, ]
+  if (nrow(m) != 1) stop("unknown marker ", marker)
+  panel <- switch(m$source,
+                  lab = load_causal_panel(config, patients, m$lab_category, complete),
+                  pressor = load_pressor_panel(config, patients, complete),
+                  osi = load_osi_panel(config, patients, complete))
+  if (marker == "pressor_any") panel$y <- as.numeric(panel$y > 0)
+  panel
 }
 # a patient-phase enters a design with two measurements at least MIN_SPAN_D apart
 complete_phases <- function(panel, complete = TRUE) {
@@ -224,7 +349,8 @@ causal_designs <- function(vtpbw = CAUSAL_VTPBW) {
 # Prepare one design on one panel: everything that does not depend on the outcome.
 # Not estimable (ok = FALSE) when an arm has too few patients with the phases. `rows`
 # are the panel rows the design reads, in the order of its outcome vector.
-prepare_design <- function(design, patients, panel) {
+# raw = TRUE keeps the uncentred slope columns, which the Poisson model needs.
+prepare_design <- function(design, patients, panel, raw = FALSE) {
   arms <- design$arms[[1]]; phases <- design$phases[[1]]
   pid <- match(panel$id, patients$id)             # the patient row of each measurement
   phase_code <- match(panel$phase, c("pre", "on", "post"))
@@ -254,7 +380,8 @@ prepare_design <- function(design, patients, panel) {
   key <- i * 4L + phase_code[rows]
   g <- match(key, unique(key)); n_g <- tabulate(g)   # the patient-phase of each row
   centre <- function(m) m - (rowsum(m, g, reorder = TRUE) / n_g)[g, , drop = FALSE]   # within patient-phase
-  Z <- centre(X * pan$t)                          # slopes: every column times time
+  Xt <- X * pan$t                                 # slopes: every column times time
+  Z <- centre(Xt)
   keep <- which(colSums(Z^2) > 1e-10)
   qrz <- qr(Z[, keep, drop = FALSE])
   keep <- keep[qrz$pivot[seq_len(qrz$rank)]]
@@ -265,36 +392,191 @@ prepare_design <- function(design, patients, panel) {
   # how much of the target's own variation is left beside the other terms
   partial_r2 <- if (ncol(Z) > 1) 1 - 1 / (ZtZ_inv[k, k] * sum(Z[, k]^2)) else 0
   list(ok = TRUE, design = design$design, sign = design$sign, Z = Z, ZtZ_inv = ZtZ_inv, k = k,
-       centre = centre, cluster = match(i, patient_rows), rows = rows,
+       centre = centre, cluster = match(i, patient_rows), rows = rows, group = g,
+       patient_ids = patients$id[patient_rows], Zraw = if (raw) Xt[, keep, drop = FALSE] else NULL,
        n_patients = length(patient_rows), n_obs = length(rows), n_by_arm = n_by_arm,
        partial_r2 = partial_r2, df_resid = nrow(Z) - ncol(Z) - max(g))
 }
 
-# Fit a prepared design to an outcome vector aligned with the prepared rows.
-fit_design <- function(prep, y) {
-  if (!prep$ok) return(tibble(design = prep$design, estimate = NA_real_, se = NA_real_))
-  yc <- prep$centre(matrix(y, ncol = 1))[, 1]
-  beta <- prep$ZtZ_inv %*% crossprod(prep$Z, yc)
-  resid <- yc - prep$Z %*% beta
-  scores <- rowsum(prep$Z * as.numeric(resid), prep$cluster, reorder = FALSE)
-  G <- nrow(scores)
-  V <- prep$ZtZ_inv %*% crossprod(scores) %*% prep$ZtZ_inv * G / (G - 1)
-  tibble(design = prep$design, estimate = prep$sign * beta[prep$k], se = sqrt(V[prep$k, prep$k]),
-         resid_sd = sqrt(sum(resid^2) / max(prep$df_resid, 1)))
+# The coefficients of a prepared design for one outcome vector: beta, each patient's
+# influence on it (one row per patient who contributes, `patient` their index in
+# prep$patient_ids) and the cluster-robust variance those influences give. NULL when
+# the model cannot be fitted.
+fit_coefs <- function(prep, y, family = "gaussian") {
+  if (family == "gaussian") {
+    yc <- prep$centre(matrix(y, ncol = 1))[, 1]
+    beta <- prep$ZtZ_inv %*% crossprod(prep$Z, yc)
+    resid <- yc - prep$Z %*% beta
+    scores <- rowsum(prep$Z * as.numeric(resid), prep$cluster, reorder = TRUE)
+    influence <- scores %*% prep$ZtZ_inv
+    patient <- as.integer(rownames(scores))
+    resid_sd <- sqrt(sum(resid^2) / max(prep$df_resid, 1)); n_obs <- length(y)
+  } else if (family == "poisson") {
+    # log E[y] = a_group + Z beta. Conditioning on a group's total removes its
+    # intercept: within a group the outcomes are shares p = exp(Z beta) / sum of it.
+    # Groups with a total of zero say nothing about beta and drop out.
+    if (is.null(prep$Zraw)) stop("prepare_design(raw = TRUE) is needed for the Poisson model")
+    if (any(y < 0)) stop("the Poisson model needs a non-negative outcome")
+    use <- (rowsum(y, prep$group, reorder = TRUE)[, 1] > 0)[prep$group]
+    Z <- prep$Zraw[use, , drop = FALSE]; y <- y[use]
+    g <- match(prep$group[use], unique(prep$group[use])); cl <- prep$cluster[use]
+    total <- rowsum(y, g, reorder = TRUE)[g, 1]
+    shares <- function(beta) {
+      eta <- as.numeric(Z %*% beta); eta <- eta - (rowsum(eta, g, reorder = TRUE) / tabulate(g))[g, 1]
+      m <- exp(eta); m / rowsum(m, g, reorder = TRUE)[g, 1]
+    }
+    loglik <- function(pr) sum(y[y > 0] * log(pr[y > 0]))
+    beta <- rep(0, ncol(Z)); pr <- shares(beta); ll <- loglik(pr); converged <- FALSE
+    for (iter in 1:100) {
+      mu <- total * pr
+      Zc <- Z - rowsum(Z * pr, g, reorder = TRUE)[g, , drop = FALSE]      # centred at the group's fitted mean
+      H <- crossprod(Zc * mu, Zc)
+      step <- tryCatch(solve(H, crossprod(Zc, y - mu)), error = function(e) NULL)
+      if (is.null(step)) return(NULL)
+      for (half in 0:20) {                         # the likelihood is concave; halve a step that overshoots
+        cand <- beta + step[, 1] / 2^half; pr_c <- shares(cand); ll_c <- loglik(pr_c)
+        if (is.finite(ll_c) && ll_c >= ll - 1e-10) break
+      }
+      done <- max(abs(cand - beta)) < 1e-8
+      beta <- cand; pr <- pr_c; ll <- ll_c
+      if (done) { converged <- TRUE; break }
+    }
+    if (!converged) return(NULL)
+    mu <- total * pr
+    Zc <- Z - rowsum(Z * pr, g, reorder = TRUE)[g, , drop = FALSE]
+    H_inv <- tryCatch(solve(crossprod(Zc * mu, Zc)), error = function(e) NULL)
+    if (is.null(H_inv)) return(NULL)
+    scores <- rowsum(Zc * (y - mu), cl, reorder = TRUE)
+    influence <- scores %*% H_inv
+    patient <- as.integer(rownames(scores))
+    beta <- matrix(beta, ncol = 1)
+    resid_sd <- sqrt(sum((y - mu)^2 / pmax(mu, 1e-12)) / max(length(y) - ncol(Z) - max(g), 1))   # Pearson dispersion
+    n_obs <- length(y)
+  } else stop("unknown family ", family)
+  G <- nrow(influence)
+  rownames(beta) <- colnames(prep$Z); colnames(influence) <- colnames(prep$Z)
+  list(beta = beta[, 1], V = crossprod(influence) * G / (G - 1), influence = influence, patient = patient,
+       resid_sd = resid_sd, n_obs = n_obs, n_patients = G)
+}
+
+# Fit a prepared design to an outcome vector aligned with the prepared rows: the
+# lambda gradient, and beside it the gradient on the index log VT/PBW where the
+# design has that term. Under strain, with dose = log VT - log size, the two are the
+# same number (vt_gradient = estimate); p_vt_equal tests that. influence = TRUE
+# attaches each patient's influence on the estimate (named by patient id).
+NO_FIT <- tibble::tibble(estimate = NA_real_, se = NA_real_, resid_sd = NA_real_, vt_gradient = NA_real_,
+                         vt_gradient_se = NA_real_, p_vt_equal = NA_real_)
+fit_design <- function(prep, y, family = "gaussian", influence = FALSE) {
+  fit <- if (prep$ok) fit_coefs(prep, y, family) else NULL
+  if (is.null(fit)) return(dplyr::bind_cols(tibble::tibble(design = prep$design), NO_FIT))
+  k <- prep$k; v <- which(names(fit$beta) == "lv_on")
+  out <- tibble::tibble(design = prep$design, estimate = prep$sign * fit$beta[[k]], se = sqrt(fit$V[k, k]),
+                        resid_sd = fit$resid_sd, vt_gradient = NA_real_, vt_gradient_se = NA_real_, p_vt_equal = NA_real_)
+  if (length(v) == 1) {
+    difference <- fit$beta[[k]] - fit$beta[[v]]
+    out$vt_gradient <- fit$beta[[v]]; out$vt_gradient_se <- sqrt(fit$V[v, v])
+    out$p_vt_equal <- 2 * pnorm(-abs(difference) / sqrt(fit$V[k, k] + fit$V[v, v] - 2 * fit$V[k, v]))
+  }
+  if (influence) attr(out, "influence") <- setNames(prep$sign * fit$influence[, k], prep$patient_ids[fit$patient])
+  out
 }
 # the outcome of a panel in a prepared design's row order
 align_outcome <- function(prep, panel, column = "y") panel[[column]][prep$rows]
 
 # Fit every design to one panel: one row per design (NA where not estimable)
-fit_all_designs <- function(designs, patients, panel, column = "y") {
+fit_all_designs <- function(designs, patients, panel, column = "y", family = "gaussian") {
   out <- vector("list", nrow(designs))
   for (i in seq_len(nrow(designs))) {
-    prep <- prepare_design(designs[i, ], patients, panel)
-    fit <- if (prep$ok) fit_design(prep, align_outcome(prep, panel, column)) else
-      tibble(design = prep$design, estimate = NA_real_, se = NA_real_, resid_sd = NA_real_)
+    prep <- prepare_design(designs[i, ], patients, panel, raw = family == "poisson")
+    fit <- fit_design(prep, if (prep$ok) align_outcome(prep, panel, column) else NULL, family)
     fit$n_patients <- prep$n_patients; fit$n_obs <- prep$n_obs
     fit$partial_r2 <- if (prep$ok) prep$partial_r2 else NA_real_
     out[[i]] <- fit
   }
   dplyr::bind_rows(out)
+}
+
+# ---- The time course ------------------------------------------------------------
+# The designs above summarise the ventilator days with one straight line. A marker
+# that responds within a day or two and then plateaus, or one that starts late, is
+# poorly described by it, and markers differ. fit_time_course() makes no assumption
+# about the shape: it cuts the on-ventilator phase at CAUSAL_KNOTS, fits the design
+# with the on phase restricted to each segment in turn (a segment has its own
+# intercept; the comparison phases and arms are unchanged), and adds the segments up:
+#   segment      the lambda gradient of the slope within the segment
+#   cumulative   sum of (segment gradient x segment length) up to each cut: the lambda
+#                gradient of the marker's total change by that day. Its standard error
+#                comes from the patients' influences added across segments, so it
+#                allows for one patient contributing to several.
+# A fast marker shows its effect in the first segment and nothing after; a slow one
+# the reverse; the cumulative effect at the end of the window is comparable between
+# them. Later segments hold only the patients still ventilated and measured then.
+fit_time_course <- function(design, patients, panel, family = "gaussian", knots = CAUSAL_KNOTS) {
+  cuts <- c(0, knots[knots > 0 & knots < ON_DAYS], ON_DAYS)
+  on <- panel$phase == "on"
+  running <- NULL; estimable <- TRUE; rows <- list()
+  for (s in seq_len(length(cuts) - 1)) {
+    a <- cuts[s]; b <- cuts[s + 1]
+    seg <- complete_phases(panel[!on | (panel$t >= a & panel$t < b), , drop = FALSE])
+    prep <- prepare_design(design, patients, seg, raw = family == "poisson")
+    fit <- fit_design(prep, if (prep$ok) align_outcome(prep, seg) else NULL, family, influence = TRUE)
+    window <- sprintf("days %g to %g", a, b)
+    rows[[length(rows) + 1]] <- tibble::tibble(design = design$design, quantity = "segment", window = window, from = a, to = b,
+                                               estimate = fit$estimate, se = fit$se, n_patients = prep$n_patients, n_obs = prep$n_obs)
+    estimable <- estimable && !is.na(fit$estimate)
+    if (estimable) {
+      infl <- attr(fit, "influence") * (b - a)
+      ids <- union(names(running$influence), names(infl))
+      total <- setNames(numeric(length(ids)), ids)
+      total[names(running$influence)] <- running$influence
+      total[names(infl)] <- total[names(infl)] + infl
+      running <- list(estimate = sum(running$estimate, fit$estimate * (b - a)), influence = total)
+    }
+    G <- length(running$influence)
+    rows[[length(rows) + 1]] <- tibble::tibble(design = design$design, quantity = "cumulative", window = sprintf("by day %g", b), from = 0, to = b,
+                                               estimate = if (estimable) running$estimate else NA_real_,
+                                               se = if (estimable) sqrt(sum(running$influence^2) * G / (G - 1)) else NA_real_,
+                                               n_patients = G, n_obs = NA_integer_)
+  }
+  dplyr::bind_rows(rows)
+}
+
+# ---- The decision rule --------------------------------------------------------------
+# One verdict from one site's fifteen estimates, fixed before any data are read
+# (CAUSAL_TESTBED_PROTOCOL.md, section 6; scored by causal_testbed.R). The data support the hypothesis only if
+# ALL of these hold, in the direction of injury at two-sided 5%:
+#   1. between cohorts    control_did is significant
+#   2. within patients    off_reversal or within_onoff is significant, and neither is
+#                         significant the other way
+#   3. not age, not sex   free_age_did and free_sex_did are each significant
+#   4. the rungs agree    all four free_*_did rungs have the sign of injury and lie
+#                         within a factor of two of control_did
+# A design that is not estimable counts as not significant. The rule is scored as a
+# whole: how often it says "supports" under each truth.
+RULE_Z <- qnorm(0.975)
+RULE_BAND <- 2
+triangulation_supports <- function(fits, sign) {
+  z <- setNames(sign * fits$estimate / fits$se, fits$design)
+  est <- setNames(sign * fits$estimate, fits$design)
+  up   <- function(d) isTRUE(z[[d]] > RULE_Z)
+  down <- function(d) isTRUE(z[[d]] < -RULE_Z)
+  rungs <- paste0("free_", c("age", "sex", "race", "height"), "_did")
+  ratio <- est[rungs] / est[["control_did"]]
+  c(rule = up("control_did") &&
+      (up("off_reversal") || up("within_onoff")) && !down("off_reversal") && !down("within_onoff") &&
+      up("free_age_did") && up("free_sex_did") &&
+      all(!is.na(ratio)) && all(est[rungs] > 0) && all(ratio >= 1 / RULE_BAND & ratio <= RULE_BAND),
+    # the comparators: what a reader concludes from one familiar analysis alone
+    unadjusted_alone = up("unadjusted"), control_did_alone = up("control_did"))
+}
+# The rule with the index VT/PBW held and with it dropped. Holding VT/PBW is what "at a
+# fixed VT/PBW" means, but where tidal volume is chosen by how sick the lung is, VT/PBW
+# is a consequence of both lambda and severity, and holding it lets severity into the
+# lambda gradient. Dropping it avoids that and changes the estimand to the gradient as
+# practice delivers it. Neither is right under every way of setting tidal volume, so
+# both are reported and the hypothesis is supported only if the rule holds both ways.
+triangulation_supports_both <- function(fits_held, fits_dropped, sign) {
+  held <- triangulation_supports(fits_held, sign); dropped <- triangulation_supports(fits_dropped, sign)
+  c(rule_both = held[["rule"]] && dropped[["rule"]], rule_held = held[["rule"]], rule_dropped = dropped[["rule"]],
+    unadjusted_alone = held[["unadjusted_alone"]], control_did_alone = held[["control_did_alone"]])
 }
