@@ -128,8 +128,8 @@ to change; that stops once sites have returned `final/` folders.
   in-hospital death, 60-day death and death during the exposure (as pseudo-observations)
   and the 7-day platelet and creatinine slopes, along lambda. Run by `29_run_figure4.R`
   (step 8e, gated and ungated).
-  `causal_triangulation.R` and `causal_testbed.R` (with the sourced `causal_common.R`)
-  take on the positivity problem directly. At a fixed VT/PBW, VT/PFVC moves only with
+  `causal_triangulation.R` and `causal_testbed.R` (with the sourced `causal_common.R` and
+  `causal_generator.R`) take on the positivity problem directly. At a fixed VT/PBW, VT/PFVC moves only with
   log PBW/PFVC, which age, sex and race explain almost entirely (R² about 0.99), so the
   adjusted contrast rests on height within sex alone and the unadjusted one carries
   every other effect of the demographics. `causal_triangulation.R` estimates one
@@ -143,14 +143,28 @@ to change; that stops once sites have returned `final/` folders.
   demographics do not change at intubation, so nothing is adjusted. The ladder
   (`free_age`, `free_sex`, `free_race`, `free_height`, each also as a
   ventilated-minus-control contrast) frees one input at a time and identifies the
-  gradient from the other three. `causal_testbed.R` keeps the site's patients, phases
-  and measurement times, plants a known strain effect or a known confounder of the same
-  apparent size (age in every phase, age scaled by illness, age at the acute illness,
-  age or sex through ventilation itself), and reports each design's bias, coverage,
-  rejection rate and minimum detectable effect, so the observed pattern is read against
-  what each truth leaves behind. Both are the longitudinal model alone, with no joint
-  model for death or liberation. Not in a runner; each needs scripts 01-03 for the
-  ventilated and no-support cohorts, and writes `causal_triangulation_` and
+  gradient from the other three. `causal_testbed.R` is a simulation study of those designs with a planted
+  truth; its protocol (aims, data-generating mechanisms, estimand, methods, performance
+  measures) is [`supplement/CAUSAL_TESTBED_PROTOCOL.md`](supplement/CAUSAL_TESTBED_PROTOCOL.md).
+  It keeps the site's patients and generates the marker, its measurement times and the
+  patients' exits (`causal_generator.R`), tuned so that the analysis reads the same
+  noise, slopes and sampling off a simulated site as off the real one. Stages: the
+  generator reduced to the analysis model (a check of the estimators); a realistic
+  generator (curved trajectories, autocorrelated heavy-tailed errors, unmeasured
+  severity, variation in true lung size, measurement and exits that depend on the
+  marker) under a strain effect and under confounders sized to look the same to the
+  unadjusted model; one-at-a-time stress scenarios (strongly informative exits or
+  measurement, a tidal volume set by size and severity with and without the 6-8 gate,
+  thresholds, saturating or delayed effects, error in charted height, strain on another
+  denominator, and more); power by effect size; four heterogeneous sites pooled; and a
+  cross-check of the estimator against a mixed model. It scores each design (bias,
+  coverage, rejection rate, minimum detectable effect, each with its Monte Carlo standard
+  error) and a decision rule fixed in advance that reads all fifteen estimates together,
+  against relying on the unadjusted model or the control contrast alone.
+  `causal_tests.R` holds the unit tests and needs no data. All of these are the
+  longitudinal model alone, with no joint model for death or liberation. Not in a
+  runner; `causal_triangulation.R` and `causal_testbed.R` each need scripts 01-03 for the
+  ventilated and no-support cohorts, and write `causal_triangulation_` and
   `causal_testbed_` tables.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC, predicted TLC and alveolar volume, and the
