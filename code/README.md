@@ -128,6 +128,30 @@ to change; that stops once sites have returned `final/` folders.
   in-hospital death, 60-day death and death during the exposure (as pseudo-observations)
   and the 7-day platelet and creatinine slopes, along lambda. Run by `29_run_figure4.R`
   (step 8e, gated and ungated).
+  `causal_triangulation.R` and `causal_testbed.R` (with the sourced `causal_common.R`)
+  take on the positivity problem directly. At a fixed VT/PBW, VT/PFVC moves only with
+  log PBW/PFVC, which age, sex and race explain almost entirely (R² about 0.99), so the
+  adjusted contrast rests on height within sex alone and the unadjusted one carries
+  every other effect of the demographics. `causal_triangulation.R` estimates one
+  quantity, the ventilation-specific change in a marker's slope per log unit of PBW/PFVC
+  (platelets, creatinine), from designs that fail under different assumptions: the
+  paper's own (unadjusted, adjusted, height fingerprint, ventilated minus control), and
+  three kinds it did not have. The within-person designs compare each ventilated
+  patient's days before intubation with their days on the ventilator (`within_onoff`),
+  subtract the controls' change around ICU admission (`within_triple`), and compare the
+  ventilator days with the days after extubation (`off_reversal`); a patient's
+  demographics do not change at intubation, so nothing is adjusted. The ladder
+  (`free_age`, `free_sex`, `free_race`, `free_height`, each also as a
+  ventilated-minus-control contrast) frees one input at a time and identifies the
+  gradient from the other three. `causal_testbed.R` keeps the site's patients, phases
+  and measurement times, plants a known strain effect or a known confounder of the same
+  apparent size (age in every phase, age scaled by illness, age at the acute illness,
+  age or sex through ventilation itself), and reports each design's bias, coverage,
+  rejection rate and minimum detectable effect, so the observed pattern is read against
+  what each truth leaves behind. Both are the longitudinal model alone, with no joint
+  model for death or liberation. Not in a runner; each needs scripts 01-03 for the
+  ventilated and no-support cohorts, and writes `causal_triangulation_` and
+  `causal_testbed_` tables.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC, predicted TLC and alveolar volume, and the
   delivered VT on each scale, by arm for an external trial table, `creatinine_positive_control.R` checks that creatinine rises
