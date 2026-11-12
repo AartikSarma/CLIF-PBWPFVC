@@ -147,7 +147,11 @@ to change; that stops once sites have returned `final/` folders.
   ventilated-minus-control contrast) frees one input at a time and identifies the
   gradient from the other three. Every design is fitted with the index VT/PBW held and
   with it dropped, because holding it lets severity into the estimate where tidal volume
-  is chosen by how sick the lung is; a second table repeats the designs with other
+  is chosen by how sick the lung is. With it dropped, lambda alone also assumes tidal
+  volume was set at the same multiple of PBW in everyone, so a reported check (not part
+  of the decision rule) refits those designs with log PBW freed beside lambda, giving
+  the gradient along PFVC at a fixed PBW and a test of the ratio form, and reports how
+  closely tidal volume followed PBW (rho, the slope of log VT on log PBW); a second table repeats the designs with other
   strain denominators (PFVC at age 25, TLC, alveolar volume, FRC) and tests each against
   PFVC in one model, and a third cuts the ventilator days into segments so that a marker
   that responds early and plateaus can be read beside one that responds late.

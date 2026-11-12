@@ -242,4 +242,25 @@ check(abs(idm$estimate[idm$transition == "injury"] - coef(one_fit)[["ldisc"]]) <
         abs(idm$se[idm$transition == "injury"] - sqrt(one_fit$var[1, 1])) < 1e-8,
       "the injury gradient and its robust standard error equal coxph's")
 
+# ---- 10. PBW and PFVC as separate terms ---------------------------------------------------------
+message("10. PBW freed beside lambda, VT/PBW dropped")
+# strain on log VT - log PFVC, with tidal volume set as log VT = rho log PBW: the slope is
+# b (lambda + log VT/PBW) = b lambda + b (rho - 1) log PBW
+sep_pat <- exact$patients; set.seed(31)
+sep_pat$lpbw <- 0.5 * sep_pat$ldisc + rnorm(nrow(sep_pat), 0, 0.1); rho <- 0.6; b <- -0.15
+sep_pat$lv0 <- ifelse(sep_pat$vent == 1, (rho - 1) * sep_pat$lpbw, 0)
+sep_pan <- exact$panel; i <- match(sep_pan$id, sep_pat$id)
+on_vent <- sep_pan$phase == "on" & sep_pat$vent[i] == 1
+sep_pan$y <- 3 + 0.1 * (i %% 7) + ifelse(on_vent, b * (sep_pat$ldisc[i] + sep_pat$lv0[i]), 0) * sep_pan$t
+dropped <- causal_designs(vtpbw = FALSE)
+sep <- fit_pbw_separate(dropped[dropped$design %in% c("unadjusted", "control_did"), ], sep_pat, sep_pan)
+check(max(abs(sep$estimate - b)) < 1e-6, "with log PBW freed, the lambda coefficient is the PFVC gradient whatever rho is")
+check(max(abs(sep$pbw_extra - b * (rho - 1))) < 1e-6, "and the log PBW coefficient is b (rho - 1)")
+ratio_only <- fit_all_designs(dropped[dropped$design == "unadjusted", ], sep_pat, sep_pan)
+check(abs(ratio_only$estimate - b) > 0.01, "lambda alone misses it when rho is not 1 and PBW moves with lambda")
+check(is.null(with_pbw_separate(dropped[dropped$design == "fingerprint", ])) &&
+        is.null(with_pbw_separate(causal_designs(TRUE)[1, ])), "no separate-terms version of the fingerprint or of a design with VT/PBW")
+r <- suppressWarnings(vt_follows_pbw(sep_pat))   # an exact fit, by construction
+check(abs(r$rho[r$group == "all"] - rho) < 1e-8, "rho is recovered from log VT/PBW and log PBW")
+
 message("\nall tests passed")

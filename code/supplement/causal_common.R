@@ -158,6 +158,7 @@ load_causal_patients <- function(config) {
            sex_category = factor(as.character(sex_category), levels = c("Male", "Female")),
            race_category = factor(as.character(race_category), levels = c("WHITE", "BLACK", "OTHER")),
            ldisc = log(pbw / pfvc),
+           lpbw = log(pbw),             # log PBW alone, for the designs with PBW and PFVC as separate terms
            fp = height_fingerprint(height_cm, as.character(sex_category)),
            # log VT/PBW about the ventilated mean; 0 in the control, which has no tidal volume
            lv0 = if_else(vent == 1, log(vtpbw) - mean(log(vtpbw[vent == 1]), na.rm = TRUE), 0),
@@ -169,10 +170,10 @@ load_causal_patients <- function(config) {
            ldisc_norace = ldisc + pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_race,
            # the other reference volumes (NA above their age limit)
            ldisc_tlc = log(pbw / ptlc), ldisc_va = log(pbw / pva), ldisc_frc = log(pbw / pfrc)) %>%
-    mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc),
+    mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc, lpbw),
                   ~ .x - mean(.x[vent == 1], na.rm = TRUE))) %>%
     select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, pre_avail_d, death_d, age10, age_z,
-           sex_category, race_category, height_cm, pbw, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
+           sex_category, race_category, height_cm, pbw, lpbw, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
            fp, lv0, sofa_z, sf_z)
 }
 
@@ -494,6 +495,74 @@ fit_all_designs <- function(designs, patients, panel, column = "y", family = "ga
     out[[i]] <- fit
   }
   dplyr::bind_rows(out)
+}
+
+# ---- PBW and PFVC as separate terms ----------------------------------------------
+# With VT/PBW dropped, lambda alone forces log PBW and log PFVC to carry equal and
+# opposite coefficients. Under strain, slope = b (log VT - log PFVC); if tidal volume
+# was set as log VT = rho log PBW + other variation, the slope is
+# b rho log PBW - b log PFVC: the two are equal and opposite only when rho = 1, VT at
+# the same multiple of PBW in everyone. Otherwise the lambda coefficient mixes the
+# PFVC effect with a diluted tidal-volume effect. Adding log PBW beside lambda frees
+# them: the lambda coefficient is then minus the log PFVC coefficient, the gradient
+# along PFVC at a fixed PBW (and so roughly a fixed VT) whatever rho is, and the
+# coefficient on log PBW is b (rho - 1), zero when the ratio form is adequate. PBW is
+# almost entirely height within sex, so at a fixed PBW lambda moves mainly with the age
+# and race terms of PFVC: these designs are less precise and lean on age.
+
+# A design with log PBW freed beside lambda wherever lambda enters (main effect and
+# interactions alike). NULL for a design without lambda (the fingerprint) or with the
+# index VT/PBW in it (there tidal volume is in the model already).
+with_pbw_separate <- function(design) {
+  if (!grepl("\\bldisc\\b", design$formula) || grepl("lv_on", design$formula)) return(NULL)
+  design$formula <- gsub("\\bldisc\\b", "(ldisc + lpbw)", design$formula)
+  design$extra <- gsub("\\bldisc\\b", "lpbw", design$target)
+  design
+}
+
+# A design's target and one further coefficient of it (design$extra) from the same fit:
+# both estimates, their standard errors and covariance, and the test that the extra is 0.
+fit_with_extra <- function(design, patients, panel, family = "gaussian") {
+  prep <- prepare_design(design, patients, panel, raw = family == "poisson")
+  fit <- if (prep$ok) fit_coefs(prep, align_outcome(prep, panel), family) else NULL
+  out <- tibble::tibble(design = design$design, estimate = NA_real_, se = NA_real_, extra = NA_real_, extra_se = NA_real_,
+                        cov_extra = NA_real_, p_extra_zero = NA_real_, n_patients = prep$n_patients, n_obs = prep$n_obs)
+  if (is.null(fit)) return(out)
+  e <- which(sorted_term(names(fit$beta)) == sorted_term(design$extra))
+  k <- prep$k; s <- prep$sign
+  out$estimate <- s * fit$beta[[k]]; out$se <- sqrt(fit$V[k, k])
+  if (length(e) != 1) return(out)                 # the extra term dropped as collinear
+  out$extra <- s * fit$beta[[e]]; out$extra_se <- sqrt(fit$V[e, e]); out$cov_extra <- fit$V[k, e]
+  out$p_extra_zero <- 2 * pnorm(-abs(fit$beta[[e]]) / sqrt(fit$V[e, e]))
+  out
+}
+
+# Every lambda design of a set refitted with log PBW freed beside lambda.
+fit_pbw_separate <- function(designs, patients, panel, family = "gaussian") {
+  rows <- lapply(seq_len(nrow(designs)), function(i) with_pbw_separate(designs[i, ]))
+  rows <- dplyr::bind_rows(rows)
+  if (!nrow(rows)) return(tibble::tibble())
+  purrr::map_dfr(seq_len(nrow(rows)), function(i) fit_with_extra(rows[i, ], patients, panel, family)) %>%
+    dplyr::rename(pbw_extra = extra, pbw_extra_se = extra_se, p_ratio_adequate = p_extra_zero) %>%
+    dplyr::select(-cov_extra)
+}
+
+# rho: how closely the index tidal volume followed PBW. The slope of log VT on log PBW
+# across ventilated patients, one row per patient (log VT = log VT/PBW + log PBW, so
+# rho is 1 plus the slope of log VT/PBW on log PBW). 1 is VT at the same multiple of
+# PBW in everyone; below 1, smaller patients got relatively more. Overall and by sex
+# (PBW, and so the protocol's tidal volume, differs by sex at the same height).
+vt_follows_pbw <- function(patients) {
+  v <- patients[patients$vent == 1 & is.finite(patients$lv0) & is.finite(patients$lpbw), , drop = FALSE]
+  one <- function(d, group) {
+    if (nrow(d) < 10 || stats::var(d$lpbw) == 0) return(tibble::tibble(group = group, n_patients = nrow(d)))
+    f <- stats::lm(lv0 ~ lpbw, data = d); b <- stats::coef(f)[["lpbw"]]; se <- sqrt(stats::vcov(f)["lpbw", "lpbw"])
+    tibble::tibble(group = group, n_patients = nrow(d), rho = 1 + b, se = se,
+                   conf_low = 1 + b - stats::qnorm(0.975) * se, conf_high = 1 + b + stats::qnorm(0.975) * se,
+                   p_rho_one = 2 * stats::pnorm(-abs(b) / se), sd_log_pbw = stats::sd(d$lpbw), sd_log_vtpbw = stats::sd(d$lv0))
+  }
+  dplyr::bind_rows(one(v, "all"),
+                   purrr::map_dfr(levels(droplevels(factor(v$sex_category))), function(x) one(v[v$sex_category == x, ], as.character(x))))
 }
 
 # ---- The time course ------------------------------------------------------------

@@ -53,6 +53,19 @@
 # also carries vt_gradient, the slope's gradient on log VT/PBW itself: under strain,
 # with dose = log VT - log lung size, it equals the lambda gradient (p_vt_equal).
 #
+# With VT/PBW dropped, lambda alone also assumes the index tidal volume was set at the
+# same multiple of PBW in everyone (rho = 1): only then do log PBW and log PFVC act
+# equal and opposite. A reported check, not part of the decision rule, frees log PBW
+# beside lambda in every dropped design (fit_pbw_separate() in causal_common.R):
+#   pbw_separate   estimate is the gradient along PFVC at a fixed PBW, whatever rho is;
+#                  ratio_estimate is the lambda-only fit beside it; pbw_extra is the
+#                  coefficient on log PBW, b (rho - 1) under strain, and
+#                  p_ratio_adequate tests it against 0. At a fixed PBW lambda moves
+#                  mainly with PFVC's age and race terms, so these are less precise and
+#                  lean on age. In the free_height and free_sex rows log PBW is nearly
+#                  a function of the freed input, and its coefficient may be lost.
+#   vt_pbw         rho itself: the slope of log VT on log PBW in ventilated patients.
+#
 # Two questions the main table does not answer have their own tables:
 #   denominators   Is PFVC the volume that sets strain? The designs again with lambda =
 #                  log(PBW / volume) for PFVC at age 25, TLC, alveolar volume and FRC
@@ -84,6 +97,8 @@
 #   causal_triangulation_denominators_<site>.csv   marker x vtpbw x denominator x design
 #   causal_triangulation_timecourse_<site>.csv     marker x vtpbw x design x window
 #   causal_triangulation_phases_<site>.csv         patients and measurements per arm x phase
+#   causal_triangulation_pbw_separate_<site>.csv   marker x design: VT/PBW dropped, PBW freed
+#   causal_triangulation_vt_pbw_<site>.csv         rho, overall and by sex
 #   causal_triangulation_<site>.pdf
 #
 # Runtime: about a minute. Needs scripts 01-03 for the ventilated cohort and for
@@ -136,7 +151,7 @@ fit_encompassing <- function(design, pats, panel, family) {
   out
 }
 
-estimates <- list(); phases <- list(); rule <- list(); denominators <- list(); timecourse <- list()
+estimates <- list(); phases <- list(); rule <- list(); denominators <- list(); timecourse <- list(); pbw_separate <- list()
 for (marker in MARKERS) {
   m <- CAUSAL_MARKERS[CAUSAL_MARKERS$marker == marker, ]
   panel <- load_causal_outcome(config, patients, marker)
@@ -148,6 +163,10 @@ for (marker in MARKERS) {
     left_join(designs$held %>% select(design, target, fails_if), by = "design") %>%
     mutate(marker = marker, family = m$family, injury_sign = m$injury_sign)
   both <- triangulation_supports_both(fits$held, fits$dropped, m$injury_sign)
+  # VT/PBW dropped, with log PBW freed beside lambda (a reported check, not in the rule)
+  pbw_separate[[marker]] <- fit_pbw_separate(designs$dropped, patients, panel, m$family) %>%
+    left_join(fits$dropped %>% select(design, ratio_estimate = estimate, ratio_se = se), by = "design") %>%
+    mutate(marker = marker, injury_sign = m$injury_sign, .before = 1)
   rule[[marker]] <- tibble(marker = marker, supports = unname(both[["rule_both"]]), supports_vtpbw_held = unname(both[["rule_held"]]),
                            supports_vtpbw_dropped = unname(both[["rule_dropped"]]),
                            can_be_applied = !anyNA(fits$held$estimate[fits$held$design %in% c("control_did", paste0("free_", c("age", "sex", "race", "height"), "_did"))]))
@@ -188,6 +207,10 @@ denominators <- bind_rows(denominators) %>% with_interval() %>%
 timecourse <- bind_rows(timecourse) %>% with_interval() %>%
   select(site, cohort, marker, vtpbw, design, quantity, window, from, to, estimate, se, conf_low, conf_high, p_value, n_patients, n_obs)
 phases <- bind_rows(phases) %>% mutate(site = site_name, .before = 1)
+pbw_separate <- bind_rows(pbw_separate) %>% with_interval() %>%
+  select(site, cohort, marker, design, estimate, se, conf_low, conf_high, p_value, pbw_extra, pbw_extra_se,
+         p_ratio_adequate, ratio_estimate, ratio_se, n_patients, n_obs, injury_sign)
+vt_pbw <- vt_follows_pbw(patients) %>% mutate(site = site_name, cohort = cohort, .before = 1)
 
 out_file <- function(name, ext = "csv") file.path(final_dir, paste0("causal_triangulation_", name, site_name, ".", ext))
 write_csv(estimates, out_file("estimates_"))
@@ -195,6 +218,8 @@ write_csv(rule, out_file("rule_"))
 write_csv(denominators, out_file("denominators_"))
 write_csv(timecourse, out_file("timecourse_"))
 write_csv(phases, out_file("phases_"))
+write_csv(pbw_separate, out_file("pbw_separate_"))
+write_csv(vt_pbw, out_file("vt_pbw_"))
 
 pdf(out_file("", "pdf"), width = 11, height = 7.5)
 plot_data <- estimates %>% filter(status == "ok") %>% mutate(design = factor(design, levels = rev(designs$held$design)))
@@ -229,6 +254,13 @@ message("\nEstimates:")
 print(as.data.frame(estimates %>% transmute(marker, vtpbw, design, estimate = signif(estimate, 3), se = signif(se, 3),
                                             p_value = signif(p_value, 2), n_patients, partial_r2 = round(partial_r2, 3))),
       row.names = FALSE)
+message("\nVT/PBW dropped, PBW and PFVC as separate terms (estimate: at a fixed PBW; ratio_estimate: lambda alone):")
+print(as.data.frame(pbw_separate %>% transmute(marker, design, estimate = signif(estimate, 3), se = signif(se, 3),
+                                               ratio_estimate = signif(ratio_estimate, 3), pbw_extra = signif(pbw_extra, 3),
+                                               p_ratio_adequate = signif(p_ratio_adequate, 2), n_patients)), row.names = FALSE)
+message("\nHow closely the index tidal volume followed PBW (rho = 1: the same multiple of PBW in everyone):")
+print(as.data.frame(vt_pbw %>% select(group, n_patients, rho, se, conf_low, conf_high, p_rho_one) %>%
+                      mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
 message("\nDecision rule:")
 print(as.data.frame(rule), row.names = FALSE)
 message("\ncausal_triangulation complete: ", final_dir)
