@@ -334,4 +334,25 @@ lf2 <- lf; lf2$y <- lf2$y + 0.5 * lf2$ldisc * lf2$t
 check(abs(fit_longitudinal(lf2, c("C", "K", "Z_sev"))$beta[["C"]] - b_true) < 1e-8, "a lambda x time effect leaves it unchanged")
 check(abs(fit_longitudinal(lf, c("C", "K"))$beta[["C"]] - b_true) > 0.02, "tidal volume lowered as severity rises biases it without the severity term")
 
+# end to end: records in, the frame's integrals and the estimate out
+set.seed(71)
+ne <- 120; hours <- seq(0, 7 * 24 - 1)
+recs <- expand.grid(h = hours, k = seq_len(ne)); recs$id <- paste0("e", recs$k); recs$s <- recs$h / 24
+step_vt <- function(k) { n_ch <- sample(0:3, 1); at <- sort(sample(hours, n_ch)); lv <- log(450) + cumsum(c(0, rnorm(n_ch, 0, 0.15)))
+                         lv[findInterval(hours, c(-1, at))] }
+recs$lvt <- unlist(lapply(seq_len(ne), step_vt))
+recs$mode <- "assist control-volume control"; recs$vt <- exp(recs$lvt); recs$fio2 <- 0.5; recs$peep <- 8
+e_pat <- data.frame(id = paste0("e", seq_len(ne)), vent = 1, t_off_d = NA_real_, ldisc = rnorm(ne, 0, 0.1))
+xbar <- tapply(recs$lvt, recs$k, mean)
+truth_C <- function(k, t) { h <- hours[hours / 24 < t]; sum((recs$lvt[recs$k == k][h + 1] - xbar[k]) * pmin(1 / 24, t - h / 24)) }
+e_pan <- expand.grid(t = seq(0.3, 6.8, by = 0.5), k = seq_len(ne)); e_pan$id <- paste0("e", e_pan$k); e_pan$phase <- "on"
+e_pan$C_true <- mapply(truth_C, e_pan$k, e_pan$t)
+e_pan$y <- 5 + rnorm(ne)[e_pan$k] + rnorm(ne, 0, 0.05)[e_pan$k] * e_pan$t - 0.07 * e_pan$C_true
+e_frame <- longitudinal_frame(e_pat, e_pan, list(vent = recs[, c("id", "s", "mode", "vt", "fio2", "peep")],
+                                                pressor = data.frame(id = character(), s = numeric(), dose = numeric())))
+check(max(abs(e_frame$C - e_pan$C_true[match(paste(e_frame$id, e_frame$t), paste(e_pan$id, e_pan$t))])) < 1e-9,
+      "the frame's C is the time integral of log VT about the patient's own mean")
+e_fit <- fit_longitudinal(e_frame, c("C", "C_lead", "K"))
+check(abs(e_fit$beta[["C"]] + 0.07) < 1e-6 && abs(e_fit$beta[["C_lead"]]) < 1e-6, "records to estimate: the planted effect, and none on future tidal volume")
+
 message("\nall tests passed")

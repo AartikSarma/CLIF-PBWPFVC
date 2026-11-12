@@ -17,8 +17,9 @@
 # with the lambda gradient of the unadjusted design on the same patients.
 #
 # Pre-specified analysis (fixed before any real-data run of this script):
-#   Sample      ventilated patients (the cohort of config: gated unless
-#               PBWPFVC_VTPBW_GATE=0) with a volume-targeted set tidal volume for at least
+#   Sample      ventilated patients of the UNGATED cohort (PBWPFVC_VTPBW_GATE=0; the
+#               6-8 mL/kg gate selects on the index tidal volume, the variation this
+#               design uses; the gated run is secondary) with a volume-targeted set tidal volume for at least
 #               LONG_MIN_COVER (half) of their ventilator days, and at least
 #               LONG_MIN_OBS (3) marker values on the ventilator. Ventilator days run
 #               from t0 to liberation or ON_DAYS (7), as in causal_triangulation.R.
@@ -39,8 +40,19 @@
 #               creatinine, and b equal to the lambda gradient (p_equal_lambda).
 #   Secondary   creatinine; the model without the severity terms; the falsification row,
 #               which adds tidal volume LONG_LEAD_H (24) hours in the FUTURE (C_lead) and
-#               should find nothing; and C x lambda, whether a change in tidal volume
-#               acts more where lambda is high (a linear, not logarithmic, dose).
+#               should find nothing; the primary model without the last day of
+#               ventilation (before liberation or death on the ventilator), where
+#               changes are weaning or the end of life; and C x lambda, whether a change
+#               in tidal volume acts more where lambda is high (a linear, not
+#               logarithmic, dose). No other sensitivity analysis is planned.
+#   Estimable   only patients whose tidal volume varied identify the effect: a row is
+#               reported as not estimable when fewer than MIN_PATIENTS (50) of them
+#               remain (n_patients_vt_varying), whatever n_patients says.
+#   Reading     lead with the 95% interval: whether it excludes 0, and whether it
+#               excludes the lambda gradients seen so far (-0.04 to -0.07 for
+#               platelets). p_equal_lambda compares with the unadjusted lambda gradient
+#               on the same patients, itself open to age confounding. A standard error
+#               as large as those gradients means the design cannot tell them from 0.
 #
 # Read the description table first. If tidal volume rarely changes, or changes mostly at
 # mode switches or in the last day before liberation (weaning), the estimate is a
@@ -56,12 +68,14 @@
 #   causal_longitudinal_description_<site>.csv   how tidal volume changed within patients
 #   causal_longitudinal_modes_<site>.csv         ventilator records by mode, VT set or not
 #   causal_longitudinal_estimates_<site>.csv     marker x model x term
+#   causal_longitudinal_sample_<site>.csv        patients analysed and dropped, by reason
 # No patient-level row is written.
 #
 # Runtime: a minute or two. Needs scripts 01-03 (and PBWPFVC_COHORT=nosupport, which
 # load_causal_patients() reads, although the control is not used here).
 #
-# Usage: uvr run code/supplement/causal_longitudinal.R
+# Usage (primary, ungated): PBWPFVC_VTPBW_GATE=0 uvr run code/supplement/causal_longitudinal.R
+#        PowerShell: $env:PBWPFVC_VTPBW_GATE = "0"; uvr run code/supplement/causal_longitudinal.R
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -91,17 +105,20 @@ modes <- records$vent %>% filter(s >= 0, s < t_end[match(id, vp$id)]) %>%
   mutate(volume_targeted = mode %in% VOLUME_TARGETED_MODES, site = site_name, cohort = cohort, .before = 1)
 description <- describe_vt_changes(vp, records$vent, t_end) %>% mutate(site = site_name, cohort = cohort, .before = 1)
 
-MODELS <- list(primary = c("C", "K", "Z_fio2", "Z_peep", "Z_pressor"),
-               no_severity = c("C", "K"),
-               falsification_lead = c("C", "C_lead", "K", "Z_fio2", "Z_peep", "Z_pressor"),
-               interaction_lambda = c("C", "CL", "K", "Z_fio2", "Z_peep", "Z_pressor"))
+PRIMARY <- c("C", "K", "Z_fio2", "Z_peep", "Z_pressor")
+MODELS <- list(primary = list(terms = PRIMARY, rows = "all"),
+               no_severity = list(terms = c("C", "K"), rows = "all"),
+               falsification_lead = list(terms = c("C", "C_lead", "K", "Z_fio2", "Z_peep", "Z_pressor"), rows = "all"),
+               without_last_day = list(terms = PRIMARY, rows = "not_last_day"),
+               interaction_lambda = list(terms = c("C", "CL", "K", "Z_fio2", "Z_peep", "Z_pressor"), rows = "all"))
 REPORT <- c("C", "C_lead", "CL", "Z_fio2", "Z_peep", "Z_pressor")
 
-estimates <- list()
+estimates <- list(); samples <- list()
 for (marker in MARKERS) {
   m <- CAUSAL_MARKERS[CAUSAL_MARKERS$marker == marker, ]
   panel <- load_causal_outcome(config, patients, marker, complete = FALSE)
   frame <- longitudinal_frame(patients, panel, records)
+  samples[[marker]] <- as_tibble(as.list(attr(frame, "patients"))) %>% mutate(marker = marker, .before = 1)
   if (length(unique(frame$pid)) < MIN_PATIENTS) { message("  ", marker, ": too few patients"); next }
   ids <- unique(frame$id)
   # the lambda gradient of the unadjusted design on the same patients, with its influences
@@ -112,13 +129,23 @@ for (marker in MARKERS) {
   lam_est <- if (is.null(lam)) NA_real_ else lam$beta[[prep$k]]
   lam_infl <- if (is.null(lam)) NULL else setNames(lam$influence[, prep$k], prep$patient_ids[lam$patient])
   for (model in names(MODELS)) {
-    fit <- fit_longitudinal(frame, MODELS[[model]])
-    for (term in intersect(REPORT, names(fit$beta))) {
+    terms <- MODELS[[model]]$terms
+    f <- if (MODELS[[model]]$rows == "not_last_day") frame[!(frame$ended & frame$t > frame$t_end - 1), ] else frame
+    n_obs_pid <- table(f$pid); f <- f[f$pid %in% as.integer(names(n_obs_pid)[n_obs_pid >= LONG_MIN_OBS]), ]
+    n_varying <- length(unique(f$pid[f$varies]))
+    fit <- fit_longitudinal(f, terms)
+    missing_terms <- setdiff(intersect(terms, REPORT), names(fit$beta))
+    if (length(missing_terms)) message("  ", marker, ", ", model, ": no variation left in ", paste(missing_terms, collapse = ", "))
+    for (term in intersect(intersect(terms, REPORT), names(fit$beta))) {
       j <- which(names(fit$beta) == term)
-      row <- tibble(marker = marker, model = model, term = term, estimate = fit$beta[[j]], se = sqrt(fit$V[j, j]),
-                    n_patients = fit$n_patients, n_obs = fit$n_obs, lambda_gradient = lam_est,
+      ok <- n_varying >= MIN_PATIENTS
+      row <- tibble(marker = marker, model = model, term = term,
+                    estimate = if (ok) fit$beta[[j]] else NA_real_, se = if (ok) sqrt(fit$V[j, j]) else NA_real_,
+                    n_patients = fit$n_patients, n_patients_vt_varying = n_varying, n_obs = fit$n_obs,
+                    status = if (ok) "ok" else paste0("not estimable: fewer than ", MIN_PATIENTS, " patients whose tidal volume varied"),
+                    lambda_gradient = lam_est,
                     lambda_gradient_se = if (is.null(lam)) NA_real_ else sqrt(lam$V[prep$k, prep$k]), p_equal_lambda = NA_real_)
-      if (term == "C" && !is.null(lam_infl)) {
+      if (term == "C" && ok && !is.null(lam_infl)) {
         # the two estimators share patients: the covariance from their per-patient influences
         a <- setNames(fit$influence[, j], frame$id[match(fit$pid, frame$pid)])
         common <- intersect(names(a), names(lam_infl))
@@ -129,8 +156,11 @@ for (marker in MARKERS) {
       estimates[[paste(marker, model, term)]] <- row
     }
   }
-  message("  ", marker, ": ", length(ids), " patients, ", nrow(frame), " values (of ", attr(frame, "patients_on"),
-          " with a value on the ventilator)")
+  pp <- attr(frame, "patients")
+  message("  ", marker, ": ", pp[["analysed"]], " patients analysed (", pp[["analysed_with_vt_varying"]], " whose tidal volume varied) of ",
+          pp[["with_marker_on_ventilator"]], " with a value on the ventilator; dropped ", pp[["dropped_low_cover"]],
+          " for volume-targeted time under ", 100 * LONG_MIN_COVER, "%, ", pp[["dropped_fewer_values"]], " for fewer than ",
+          LONG_MIN_OBS, " values")
 }
 estimates <- bind_rows(estimates) %>%
   mutate(site = site_name, cohort = cohort, .before = 1) %>%
@@ -141,6 +171,8 @@ out_file <- function(name) file.path(final_dir, paste0("causal_longitudinal_", n
 write_csv(description, out_file("description_"))
 write_csv(modes, out_file("modes_"))
 write_csv(estimates, out_file("estimates_"))
+samples <- bind_rows(samples) %>% mutate(site = site_name, cohort = cohort, .before = 1)
+write_csv(samples, out_file("sample_"))
 
 message("\nHow tidal volume changed within patients (read this first):")
 print(as.data.frame(description %>% select(-site, -cohort) %>% mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
@@ -149,5 +181,8 @@ print(as.data.frame(modes %>% select(mode, volume_targeted, vt_set, records)), r
 message("\nEstimates (C: log VT integrated over time; strain predicts C = the lambda gradient; C_lead should be 0):")
 print(as.data.frame(estimates %>% transmute(marker, model, term, estimate = signif(estimate, 3), se = signif(se, 3),
                                             p_value = signif(p_value, 2), lambda_gradient = signif(lambda_gradient, 3),
-                                            p_equal_lambda = signif(p_equal_lambda, 2), n_patients, n_obs)), row.names = FALSE)
+                                            p_equal_lambda = signif(p_equal_lambda, 2), n_patients, n_patients_vt_varying,
+                                            n_obs)), row.names = FALSE)
+message("\nPatients analysed and dropped:")
+print(as.data.frame(samples %>% select(-site, -cohort)), row.names = FALSE)
 message("\ncausal_longitudinal complete: ", final_dir)

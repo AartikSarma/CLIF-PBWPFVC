@@ -1063,6 +1063,7 @@ describe_vt_changes <- function(patients, vent, t_end) {
   sw <- c(FALSE, all_v$mode[-1] != all_v$mode[-nrow(all_v)] & all_v$id[-1] == all_v$id[-nrow(all_v)])
   sw_times <- split(all_v$s[sw], all_v$id[sw])
   near_switch <- vapply(which(change), function(j) any(abs(sw_times[[as.character(r$id[j])]] - r$s[j]) <= 1 / 24), logical(1))
+  # the last day of ventilation: before liberation, or before death on the ventilator
   t_off <- patients$t_off_d[match(r$id, patients$id)]
   last_day <- change & !is.na(t_off) & t_off - r$s <= 1
   sd_within <- stats::sd(r$lvt - stats::ave(r$lvt, r$id))
@@ -1074,7 +1075,7 @@ describe_vt_changes <- function(patients, vent, t_end) {
     share_changes_down = mean(d[change] < 0),
     median_abs_change = stats::median(abs(d[change])),
     share_changes_at_mode_switch = if (any(change)) mean(near_switch) else NA_real_,
-    share_changes_in_last_day_before_liberation = if (any(change)) mean(last_day[change]) else NA_real_)
+    share_changes_in_last_day_of_ventilation = if (any(change)) mean(last_day[change]) else NA_real_)
 }
 
 # The regressors at each marker value on the ventilator. t_end: end of the patient's
@@ -1119,11 +1120,22 @@ longitudinal_frame <- function(patients, panel, records) {
                     Z_fio2 = integ(seg_f, -lag, t - lag), Z_peep = integ(seg_p, -lag, t - lag),
                     Z_pressor = integ(seg_n, -lag, t - lag),
                     ldisc = vp$ldisc[q], cover = (covered / t_end)[q])
-  attr(out, "patients_on") <- length(unique(q))
+  out$t_end <- t_end[q]; out$ended <- !is.na(vp$t_off_d[q]) & vp$t_off_d[q] <= ON_DAYS
+  # patients whose tidal volume varied at all: only they identify the effect
+  sd_x <- tapply(seg_c$v, seg_c$pid, function(v) if (length(v) > 1) stats::sd(v) else 0)
+  out$varies <- dplyr::coalesce(as.numeric(sd_x[as.character(q)]), 0) > log(1.05) / 4
+  on <- length(unique(q))
+  low_cover <- unique(out$pid[out$cover < LONG_MIN_COVER])
   out <- out[out$cover >= LONG_MIN_COVER, , drop = FALSE]
   n_obs <- table(out$pid)
-  out <- out[out$pid %in% as.integer(names(n_obs)[n_obs >= LONG_MIN_OBS]), , drop = FALSE]
+  few <- as.integer(names(n_obs)[n_obs < LONG_MIN_OBS])
+  out <- out[!out$pid %in% few, , drop = FALSE]
+  bad <- vapply(c("C", "K", "C_lead", "Z_fio2", "Z_peep", "Z_pressor"), function(v) any(!is.finite(out[[v]])), logical(1))
+  if (any(bad)) stop("longitudinal_frame: non-finite values in ", paste(names(bad)[bad], collapse = ", "))
   out$CL <- out$C * out$ldisc          # secondary: does a change in VT act more where lambda is high?
+  attr(out, "patients") <- c(with_marker_on_ventilator = on, dropped_low_cover = length(low_cover),
+                             dropped_fewer_values = length(few), analysed = length(unique(out$pid)),
+                             analysed_with_vt_varying = length(unique(out$pid[out$varies])))
   out
 }
 
@@ -1144,10 +1156,12 @@ fit_longitudinal <- function(frame, terms, df_time = 3) {
     b <- rowsum(Mc * tc, g) / ifelse(stt > 0, stt, Inf)
     Mc - b[g, , drop = FALSE] * tc
   }
+  if (any(!is.finite(X)) || any(!is.finite(frame$y))) stop("fit_longitudinal: non-finite values")
   Z <- within(X); y <- within(matrix(frame$y, ncol = 1))[, 1]
   keep <- which(colSums(Z^2) > 1e-10)
   qz <- qr(Z[, keep, drop = FALSE]); keep <- keep[qz$pivot[seq_len(qz$rank)]]
   Z <- Z[, keep, drop = FALSE]
+  if (!"C" %in% colnames(Z) && "C" %in% terms) warning("fit_longitudinal: C dropped (no variation left in tidal volume)")
   A <- solve(crossprod(Z)); beta <- A %*% crossprod(Z, y); e <- y - Z %*% beta
   scores <- rowsum(Z * as.numeric(e), g); infl <- scores %*% A
   G <- nrow(infl); V <- crossprod(infl) * G / (G - 1)
