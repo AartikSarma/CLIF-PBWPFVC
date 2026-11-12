@@ -229,6 +229,9 @@ with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
 - So do the age-mediation split (lambda's age part against the rest) and the aeration
   designs (index compliance over predicted size, with BMI). Both were built after the
   results from two sites had been seen, are not simulated, and are not in the rule.
+- `causal_longitudinal.R` (within-patient changes in tidal volume) has unit tests but is
+  not simulated: the generator does not produce a ventilator course. Its specification
+  was fixed in the script header before any real-data run.
 
 ## 11. Changes after the first full run
 

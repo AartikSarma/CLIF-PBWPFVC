@@ -299,4 +299,39 @@ aer <- fit_aeration(designs[designs$design %in% c("unadjusted", "control_did"), 
 check(min(aer$p_strain_restriction) > 0.01, "and, with noise, the strain restriction is not rejected")
 check(max(abs(aer$base_vt_gradient - b)) > 0.05, "without it, tidal volume lowered for stiff lungs biases the VT/PBW gradient")
 
+# ---- 13. longitudinal: tidal volume as it changes within a patient ---------------------------------
+message("13. Within-patient changes in tidal volume")
+# step integrals against a direct sum
+seg <- step_segments(pid = c(1, 1, 1, 2), s = c(0, 1, 2.5, 0.5), v = c(2, NA, 3, 5), hold = 1, upto = c(3, 10))
+check(identical(round(seg$end, 10), c(1, 3, 1.5)) , "a value holds to the next record, at most `hold`, not past the end")
+check(abs(step_integral(seg, c(1, 1, 2), c(0.5, 3, 1)) - c(1, 2 + 0.5 * 3, 2.5)) |> max() < 1e-12, "the step integral matches a hand sum")
+# a fabricated course: patients with their own level, slope and lambda, tidal volume changed
+# by the clinician and in response to a severity that also lowers the marker
+set.seed(61)
+np <- 300; times <- seq(0.25, 6, by = 0.5)
+lf <- expand.grid(t = times, pid = seq_len(np)); lf$id <- paste0("q", lf$pid)
+lam <- rnorm(np, 0, 0.15); lf$ldisc <- lam[lf$pid]
+# the regressors as integrals of piecewise-constant series sampled on a fine grid
+fine <- expand.grid(s = seq(0, 6, by = 1 / 24), pid = seq_len(np))
+sev <- ave(rnorm(nrow(fine), 0, 0.3), fine$pid, FUN = function(x) stats::filter(x, 0.97, method = "recursive"))
+fine$z <- sev; fine$x <- -0.5 * c(0, sev[-length(sev)]) + ave(rnorm(nrow(fine), 0, 0.02), fine$pid, FUN = cumsum)
+fine$x <- fine$x - ave(fine$x, fine$pid)
+cumint <- function(v) ave(v / 24, fine$pid, FUN = cumsum)
+fine$Cx <- cumint(fine$x); fine$Cz <- cumint(fine$z)
+at <- match(paste(lf$pid, lf$t), paste(fine$pid, round(fine$s, 6)))
+lf$C <- fine$Cx[at]; lf$Z_sev <- fine$Cz[at]; lf$K <- lf$t
+b_true <- -0.06
+lf$y <- 5 + rnorm(np)[lf$pid] + (rnorm(np, 0, 0.05) + 0.3 * lam)[lf$pid] * lf$t +
+  as.numeric(splines::ns(lf$t, df = 3) %*% c(-0.1, -0.2, 0.05)) + b_true * lf$C - 0.1 * lf$Z_sev   # a common curve in the model's span
+fit_a <- fit_longitudinal(lf, c("C", "K", "Z_sev"))
+check(abs(fit_a$beta[["C"]] - b_true) < 1e-8, "a planted effect of tidal volume is recovered")
+small <- lf[lf$pid <= 40, ]
+fit_s <- fit_longitudinal(small, c("C", "Z_sev"))
+tb <- splines::ns(small$t, df = 3)
+ref <- lm(small$y ~ small$C + small$Z_sev + tb + factor(small$pid) + factor(small$pid):small$t)
+check(abs(fit_s$beta[["C"]] - coef(ref)[["small$C"]]) < 1e-8, "the estimate equals least squares with a patient intercept and slope")
+lf2 <- lf; lf2$y <- lf2$y + 0.5 * lf2$ldisc * lf2$t
+check(abs(fit_longitudinal(lf2, c("C", "K", "Z_sev"))$beta[["C"]] - b_true) < 1e-8, "a lambda x time effect leaves it unchanged")
+check(abs(fit_longitudinal(lf, c("C", "K"))$beta[["C"]] - b_true) > 0.02, "tidal volume lowered as severity rises biases it without the severity term")
+
 message("\nall tests passed")

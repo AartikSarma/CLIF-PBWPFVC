@@ -176,6 +176,12 @@ Linux needs none of this. Windows is untested.
   strain denominators (PFVC at age 25, TLC, alveolar volume, FRC) and tests each against
   PFVC in one model, and a third cuts the ventilator days into segments so that a marker
   that responds early and plateaus can be read beside one that responds late.
+  `causal_longitudinal.R` compares each ventilated patient with themselves: the
+  marker's course against the set tidal volume as it changed over their ventilator
+  days, with a patient intercept and slope (so lambda and every fixed trait drop out),
+  lagged FiO2, PEEP and pressor dose, and a falsification row on future tidal volume.
+  It tests whether tidal volume matters, not which lung size; its specification is
+  fixed in its header, and it prints how tidal volume changed before any estimate.
   `causal_testbed.R` is a simulation study of those designs with a planted
   truth; its protocol (aims, data-generating mechanisms, estimand, methods, performance
   measures) is [`supplement/CAUSAL_TESTBED_PROTOCOL.md`](supplement/CAUSAL_TESTBED_PROTOCOL.md).

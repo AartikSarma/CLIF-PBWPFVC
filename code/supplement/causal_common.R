@@ -978,3 +978,179 @@ fit_illness_death <- function(designs, states) {
     dplyr::bind_rows(rows, contrast)
   }))
 }
+
+# ==== Longitudinal strain: tidal volume as it changes within a patient =================
+# causal_longitudinal.R. A fixed lung size cancels within a patient, so these functions
+# ask whether TIDAL VOLUME matters, from its changes over a patient's own ventilator
+# course, not whether PFVC is the right denominator. The specification is fixed in the
+# header of causal_longitudinal.R.
+
+VOLUME_TARGETED_MODES <- c("assist control-volume control", "pressure-regulated volume control", "simv")
+LONG_HOLD_H     <- 12   # a set tidal volume holds until the next record, for at most this long
+LONG_LAG_H      <- 6    # severity covariates act with this lag
+LONG_LEAD_H     <- 24   # falsification: tidal volume this far in the future
+LONG_PRESSOR_H  <- 24   # a pressor record holds this long without a new one, then 0
+LONG_MIN_COVER  <- 0.5  # share of a patient's ventilator days with a volume-targeted set VT
+LONG_MIN_OBS    <- 3L   # marker values on the ventilator per patient (intercept + slope + 1)
+
+# Piecewise-constant series as segments: pid (integer), start, end (days), v. Records
+# (pid, s, v) sorted by pid then s; each value holds until the next record of the same
+# patient, for at most `hold` days, and not past `upto` (per pid; Inf for none). Records
+# with v = NA end the previous value and start nothing.
+step_segments <- function(pid, s, v, hold, upto = Inf) {
+  o <- order(pid, s); pid <- pid[o]; s <- s[o]; v <- v[o]
+  nxt <- c(s[-1], Inf); same <- c(pid[-1] == pid[-length(pid)], FALSE)
+  end <- pmin(ifelse(same, nxt, Inf), s + hold)
+  if (length(upto) > 1) upto <- upto[pid]
+  end <- pmin(end, upto)
+  keep <- !is.na(v) & end > s
+  data.frame(pid = pid[keep], start = s[keep], end = end[keep], v = v[keep])
+}
+
+# The integral of a piecewise-constant series from -Inf to t, for queries (qpid, t):
+# vectorised across patients with findInterval on times offset by patient.
+step_integral <- function(seg, qpid, t) {
+  t <- rep_len(t, length(qpid))
+  if (!nrow(seg)) return(rep(0, length(t)))
+  seg <- seg[order(seg$pid, seg$start), , drop = FALSE]
+  big <- 1e5
+  len <- seg$end - seg$start; area <- seg$v * len
+  before <- stats::ave(area, seg$pid, FUN = cumsum) - area     # area of the patient's earlier segments
+  k <- findInterval(qpid * big + t, seg$pid * big + seg$start)
+  ok <- k > 0
+  ok[ok] <- seg$pid[k[ok]] == qpid[ok]
+  out <- numeric(length(t))
+  kk <- k[ok]
+  out[ok] <- before[kk] + seg$v[kk] * pmin(pmax(t[ok] - seg$start[kk], 0), len[kk])
+  out
+}
+
+# The ventilator records of the ventilated patients, in days from t0.
+load_vent_records <- function(config, patients) {
+  v <- patients[patients$vent == 1, c("id", "t0"), drop = FALSE]
+  wf <- arrow::read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
+                            col_select = c("hospitalization_id", "recorded_dttm", "device_category", "mode_category",
+                                           "tidal_volume_set", "fio2_set", "peep_set")) %>%
+    dplyr::rename(id = hospitalization_id) %>%
+    dplyr::filter(id %in% v$id, tolower(trimws(device_category)) == "imv") %>%
+    dplyr::inner_join(v, by = "id") %>%
+    dplyr::mutate(s = as.numeric(difftime(recorded_dttm, t0, units = "days")),
+                  mode = tolower(trimws(mode_category)),
+                  fio2 = dplyr::if_else(fio2_set > 1.5, fio2_set / 100, fio2_set)) %>%
+    dplyr::filter(s >= -1, s <= ON_DAYS + 1) %>%
+    dplyr::select(id, s, mode, vt = tidal_volume_set, fio2, peep = peep_set)
+  pr <- arrow::read_parquet(both_cohorts(config, "ne_equiv_admin.parquet")[[1]]) %>%
+    dplyr::transmute(id = hospitalization_id, dttm = admin_dttm, dose = pmin(ne_equiv_total, 1)) %>%
+    dplyr::inner_join(v, by = "id") %>%
+    dplyr::mutate(s = as.numeric(difftime(dttm, t0, units = "days"))) %>%
+    dplyr::filter(s >= -2, s <= ON_DAYS + 1, is.finite(dose), dose >= 0) %>% dplyr::select(id, s, dose)
+  list(vent = as.data.frame(wf), pressor = as.data.frame(pr))
+}
+
+# What the within-patient variation in tidal volume is made of: the description to read
+# BEFORE the estimate. A change is a new set VT more than 5% from the one before, on a
+# volume-targeted mode, during the ventilator days.
+describe_vt_changes <- function(patients, vent, t_end) {
+  r <- vent[vent$mode %in% VOLUME_TARGETED_MODES & !is.na(vent$vt) & vent$vt > 0 & vent$s >= 0, , drop = FALSE]
+  r <- r[r$s < t_end[match(r$id, patients$id)], , drop = FALSE]
+  r <- r[order(r$id, r$s), , drop = FALSE]
+  r$lvt <- log(r$vt)
+  same <- c(FALSE, r$id[-1] == r$id[-nrow(r)])
+  d <- c(NA, diff(r$lvt)); d[!same] <- NA
+  change <- !is.na(d) & abs(d) > log(1.05)
+  # a mode switch within an hour before the change, and changes in the last day before liberation
+  all_v <- vent[order(vent$id, vent$s), , drop = FALSE]
+  sw <- c(FALSE, all_v$mode[-1] != all_v$mode[-nrow(all_v)] & all_v$id[-1] == all_v$id[-nrow(all_v)])
+  sw_times <- split(all_v$s[sw], all_v$id[sw])
+  near_switch <- vapply(which(change), function(j) any(abs(sw_times[[as.character(r$id[j])]] - r$s[j]) <= 1 / 24), logical(1))
+  t_off <- patients$t_off_d[match(r$id, patients$id)]
+  last_day <- change & !is.na(t_off) & t_off - r$s <= 1
+  sd_within <- stats::sd(r$lvt - stats::ave(r$lvt, r$id))
+  tibble::tibble(
+    n_patients = dplyr::n_distinct(r$id),
+    within_patient_sd_log_vt = sd_within,
+    share_patients_with_a_change = mean(tapply(change, r$id, any)),
+    changes = sum(change), changes_per_patient_day = sum(change) / sum(tapply(r$s, r$id, function(x) max(x) - min(x)) + 1 / 24),
+    share_changes_down = mean(d[change] < 0),
+    median_abs_change = stats::median(abs(d[change])),
+    share_changes_at_mode_switch = if (any(change)) mean(near_switch) else NA_real_,
+    share_changes_in_last_day_before_liberation = if (any(change)) mean(last_day[change]) else NA_real_)
+}
+
+# The regressors at each marker value on the ventilator. t_end: end of the patient's
+# ventilator days (liberation or ON_DAYS). C is the integral from 0 to t of the set log
+# VT about the patient's own time-weighted mean, over volume-targeted time; K the
+# volume-targeted time itself; C_lead the same integral of tidal volume LONG_LEAD_H
+# later; Z_* the integrals of FiO2, PEEP and pressor dose LONG_LAG_H earlier.
+longitudinal_frame <- function(patients, panel, records) {
+  vp <- patients[patients$vent == 1, , drop = FALSE]
+  t_end <- pmin(dplyr::coalesce(vp$t_off_d, ON_DAYS), ON_DAYS)
+  pid_of <- function(id) match(id, vp$id)
+  vent <- records$vent; vent$pid <- pid_of(vent$id)
+  vent <- vent[!is.na(vent$pid), , drop = FALSE]
+  upto <- t_end
+  # tidal volume on volume-targeted modes
+  lvt <- ifelse(vent$mode %in% VOLUME_TARGETED_MODES & !is.na(vent$vt) & vent$vt > 0, log(vent$vt), NA_real_)
+  seg_x <- step_segments(vent$pid, vent$s, lvt, LONG_HOLD_H / 24, upto)
+  seg_x <- seg_x[seg_x$end > 0, , drop = FALSE]; seg_x$start <- pmax(seg_x$start, 0)
+  seg_k <- transform(seg_x, v = 1)
+  covered <- step_integral(seg_k, seq_len(nrow(vp)), t_end)
+  mean_x <- step_integral(seg_x, seq_len(nrow(vp)), t_end) / covered
+  seg_c <- transform(seg_x, v = v - mean_x[pid])
+  # severity: carried forward without limit, the first value carried back
+  carry <- function(val) {
+    ok <- !is.na(val)
+    seg <- step_segments(vent$pid[ok], vent$s[ok], val[ok], Inf, upto)
+    first <- seg[!duplicated(seg$pid), , drop = FALSE]
+    rbind(transform(first, start = pmin(-2, first$start), end = first$start), seg)[, c("pid", "start", "end", "v")]
+  }
+  seg_f <- carry(vent$fio2); seg_p <- carry(vent$peep)
+  pr <- records$pressor; pr$pid <- pid_of(pr$id); pr <- pr[!is.na(pr$pid), , drop = FALSE]
+  seg_n <- step_segments(pr$pid, pr$s, pr$dose, LONG_PRESSOR_H / 24, upto)
+  # the marker values on the ventilator
+  m <- panel[panel$phase == "on" & panel$id %in% vp$id, c("id", "t", "y"), drop = FALSE]
+  m$pid <- pid_of(m$id)
+  m <- m[m$t <= t_end[m$pid], , drop = FALSE]
+  q <- m$pid; t <- m$t; lag <- LONG_LAG_H / 24; lead <- LONG_LEAD_H / 24
+  integ <- function(seg, a, b) step_integral(seg, q, b) - step_integral(seg, q, a)
+  out <- data.frame(id = m$id, pid = q, t = t, y = m$y,
+                    C = integ(seg_c, 0, t), K = integ(seg_k, 0, t),
+                    C_lead = integ(seg_c, lead, t + lead),
+                    Z_fio2 = integ(seg_f, -lag, t - lag), Z_peep = integ(seg_p, -lag, t - lag),
+                    Z_pressor = integ(seg_n, -lag, t - lag),
+                    ldisc = vp$ldisc[q], cover = (covered / t_end)[q])
+  attr(out, "patients_on") <- length(unique(q))
+  out <- out[out$cover >= LONG_MIN_COVER, , drop = FALSE]
+  n_obs <- table(out$pid)
+  out <- out[out$pid %in% as.integer(names(n_obs)[n_obs >= LONG_MIN_OBS]), , drop = FALSE]
+  out$CL <- out$C * out$ldisc          # secondary: does a change in VT act more where lambda is high?
+  out
+}
+
+# Least squares with a patient intercept and a patient slope in t, by removing both
+# within each patient (Frisch-Waugh-Lovell), and a common spline in t; standard errors
+# clustered on the patient. Returns every coefficient of `terms`, its covariance and
+# each patient's influence (for contrasts with other estimators on the same patients).
+fit_longitudinal <- function(frame, terms, df_time = 3) {
+  g <- match(frame$pid, unique(frame$pid))
+  tb <- splines::ns(frame$t, df = df_time); colnames(tb) <- paste0("time", seq_len(df_time))
+  X <- cbind(as.matrix(frame[, terms, drop = FALSE]), tb)
+  within <- function(M) {
+    n <- tabulate(g); tm <- rowsum(frame$t, g)[, 1] / n
+    tc <- frame$t - tm[g]
+    Mm <- rowsum(M, g) / n
+    Mc <- M - Mm[g, , drop = FALSE]
+    stt <- rowsum(tc^2, g)[, 1]
+    b <- rowsum(Mc * tc, g) / ifelse(stt > 0, stt, Inf)
+    Mc - b[g, , drop = FALSE] * tc
+  }
+  Z <- within(X); y <- within(matrix(frame$y, ncol = 1))[, 1]
+  keep <- which(colSums(Z^2) > 1e-10)
+  qz <- qr(Z[, keep, drop = FALSE]); keep <- keep[qz$pivot[seq_len(qz$rank)]]
+  Z <- Z[, keep, drop = FALSE]
+  A <- solve(crossprod(Z)); beta <- A %*% crossprod(Z, y); e <- y - Z %*% beta
+  scores <- rowsum(Z * as.numeric(e), g); infl <- scores %*% A
+  G <- nrow(infl); V <- crossprod(infl) * G / (G - 1)
+  list(beta = setNames(beta[, 1], colnames(Z)), V = V, influence = infl, pid = unique(frame$pid)[as.integer(rownames(scores))],
+       n_patients = G, n_obs = nrow(frame))
+}
