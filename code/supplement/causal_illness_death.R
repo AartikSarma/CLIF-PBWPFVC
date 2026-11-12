@@ -71,7 +71,7 @@
 #   causal_illness_death_<site>.pdf
 #
 # Runtime: about a minute. Needs scripts 01-03 for the ventilated cohort and for
-# PBWPFVC_COHORT=nosupport.
+# PBWPFVC_COHORT=nosupport. PBWPFVC_CAUSAL_MARKERS picks markers (default: all).
 #
 # Usage: uvr run code/supplement/causal_illness_death.R
 # =============================================================================
@@ -95,7 +95,10 @@ message("Patients: ", sum(patients$vent == 1), " ventilated, ", sum(patients$ven
 VTPBW <- c(held = TRUE, dropped = FALSE)
 
 estimates <- list(); counts <- list()
-for (marker in names(INJURY_MARKERS)) {
+MARKERS <- strsplit(Sys.getenv("PBWPFVC_CAUSAL_MARKERS", paste(names(INJURY_MARKERS), collapse = ",")), ",")[[1]]
+MARKERS <- intersect(names(INJURY_MARKERS), MARKERS)
+if (!length(MARKERS)) stop("PBWPFVC_CAUSAL_MARKERS names none of: ", paste(names(INJURY_MARKERS), collapse = ", "))
+for (marker in MARKERS) {
   injury <- load_injury_times(config, patients, marker)
   states <- illness_death_states(patients, injury)
   definition <- INJURY_MARKERS[[marker]]
