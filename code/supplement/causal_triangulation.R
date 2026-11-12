@@ -59,12 +59,16 @@
 # beside lambda in every dropped design (fit_pbw_separate() in causal_common.R):
 #   pbw_separate   estimate is the gradient along PFVC at a fixed PBW, whatever rho is;
 #                  ratio_estimate is the lambda-only fit beside it; pbw_extra is the
-#                  coefficient on log PBW, b (rho - 1) under strain, and
-#                  p_ratio_adequate tests it against 0. At a fixed PBW lambda moves
+#                  coefficient on log PBW, b (rho - 1) under strain (so close to
+#                  estimate x (rho - 1)), and p_ratio_adequate tests it against 0. It
+#                  also takes any direct effect of height or sex, so read it beside
+#                  rho, not alone. Not simulated: unit tests only. At a fixed PBW lambda moves
 #                  mainly with PFVC's age and race terms, so these are less precise and
 #                  lean on age. In the free_height and free_sex rows log PBW is nearly
 #                  a function of the freed input, and its coefficient may be lost.
 #   vt_pbw         rho itself: the slope of log VT on log PBW in ventilated patients.
+#                  The default cohort is gated on VT/PBW 6-8 mL/kg, which pulls rho
+#                  toward 1; PBWPFVC_VTPBW_GATE=0 shows how tidal volume was set.
 #
 # Two questions the main table does not answer have their own tables:
 #   denominators   Is PFVC the volume that sets strain? The designs again with lambda =

@@ -506,7 +506,10 @@ fit_all_designs <- function(designs, patients, panel, column = "y", family = "ga
 # PFVC effect with a diluted tidal-volume effect. Adding log PBW beside lambda frees
 # them: the lambda coefficient is then minus the log PFVC coefficient, the gradient
 # along PFVC at a fixed PBW (and so roughly a fixed VT) whatever rho is, and the
-# coefficient on log PBW is b (rho - 1), zero when the ratio form is adequate. PBW is
+# coefficient on log PBW is b (rho - 1), zero when the ratio form is adequate. It also
+# takes any direct effect of height or sex on the marker, so a coefficient of zero
+# is not proof of rho = 1, nor a non-zero one proof of rho != 1: under strain it
+# should be close to estimate x (rho - 1), with rho from vt_follows_pbw(). PBW is
 # almost entirely height within sex, so at a fixed PBW lambda moves mainly with the age
 # and race terms of PFVC: these designs are less precise and lean on age.
 
@@ -552,6 +555,9 @@ fit_pbw_separate <- function(designs, patients, panel, family = "gaussian") {
 # rho is 1 plus the slope of log VT/PBW on log PBW). 1 is VT at the same multiple of
 # PBW in everyone; below 1, smaller patients got relatively more. Overall and by sex
 # (PBW, and so the protocol's tidal volume, differs by sex at the same height).
+# In the default cohort, gated on VT/PBW 6-8 mL/kg at the index, the gate truncates
+# log VT/PBW and pulls rho toward 1: there rho describes the analysed sample, not how
+# tidal volume was set. Run with PBWPFVC_VTPBW_GATE=0 for that.
 vt_follows_pbw <- function(patients) {
   v <- patients[patients$vent == 1 & is.finite(patients$lv0) & is.finite(patients$lpbw), , drop = FALSE]
   one <- function(d, group) {

@@ -224,6 +224,8 @@ with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
   estimable there. Injury is seen only when the marker is measured.
 - The denominator comparison of `causal_triangulation.R` is not simulated beyond the two
   wrong-denominator stress scenarios.
+- The separate-terms check of `causal_triangulation.R` (log PBW freed beside lambda with
+  VT/PBW dropped, and rho) has unit tests but is not simulated, and is not in the rule.
 
 ## 11. Changes after the first full run
 
