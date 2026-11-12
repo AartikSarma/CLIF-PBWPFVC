@@ -226,6 +226,9 @@ with `$env:PBWPFVC_CAUSAL_REPS = "1000"` before the command.
   wrong-denominator stress scenarios.
 - The separate-terms check of `causal_triangulation.R` (log PBW freed beside lambda with
   VT/PBW dropped, and rho) has unit tests but is not simulated, and is not in the rule.
+- So do the age-mediation split (lambda's age part against the rest) and the aeration
+  designs (index compliance over predicted size, with BMI). Both were built after the
+  results from two sites had been seen, are not simulated, and are not in the rule.
 
 ## 11. Changes after the first full run
 
