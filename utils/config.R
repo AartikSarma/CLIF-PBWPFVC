@@ -132,18 +132,3 @@ estimate_fio2_nosupport <- function(df) {
 
 # Load the configuration
 config <- load_config()
-
-# arrow on macOS: the parquet reader and writer run single-threaded. On an Apple
-# silicon Mac (arrow 26.0.0, R 4.6.1, macOS 26) the multithreaded reader crashed R
-# with a segfault on real-data volumes. The run that completed limited every threaded
-# library to one thread (OMP_NUM_THREADS and others); that limiting arrow alone is
-# enough is inferred, not yet confirmed. Linux keeps arrow's
-# default. PBWPFVC_ARROW_THREADS sets the number of threads on any system.
-local({
-  n <- Sys.getenv("PBWPFVC_ARROW_THREADS", unset = "")
-  if (!nzchar(n) && Sys.info()[["sysname"]] == "Darwin") n <- "1"
-  if (nzchar(n) && requireNamespace("arrow", quietly = TRUE)) {
-    arrow::set_cpu_count(as.integer(n))
-    message("arrow threads: ", n, " (PBWPFVC_ARROW_THREADS sets them)")
-  }
-})

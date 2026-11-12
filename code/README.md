@@ -17,6 +17,21 @@ scripts find their inputs by file-name prefix, so a prefix changes together with
 its readers, in one commit. No other site has the code yet, so names are still free
 to change; that stops once sites have returned `final/` folders.
 
+## macOS on Apple silicon: run with one thread
+
+On an Apple silicon Mac (M3 Max, macOS 26, R 4.6.1, arrow 26.0.0) script 03 and
+`supplement/causal_triangulation.R` crash R with a segfault (`caught segfault ...
+cause 'invalid permissions'`, no traceback) on real-data volumes, and run cleanly when
+every threaded library is limited to one thread before R starts. Which library is at
+fault is not yet known; limiting arrow from inside R was not enough. Until it is, set
+these in the terminal before `uvr run` (or add the line to `~/.zshrc`):
+
+```bash
+export OMP_NUM_THREADS=1 OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 R_DATATABLE_NUM_THREADS=1
+```
+
+Linux needs none of this. Windows is untested.
+
 ## Pipeline
 
 | Script | Block | What it does | Writes (prefix) |
