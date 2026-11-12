@@ -263,6 +263,17 @@ message("\nEstimates:")
 print(as.data.frame(estimates %>% transmute(marker, vtpbw, design, estimate = signif(estimate, 3), se = signif(se, 3),
                                             p_value = signif(p_value, 2), n_patients, partial_r2 = round(partial_r2, 3))),
       row.names = FALSE)
+message("\nThe gradient on log VT/PBW itself, VT/PBW held (under strain it equals the lambda gradient):")
+print(as.data.frame(estimates %>% filter(vtpbw == "held", !is.na(vt_gradient)) %>%
+                      transmute(marker, design, estimate = signif(estimate, 3), vt_gradient = signif(vt_gradient, 3),
+                                vt_gradient_se = signif(vt_gradient_se, 3), p_vt_equal = signif(p_vt_equal, 2))), row.names = FALSE)
+message("\nOther strain denominators (patients aged 80 or under in whom every volume is defined):")
+print(as.data.frame(denominators %>% filter(design %in% c("unadjusted", "adjusted", "control_did", "free_age_did", "free_sex_did",
+                                                          "free_race_did", "free_height_did", "within_onoff", "off_reversal",
+                                                          "encompassing", "encompassing_did")) %>%
+                      transmute(marker, vtpbw, denominator, design, estimate = signif(estimate, 3), se = signif(se, 3),
+                                p_value = signif(p_value, 2), pfvc_extra = signif(pfvc_extra, 3),
+                                p_candidate_enough = signif(p_candidate_enough, 2), n_patients)), row.names = FALSE)
 message("\nVT/PBW dropped, PBW and PFVC as separate terms (estimate: at a fixed PBW; ratio_estimate: lambda alone):")
 print(as.data.frame(pbw_separate %>% transmute(marker, design, estimate = signif(estimate, 3), se = signif(se, 3),
                                                ratio_estimate = signif(ratio_estimate, 3), pbw_extra = signif(pbw_extra, 3),
