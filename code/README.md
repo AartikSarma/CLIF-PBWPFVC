@@ -182,6 +182,10 @@ Linux needs none of this. Windows is untested.
   lagged FiO2, PEEP and pressor dose, and a falsification row on future tidal volume.
   It tests whether tidal volume matters, not which lung size; its specification is
   fixed in its header, and it prints how tidal volume changed before any estimate.
+  `causal_practice_cells.R` reads no outcome: it asks whether ICUs and periods differ
+  enough in how tidal volume followed PBW (rho, the slope of log VT on log PBW, per
+  unit x year) to support a design that uses those differences as an instrument, with
+  the spread of rho, the first-stage F and balance on baseline characteristics.
   `causal_testbed.R` is a simulation study of those designs with a planted
   truth; its protocol (aims, data-generating mechanisms, estimand, methods, performance
   measures) is [`supplement/CAUSAL_TESTBED_PROTOCOL.md`](supplement/CAUSAL_TESTBED_PROTOCOL.md).
