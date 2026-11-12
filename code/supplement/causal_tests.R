@@ -268,4 +268,18 @@ check(is.null(with_pbw_separate(dropped[dropped$design == "fingerprint", ])) &&
 r <- suppressWarnings(vt_follows_pbw(sep_pat))   # an exact fit, by construction
 check(abs(r$rho[r$group == "all"] - rho) < 1e-8, "rho is recovered from log VT/PBW and log PBW")
 
+# ---- 11. the age-mediation split -----------------------------------------------------------------
+message("11. lambda split into its age part and the rest")
+med_pat <- exact$patients; set.seed(41)
+med_pat$lage <- 0.6 * (med_pat$age10 - mean(med_pat$age10)) / 10; med_pat$lrest <- med_pat$ldisc - med_pat$lage
+med_pan <- exact$panel; i <- match(med_pan$id, med_pat$id); on_v <- med_pan$phase == "on" & med_pat$vent[i] == 1
+make_y <- function(b_rest, b_age) 3 + 0.1 * (i %% 7) + ifelse(on_v, b_rest * med_pat$lrest[i] + b_age * med_pat$lage[i], 0) * med_pan$t
+med_pan$y <- make_y(-0.15, -0.15)
+full <- fit_age_mediation(designs[designs$design %in% c("unadjusted", "control_did"), ], med_pat, med_pan)
+check(max(abs(full$share_mediated - 1)) < 1e-6, "age acting only through lambda: share mediated 1")
+med_pan$y <- make_y(-0.15, -0.45)
+part <- fit_age_mediation(designs[designs$design %in% c("unadjusted", "control_did"), ], med_pat, med_pan)
+check(max(abs(part$share_mediated - 1 / 3)) < 1e-6 && max(abs(part$b_age + 0.45)) < 1e-6, "an extra age effect: share mediated b_rest / b_age")
+check(is.null(age_mediation_design(designs[designs$design == "free_age", ])), "no split for a design that frees age")
+
 message("\nall tests passed")

@@ -106,6 +106,8 @@
 #   causal_triangulation_phases_<site>.csv         patients and measurements per arm x phase
 #   causal_triangulation_pbw_separate_<site>.csv   marker x design: VT/PBW dropped, PBW freed
 #   causal_triangulation_vt_pbw_<site>.csv         rho, overall and by sex
+#   causal_triangulation_age_mediation_<site>.csv  lambda split into its age part and
+#                                                  the rest (fit_age_mediation())
 #   causal_triangulation_<site>.pdf
 #
 # Runtime: about a minute. Needs scripts 01-03 for the ventilated cohort and for
@@ -161,6 +163,7 @@ fit_encompassing <- function(design, pats, panel, family) {
 }
 
 estimates <- list(); phases <- list(); rule <- list(); denominators <- list(); timecourse <- list(); pbw_separate <- list()
+age_mediation <- list()
 for (marker in MARKERS) {
   m <- CAUSAL_MARKERS[CAUSAL_MARKERS$marker == marker, ]
   panel <- load_causal_outcome(config, patients, marker)
@@ -176,6 +179,8 @@ for (marker in MARKERS) {
   pbw_separate[[marker]] <- fit_pbw_separate(designs$dropped, patients, panel, m$family, rho = RHO) %>%
     left_join(fits$dropped %>% select(design, ratio_estimate = estimate, ratio_se = se), by = "design") %>%
     mutate(marker = marker, injury_sign = m$injury_sign, .before = 1)
+  age_mediation[[marker]] <- bind_rows(lapply(designs, fit_age_mediation, patients = patients, panel = panel, family = m$family),
+                                       .id = "vtpbw") %>% mutate(marker = marker, .before = 1)
   rule[[marker]] <- tibble(marker = marker, supports = unname(both[["rule_both"]]), supports_vtpbw_held = unname(both[["rule_held"]]),
                            supports_vtpbw_dropped = unname(both[["rule_dropped"]]),
                            can_be_applied = !anyNA(fits$held$estimate[fits$held$design %in% c("control_did", paste0("free_", c("age", "sex", "race", "height"), "_did"))]))
@@ -219,6 +224,7 @@ phases <- bind_rows(phases) %>% mutate(site = site_name, .before = 1)
 pbw_separate <- bind_rows(pbw_separate) %>% with_interval() %>%
   select(site, cohort, marker, design, estimate, se, conf_low, conf_high, p_value, pbw_extra, pbw_extra_se,
          p_ratio_adequate, rho, pbw_extra_strain, p_strain_consistent, ratio_estimate, ratio_se, n_patients, n_obs, injury_sign)
+age_mediation <- bind_rows(age_mediation) %>% mutate(site = site_name, cohort = cohort, .before = 1)
 vt_pbw <- vt_pbw_fit %>% mutate(site = site_name, cohort = cohort, .before = 1)
 
 out_file <- function(name, ext = "csv") file.path(final_dir, paste0("causal_triangulation_", name, site_name, ".", ext))
@@ -229,6 +235,7 @@ write_csv(timecourse, out_file("timecourse_"))
 write_csv(phases, out_file("phases_"))
 write_csv(pbw_separate, out_file("pbw_separate_"))
 write_csv(vt_pbw, out_file("vt_pbw_"))
+write_csv(age_mediation, out_file("age_mediation_"))
 
 pdf(out_file("", "pdf"), width = 11, height = 7.5)
 plot_data <- estimates %>% filter(status == "ok") %>% mutate(design = factor(design, levels = rev(designs$held$design)))
@@ -280,6 +287,13 @@ print(as.data.frame(pbw_separate %>% transmute(marker, design, estimate = signif
                                                p_ratio_adequate = signif(p_ratio_adequate, 2),
                                                pbw_extra_strain = signif(pbw_extra_strain, 3),
                                                p_strain_consistent = signif(p_strain_consistent, 2), n_patients)), row.names = FALSE)
+message("\nDoes PFVC carry the age gradient? b_rest: lambda's non-age part; b_age: its age part (share_mediated = b_rest / b_age):")
+print(as.data.frame(age_mediation %>% filter(design %in% c("unadjusted", "control_did", "within_onoff", "off_reversal")) %>%
+                      transmute(marker, vtpbw, design, b_rest = signif(b_rest, 3), b_rest_se = signif(b_rest_se, 3),
+                                b_age = signif(b_age, 3), b_age_se = signif(b_age_se, 3), p_full_mediation = signif(p_full_mediation, 2),
+                                share_mediated = signif(share_mediated, 2), share_se = signif(share_mediated_se, 2),
+                                age_per_decade = signif(age_gradient_per_decade, 2), via_pfvc_per_decade = signif(through_pfvc_per_decade, 2),
+                                n_patients)), row.names = FALSE)
 message("\nHow closely the index tidal volume followed PBW (rho = 1: the same multiple of PBW in everyone):")
 print(as.data.frame(vt_pbw %>% select(group, n_patients, rho, se, conf_low, conf_high, p_rho_one) %>%
                       mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)

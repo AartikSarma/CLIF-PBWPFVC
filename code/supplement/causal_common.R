@@ -168,12 +168,16 @@ load_causal_patients <- function(config) {
            # scenarios: GLI at age 25 (no age term) and GLI without its race term
            ldisc25 = log(pbw / pfvc_age25),
            ldisc_norace = ldisc + pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_race,
+           # lambda's age part (minus GLI's age term in log PFVC, other inputs at reference)
+           # and the rest of lambda, for the age-mediation check
+           lage = -pfvc_channels(pick(height_cm, age10, sex_category, race_category), "log_pfvc")$ch_age,
+           lrest = ldisc - lage,
            # the other reference volumes (NA above their age limit)
            ldisc_tlc = log(pbw / ptlc), ldisc_va = log(pbw / pva), ldisc_frc = log(pbw / pfrc)) %>%
-    mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc, lpbw),
+    mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc, lpbw, lage, lrest),
                   ~ .x - mean(.x[vent == 1], na.rm = TRUE))) %>%
     select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, pre_avail_d, death_d, age10, age_z,
-           sex_category, race_category, height_cm, pbw, lpbw, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
+           sex_category, race_category, height_cm, pbw, lpbw, lage, lrest, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
            fp, lv0, sofa_z, sf_z)
 }
 
@@ -576,6 +580,41 @@ vt_follows_pbw <- function(patients) {
   }
   dplyr::bind_rows(one(v, "all"),
                    purrr::map_dfr(levels(droplevels(factor(v$sex_category))), function(x) one(v[v$sex_category == x, ], as.character(x))))
+}
+
+# ---- Does PFVC mediate the age gradient? ------------------------------------------
+# PFVC is a fixed function of age, height, sex and race, so given those it does not
+# vary: the share of age's association with the marker that runs through PFVC cannot
+# be read off the data alone. It can under one assumption, the one strain itself makes:
+# a log unit of PFVC acts the same whatever made it small. lambda is split into its age
+# part (lage: GLI's age term) and the rest (lrest: height, sex, race and Devine PBW),
+# each with its own coefficient. b_rest is the PFVC gradient learnt from non-age
+# variation; b_age is the gradient along lambda's age part, which also carries any
+# effect of age that does not run through PFVC. Under the assumption, the share of the
+# age gradient that PFVC accounts for is b_rest / b_age (1: all of it, as strain alone
+# would have; 0: none), and p_full_mediation tests b_rest = b_age. lrest is open to
+# direct effects of sex, race and height as the ladder rungs are; read the control
+# contrast, where effects common to both cohorts cancel.
+age_mediation_design <- function(design) {
+  if (!grepl("\\bldisc\\b", design$formula) || grepl("ns\\(age10", design$formula)) return(NULL)
+  design$formula <- gsub("\\bldisc\\b", "(lrest + lage)", design$formula)
+  design$extra <- gsub("\\bldisc\\b", "lage", design$target)
+  design$target <- gsub("\\bldisc\\b", "lrest", design$target)
+  design
+}
+fit_age_mediation <- function(designs, patients, panel, family = "gaussian") {
+  rows <- dplyr::bind_rows(lapply(seq_len(nrow(designs)), function(i) age_mediation_design(designs[i, ])))
+  if (!nrow(rows)) return(tibble::tibble())
+  v <- patients$vent == 1
+  per_decade <- unname(stats::coef(stats::lm(patients$lage[v] ~ patients$age10[v]))[2])   # lage per decade of age
+  purrr::map_dfr(seq_len(nrow(rows)), function(i) fit_with_extra(rows[i, ], patients, panel, family)) %>%
+    dplyr::transmute(design, b_rest = estimate, b_rest_se = se, b_age = extra, b_age_se = extra_se,
+                     p_full_mediation = 2 * stats::pnorm(-abs(b_rest - b_age) / sqrt(se^2 + extra_se^2 - 2 * cov_extra)),
+                     share_mediated = b_rest / b_age,
+                     share_mediated_se = sqrt(se^2 / b_age^2 + b_rest^2 * extra_se^2 / b_age^4 - 2 * b_rest * cov_extra / b_age^3),
+                     lage_per_decade = per_decade,
+                     age_gradient_per_decade = b_age * per_decade, through_pfvc_per_decade = b_rest * per_decade,
+                     n_patients, n_obs)
 }
 
 # ---- The time course ------------------------------------------------------------
