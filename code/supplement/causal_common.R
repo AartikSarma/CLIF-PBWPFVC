@@ -540,12 +540,19 @@ fit_with_extra <- function(design, patients, panel, family = "gaussian") {
   out
 }
 
-# Every lambda design of a set refitted with log PBW freed beside lambda.
-fit_pbw_separate <- function(designs, patients, panel, family = "gaussian") {
+# Every lambda design of a set refitted with log PBW freed beside lambda. With rho (from
+# vt_follows_pbw), strain predicts pbw_extra = (rho - 1) x estimate: pbw_extra_strain is
+# that prediction and p_strain_consistent tests the difference (rho taken as known; its
+# standard error is small beside the designs'). Where rho is not 1, a non-zero
+# pbw_extra is what strain predicts, so p_ratio_adequate alone misleads there.
+fit_pbw_separate <- function(designs, patients, panel, family = "gaussian", rho = NA_real_) {
   rows <- lapply(seq_len(nrow(designs)), function(i) with_pbw_separate(designs[i, ]))
   rows <- dplyr::bind_rows(rows)
   if (!nrow(rows)) return(tibble::tibble())
   purrr::map_dfr(seq_len(nrow(rows)), function(i) fit_with_extra(rows[i, ], patients, panel, family)) %>%
+    dplyr::mutate(rho = rho, pbw_extra_strain = (rho - 1) * estimate,
+                  p_strain_consistent = 2 * stats::pnorm(-abs(extra - pbw_extra_strain) /
+                    sqrt(extra_se^2 + (rho - 1)^2 * se^2 - 2 * (rho - 1) * cov_extra))) %>%
     dplyr::rename(pbw_extra = extra, pbw_extra_se = extra_se, p_ratio_adequate = p_extra_zero) %>%
     dplyr::select(-cov_extra)
 }

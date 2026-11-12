@@ -60,7 +60,10 @@
 #   pbw_separate   estimate is the gradient along PFVC at a fixed PBW, whatever rho is;
 #                  ratio_estimate is the lambda-only fit beside it; pbw_extra is the
 #                  coefficient on log PBW, b (rho - 1) under strain (so close to
-#                  estimate x (rho - 1)), and p_ratio_adequate tests it against 0. It
+#                  estimate x (rho - 1), given as pbw_extra_strain), p_ratio_adequate
+#                  tests it against 0 and p_strain_consistent against that prediction.
+#                  Where rho is not 1 read p_strain_consistent: a non-zero pbw_extra
+#                  is then what strain predicts. It
 #                  also takes any direct effect of height or sex, so read it beside
 #                  rho, not alone. Not simulated: unit tests only. At a fixed PBW lambda moves
 #                  mainly with PFVC's age and race terms, so these are less precise and
@@ -130,6 +133,8 @@ patients <- load_causal_patients(config)
 VTPBW <- c(held = TRUE, dropped = FALSE)
 designs <- lapply(VTPBW, causal_designs)
 TIMECOURSE_DESIGNS <- c("unadjusted", "control_did", "free_age_did", "within_onoff", "off_reversal")
+vt_pbw_fit <- vt_follows_pbw(patients)
+RHO <- vt_pbw_fit$rho[vt_pbw_fit$group == "all"]
 message("Patients: ", sum(patients$vent == 1), " ventilated, ", sum(patients$vent == 0), " no support")
 
 # a candidate's lambda and what PFVC adds to it, in one model
@@ -168,7 +173,7 @@ for (marker in MARKERS) {
     mutate(marker = marker, family = m$family, injury_sign = m$injury_sign)
   both <- triangulation_supports_both(fits$held, fits$dropped, m$injury_sign)
   # VT/PBW dropped, with log PBW freed beside lambda (a reported check, not in the rule)
-  pbw_separate[[marker]] <- fit_pbw_separate(designs$dropped, patients, panel, m$family) %>%
+  pbw_separate[[marker]] <- fit_pbw_separate(designs$dropped, patients, panel, m$family, rho = RHO) %>%
     left_join(fits$dropped %>% select(design, ratio_estimate = estimate, ratio_se = se), by = "design") %>%
     mutate(marker = marker, injury_sign = m$injury_sign, .before = 1)
   rule[[marker]] <- tibble(marker = marker, supports = unname(both[["rule_both"]]), supports_vtpbw_held = unname(both[["rule_held"]]),
@@ -213,8 +218,8 @@ timecourse <- bind_rows(timecourse) %>% with_interval() %>%
 phases <- bind_rows(phases) %>% mutate(site = site_name, .before = 1)
 pbw_separate <- bind_rows(pbw_separate) %>% with_interval() %>%
   select(site, cohort, marker, design, estimate, se, conf_low, conf_high, p_value, pbw_extra, pbw_extra_se,
-         p_ratio_adequate, ratio_estimate, ratio_se, n_patients, n_obs, injury_sign)
-vt_pbw <- vt_follows_pbw(patients) %>% mutate(site = site_name, cohort = cohort, .before = 1)
+         p_ratio_adequate, rho, pbw_extra_strain, p_strain_consistent, ratio_estimate, ratio_se, n_patients, n_obs, injury_sign)
+vt_pbw <- vt_pbw_fit %>% mutate(site = site_name, cohort = cohort, .before = 1)
 
 out_file <- function(name, ext = "csv") file.path(final_dir, paste0("causal_triangulation_", name, site_name, ".", ext))
 write_csv(estimates, out_file("estimates_"))
@@ -261,7 +266,9 @@ print(as.data.frame(estimates %>% transmute(marker, vtpbw, design, estimate = si
 message("\nVT/PBW dropped, PBW and PFVC as separate terms (estimate: at a fixed PBW; ratio_estimate: lambda alone):")
 print(as.data.frame(pbw_separate %>% transmute(marker, design, estimate = signif(estimate, 3), se = signif(se, 3),
                                                ratio_estimate = signif(ratio_estimate, 3), pbw_extra = signif(pbw_extra, 3),
-                                               p_ratio_adequate = signif(p_ratio_adequate, 2), n_patients)), row.names = FALSE)
+                                               p_ratio_adequate = signif(p_ratio_adequate, 2),
+                                               pbw_extra_strain = signif(pbw_extra_strain, 3),
+                                               p_strain_consistent = signif(p_strain_consistent, 2), n_patients)), row.names = FALSE)
 message("\nHow closely the index tidal volume followed PBW (rho = 1: the same multiple of PBW in everyone):")
 print(as.data.frame(vt_pbw %>% select(group, n_patients, rho, se, conf_low, conf_high, p_rho_one) %>%
                       mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)
