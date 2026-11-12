@@ -246,3 +246,37 @@ applied with VT/PBW held only. Its results led to these changes:
 
 Because these were chosen with results in hand, the second run's error rates for the
 amended rule are a description of it on these scenarios, not a pre-specified test.
+
+### What the second run found (1,000 replicates, both markers)
+
+These are results, recorded so the analyses are read accordingly; they were not
+pre-specified.
+
+- **The amended rule.** With no effect planted it said "supports" in at most 0.8% of sites
+  in every scenario but one, including tidal volume set by indication (0.0%, against 20%
+  and 55% with VT/PBW held only) and the VT/PBW gate as a collider (0.5% and 1.4%). The
+  exception is a ventilation effect that follows the full PFVC equation without being
+  strain (98.5% and 98.7%), which no design separates. Its power was 96% (platelets) and
+  98% (creatinine) at the planted effect, 44% and 43% at half, and 8% and 4.5% at a quarter.
+- **Low power** remains where the effect saturates over time (34%, 25%), under strong
+  informative dropout (57%, 78%), when the true denominator has no race term (43%) and,
+  most of all, when strain follows the age-free structural volume (PFVC at age 25: 1.3%,
+  3.0%). A null under the rule does not exclude strain on that denominator.
+- **Time course.** With no effect the segment and cumulative estimates of the control and
+  age-freed contrasts rejected in at most 7.8% of sites. The first segment (days 0 to 2)
+  was within about 5% of the truth under every time shape. For platelets the later
+  segments ran about 15% too large in absolute value under a linear effect, with coverage
+  kept at 93% to 95%; creatinine's did not. The before-and-after design cannot support the
+  later segments.
+- **Illness-death analysis.** On the hazard scale the plain control contrast
+  (`control_did`) is biased: with age steepening the marker equally in both cohorts and
+  no strain, its injury gradient was about -2 and rejected in 98% (platelets) and 76%
+  (creatinine) of sites. The age-freed contrast (`free_age_did`) was not (4.6%, 5.5%).
+  The unadjusted contrast of injury against death without injury is positive under that
+  scenario too (92%, 100%), and negative under frailty. Read the illness-death designs
+  from `free_age_did`. Death without injury has a positive gradient under strain alone,
+  because worsening below the threshold also raises the hazard of death. The control
+  arm has too few simulated deaths for the death transitions of the contrasts to be
+  checked.
+- **Multisite.** The common-effect pool under-covered when the effect varies between sites
+  (coverage 44% to 72%); DerSimonian-Laird covered 80% to 88%.

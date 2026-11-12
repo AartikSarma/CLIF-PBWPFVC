@@ -54,6 +54,12 @@
 # patient is injured, and dies, once. Each is fitted with the index VT/PBW held and
 # dropped (column vtpbw), as in causal_triangulation.R.
 #
+# Read the age-freed contrast (free_age_did), not control_did. In the simulation
+# (CAUSAL_TESTBED_PROTOCOL.md, section 11) an age effect on the marker's slope that was
+# the same in both cohorts did not cancel on the hazard scale: control_did gave an
+# injury gradient of about -2 with no strain, and the unadjusted injury-minus-death
+# contrast was positive. free_age_did kept its nominal error rate.
+#
 # The estimate is a log hazard ratio per log unit of PBW/PFVC; hr_per_0.1 is the hazard
 # ratio for 0.1 log units (about 10% in the ratio). Positive is more injury or death.
 # A transition with fewer than MIN_EVENTS events in an arm is not estimated.
