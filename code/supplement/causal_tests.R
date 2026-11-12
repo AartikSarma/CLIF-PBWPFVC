@@ -282,4 +282,21 @@ part <- fit_age_mediation(designs[designs$design %in% c("unadjusted", "control_d
 check(max(abs(part$share_mediated - 1 / 3)) < 1e-6 && max(abs(part$b_age + 0.45)) < 1e-6, "an extra age effect: share mediated b_rest / b_age")
 check(is.null(age_mediation_design(designs[designs$design == "free_age", ])), "no split for a design that frees age")
 
+# ---- 12. aeration ------------------------------------------------------------------------------
+message("12. Compliance as aerated volume")
+# strain on log VT - log(aerated volume), aerated = f x PFVC: slope = b (lambda + log VT/PBW - log f)
+aer_pat <- exact$patients; set.seed(51)
+aer_pat$lbmi <- rnorm(nrow(aer_pat), 0, 0.15)
+aer_pat$laer0 <- ifelse(aer_pat$vent == 1, rnorm(nrow(aer_pat), 0, 0.3), 0)
+aer_pat$lv0 <- ifelse(aer_pat$vent == 1, -0.5 * aer_pat$laer0 + rnorm(nrow(aer_pat), 0, 0.05), 0)   # VT lowered for stiff lungs
+aer_pan <- exact$panel; i <- match(aer_pan$id, aer_pat$id); on_v <- aer_pan$phase == "on" & aer_pat$vent[i] == 1
+aer_pan$y <- 3 + 0.1 * (i %% 7) + ifelse(on_v, b * (aer_pat$ldisc[i] + aer_pat$lv0[i] - aer_pat$laer0[i]), 0) * aer_pan$t
+aer <- fit_aeration(designs[designs$design %in% c("unadjusted", "control_did"), ], aer_pat, aer_pan)
+check(max(abs(c(aer$estimate, aer$vt_gradient) - b)) < 1e-6 && max(abs(aer$aeration_gradient + b)) < 1e-6,
+      "with aeration in the model, the lambda, VT/PBW and aeration gradients are b, b and -b")
+aer_pan$y <- aer_pan$y + rnorm(nrow(aer_pan), 0, 0.05)    # the Wald test needs noise
+aer <- fit_aeration(designs[designs$design %in% c("unadjusted", "control_did"), ], aer_pat, aer_pan)
+check(min(aer$p_strain_restriction) > 0.01, "and, with noise, the strain restriction is not rejected")
+check(max(abs(aer$base_vt_gradient - b)) > 0.05, "without it, tidal volume lowered for stiff lungs biases the VT/PBW gradient")
+
 message("\nall tests passed")

@@ -167,7 +167,12 @@ Linux needs none of this. Windows is untested.
   of the decision rule) refits those designs with log PBW freed beside lambda, giving
   the gradient along PFVC at a fixed PBW and a test of the ratio form, and reports how
   closely tidal volume followed PBW (rho, the slope of log VT on log PBW, read in the
-  ungated cohort, since the 6-8 mL/kg gate pulls it toward 1); a second table repeats the designs with other
+  ungated cohort, since the 6-8 mL/kg gate pulls it toward 1). An aeration table adds
+  index compliance over predicted lung size (the fraction still aerated) and BMI to the
+  held designs, which tests that tidal volume, PBW/PFVC and aeration act with the equal
+  weight strain gives them and adjusts the tidal-volume gradient for volumes lowered
+  for stiff lungs; a compliance-scaling table asks which predicted volume compliance
+  follows. A second table repeats the designs with other
   strain denominators (PFVC at age 25, TLC, alveolar volume, FRC) and tests each against
   PFVC in one model, and a third cuts the ventilator days into segments so that a marker
   that responds early and plateaus can be read beside one that responds late.

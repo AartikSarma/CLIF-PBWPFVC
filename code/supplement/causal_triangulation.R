@@ -73,6 +73,17 @@
 #                  The default cohort is gated on VT/PBW 6-8 mL/kg, which pulls rho
 #                  toward 1; PBWPFVC_VTPBW_GATE=0 shows how tidal volume was set.
 #
+# Aeration (fit_aeration(), compliance_scaling() in causal_common.R). Compliance over
+# predicted lung size estimates the fraction of the lung still aerated, and the
+# driving pressure splits into log VT/PBW + lambda - log(Crs/PFVC). The held designs are
+# refitted with log(Crs/PFVC) and log BMI: strain gives the three terms equal weight
+# (p_strain_restriction), and the VT/PBW gradient is then adjusted for tidal volume
+# lowered for stiff lungs. Specific elastance is similar on average across patients,
+# not constant (about two-fold from low to high), so the adjustment is incomplete; Crs
+# includes the chest wall; and it exists only where a plateau pressure was charted
+# (base_* columns: the same patients without the terms). compliance_scaling asks which
+# predicted volume compliance follows on average.
+#
 # Two questions the main table does not answer have their own tables:
 #   denominators   Is PFVC the volume that sets strain? The designs again with lambda =
 #                  log(PBW / volume) for PFVC at age 25, TLC, alveolar volume and FRC
@@ -106,6 +117,10 @@
 #   causal_triangulation_phases_<site>.csv         patients and measurements per arm x phase
 #   causal_triangulation_pbw_separate_<site>.csv   marker x design: VT/PBW dropped, PBW freed
 #   causal_triangulation_vt_pbw_<site>.csv         rho, overall and by sex
+#   causal_triangulation_aeration_<site>.csv       the held designs with log(Crs/PFVC)
+#                                                  and log BMI (fit_aeration())
+#   causal_triangulation_compliance_scaling_<site>.csv  log Crs on log PBW and each
+#                                                  predicted volume (compliance_scaling())
 #   causal_triangulation_age_mediation_<site>.csv  lambda split into its age part and
 #                                                  the rest (fit_age_mediation())
 #   causal_triangulation_<site>.pdf
@@ -163,7 +178,7 @@ fit_encompassing <- function(design, pats, panel, family) {
 }
 
 estimates <- list(); phases <- list(); rule <- list(); denominators <- list(); timecourse <- list(); pbw_separate <- list()
-age_mediation <- list()
+age_mediation <- list(); aeration <- list()
 for (marker in MARKERS) {
   m <- CAUSAL_MARKERS[CAUSAL_MARKERS$marker == marker, ]
   panel <- load_causal_outcome(config, patients, marker)
@@ -181,6 +196,7 @@ for (marker in MARKERS) {
     mutate(marker = marker, injury_sign = m$injury_sign, .before = 1)
   age_mediation[[marker]] <- bind_rows(lapply(designs, fit_age_mediation, patients = patients, panel = panel, family = m$family),
                                        .id = "vtpbw") %>% mutate(marker = marker, .before = 1)
+  aeration[[marker]] <- fit_aeration(designs$held, patients, panel, m$family) %>% mutate(marker = marker, .before = 1)
   rule[[marker]] <- tibble(marker = marker, supports = unname(both[["rule_both"]]), supports_vtpbw_held = unname(both[["rule_held"]]),
                            supports_vtpbw_dropped = unname(both[["rule_dropped"]]),
                            can_be_applied = !anyNA(fits$held$estimate[fits$held$design %in% c("control_did", paste0("free_", c("age", "sex", "race", "height"), "_did"))]))
@@ -225,6 +241,8 @@ pbw_separate <- bind_rows(pbw_separate) %>% with_interval() %>%
   select(site, cohort, marker, design, estimate, se, conf_low, conf_high, p_value, pbw_extra, pbw_extra_se,
          p_ratio_adequate, rho, pbw_extra_strain, p_strain_consistent, ratio_estimate, ratio_se, n_patients, n_obs, injury_sign)
 age_mediation <- bind_rows(age_mediation) %>% mutate(site = site_name, cohort = cohort, .before = 1)
+aeration <- bind_rows(aeration) %>% mutate(site = site_name, cohort = cohort, .before = 1)
+scaling <- compliance_scaling(patients) %>% mutate(site = site_name, cohort = cohort, .before = 1)
 vt_pbw <- vt_pbw_fit %>% mutate(site = site_name, cohort = cohort, .before = 1)
 
 out_file <- function(name, ext = "csv") file.path(final_dir, paste0("causal_triangulation_", name, site_name, ".", ext))
@@ -236,6 +254,8 @@ write_csv(phases, out_file("phases_"))
 write_csv(pbw_separate, out_file("pbw_separate_"))
 write_csv(vt_pbw, out_file("vt_pbw_"))
 write_csv(age_mediation, out_file("age_mediation_"))
+write_csv(aeration, out_file("aeration_"))
+write_csv(scaling, out_file("compliance_scaling_"))
 
 pdf(out_file("", "pdf"), width = 11, height = 7.5)
 plot_data <- estimates %>% filter(status == "ok") %>% mutate(design = factor(design, levels = rev(designs$held$design)))
@@ -294,6 +314,17 @@ print(as.data.frame(age_mediation %>% filter(design %in% c("unadjusted", "contro
                                 share_mediated = signif(share_mediated, 2), share_se = signif(share_mediated_se, 2),
                                 age_per_decade = signif(age_gradient_per_decade, 2), via_pfvc_per_decade = signif(through_pfvc_per_decade, 2),
                                 n_patients)), row.names = FALSE)
+message("\nAeration, VT/PBW held (log(Crs/PFVC) and log BMI added; base_*: the same patients without them):")
+print(as.data.frame(aeration %>% transmute(marker, design, estimate = signif(estimate, 3), se = signif(se, 3),
+                                           vt_gradient = signif(vt_gradient, 3), vt_se = signif(vt_gradient_se, 3),
+                                           aeration = signif(aeration_gradient, 3), aeration_se = signif(aeration_gradient_se, 3),
+                                           p_strain_restriction = signif(p_strain_restriction, 2),
+                                           base_estimate = signif(base_estimate, 3), base_vt_gradient = signif(base_vt_gradient, 3),
+                                           n_patients, n_with_compliance)), row.names = FALSE)
+message("\nWhat compliance scales with: log Crs on log PBW, the log predicted volume and log BMI:")
+print(as.data.frame(scaling %>% transmute(subset, volume, n_patients, volume_coef = signif(volume_coef, 3), volume_se = signif(volume_se, 2),
+                                          pbw_coef = signif(pbw_coef, 3), pbw_se = signif(pbw_se, 2), bmi_coef = signif(bmi_coef, 3),
+                                          residual_sd = signif(residual_sd, 3), aic = round(aic, 1))), row.names = FALSE)
 message("\nHow closely the index tidal volume followed PBW (rho = 1: the same multiple of PBW in everyone):")
 print(as.data.frame(vt_pbw %>% select(group, n_patients, rho, se, conf_low, conf_high, p_rho_one) %>%
                       mutate(across(where(is.double), ~ signif(.x, 3)))), row.names = FALSE)

@@ -129,11 +129,12 @@ load_causal_patients <- function(config) {
   if (!file.exists(ctrl_file)) stop("no no-support cohort: run scripts 01-03 with PBWPFVC_COHORT=nosupport first")
   keep <- c("hospitalization_id", "patient_id", "index_dttm", "age_at_admission", "sex_category",
             "race_category", "height_cm", "pbw", "pfvc", "pfvc_age25", "pva", "ptlc", "pfrc", "sf_ratio", "sofa_total",
-            "admission_dttm", "discharge_dttm", "death_dttm")
+            "admission_dttm", "discharge_dttm", "death_dttm", "bmi")
   vent <- arrow::read_parquet(vent_file) %>%
-    select(all_of(keep), vtpbw, last_imv_dttm) %>% mutate(arm = "ventilated")
+    select(all_of(keep), vtpbw, last_imv_dttm, any_of(c("crs", "peep_set"))) %>% mutate(arm = "ventilated")
+  for (col in c("crs", "peep_set")) if (!col %in% names(vent)) vent[[col]] <- NA_real_
   ctrl <- arrow::read_parquet(ctrl_file) %>%
-    select(all_of(keep), escalation_dttm) %>% mutate(arm = "no support", vtpbw = NA_real_)
+    select(all_of(keep), escalation_dttm) %>% mutate(arm = "no support", vtpbw = NA_real_, crs = NA_real_, peep_set = NA_real_)
   # the on switch: the stay's first invasive-ventilation record
   wf_file <- file.path(config$output_dir, "resp_support_waterfall_clean.parquet")
   if (!file.exists(wf_file)) stop("missing ", wf_file, ": run script 02 first")
@@ -159,6 +160,12 @@ load_causal_patients <- function(config) {
            race_category = factor(as.character(race_category), levels = c("WHITE", "BLACK", "OTHER")),
            ldisc = log(pbw / pfvc),
            lpbw = log(pbw),             # log PBW alone, for the designs with PBW and PFVC as separate terms
+           # aeration: index compliance over predicted lung size (the fraction still
+           # aerated, up to a constant); 0 in the control, which has no compliance.
+           # NA where a ventilated patient has no compliance at the index.
+           laer0 = if_else(vent == 1, if_else(!is.na(crs) & crs > 0, log(crs / pfvc), NA_real_), 0),
+           laer0 = laer0 - mean(laer0[vent == 1], na.rm = TRUE) * vent,
+           lbmi = if_else(!is.na(bmi) & bmi > 0, log(bmi), NA_real_), lbmi = lbmi - mean(lbmi[vent == 1], na.rm = TRUE),
            fp = height_fingerprint(height_cm, as.character(sex_category)),
            # log VT/PBW about the ventilated mean; 0 in the control, which has no tidal volume
            lv0 = if_else(vent == 1, log(vtpbw) - mean(log(vtpbw[vent == 1]), na.rm = TRUE), 0),
@@ -177,7 +184,7 @@ load_causal_patients <- function(config) {
     mutate(across(c(ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc, lpbw, lage, lrest),
                   ~ .x - mean(.x[vent == 1], na.rm = TRUE))) %>%
     select(id, patient_id, arm, vent, t0, t_off_d, stay_end_d, pre_avail_d, death_d, age10, age_z,
-           sex_category, race_category, height_cm, pbw, lpbw, lage, lrest, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
+           sex_category, race_category, height_cm, pbw, pfvc, ptlc, pva, pfrc, pfvc_age25, crs, peep_set, sf_ratio_raw = sf_ratio, laer0, lbmi, lpbw, lage, lrest, ldisc, ldisc25, ldisc_norace, ldisc_tlc, ldisc_va, ldisc_frc,
            fp, lv0, sofa_z, sf_z)
 }
 
@@ -371,10 +378,14 @@ prepare_design <- function(design, patients, panel, raw = FALSE) {
   if (any(n_by_arm < MIN_PATIENTS)) return(empty)
   # the design's rows of the patient table, built column by column (row-subsetting a
   # data frame is the slow step when this runs thousands of times)
-  pan <- lapply(patients[all.vars(as.formula(design$formula)) %>% intersect(names(patients)) %>% union("lv0")], `[`, i)
+  vars <- all.vars(as.formula(design$formula))
+  extra_vars <- c("lv0", if ("laer_on" %in% vars) "laer0", if ("lbmi_on" %in% vars) c("lbmi", "vent"))
+  pan <- lapply(patients[vars %>% intersect(names(patients)) %>% union(extra_vars)], `[`, i)
   pan$t <- panel$t[rows]
   pan$on <- as.numeric(panel$phase[rows] == "on")
   pan$lv_on <- pan$lv0 * pan$on
+  if ("laer_on" %in% vars) pan$laer_on <- pan$laer0 * pan$on
+  if ("lbmi_on" %in% vars) pan$lbmi_on <- pan$lbmi * pan$on * pan$vent
   pan <- structure(pan, class = "data.frame", row.names = .set_row_names(length(rows)))
   X <- model.matrix(as.formula(design$formula), data = pan)
   if (!design$target %in% colnames(X)) {         # R may write an interaction in another order
@@ -615,6 +626,98 @@ fit_age_mediation <- function(designs, patients, panel, family = "gaussian") {
                      lage_per_decade = per_decade,
                      age_gradient_per_decade = b_age * per_decade, through_pfvc_per_decade = b_rest * per_decade,
                      n_patients, n_obs)
+}
+
+# ---- Aeration: compliance as a measure of the lung that takes the breath -----------
+# With specific lung elastance (the pressure that stretches the lung by a given
+# fraction of its resting volume) taken as one value, compliance is proportional to the
+# aerated end-expiratory volume, and the driving pressure splits exactly into
+#     log dP = log VT/PBW + lambda - log f + constant,   log f = log(Crs / PFVC) + c,
+# f the fraction of the predicted lung still aerated. Strain gives the three equal
+# weight: the gradients on log VT/PBW and lambda equal, and the one on log(Crs/PFVC)
+# their negative (p_strain_restriction, a 2-df Wald test). The point of the term is to
+# adjust: if tidal volume was lowered for stiff lungs, the VT/PBW gradient is
+# confounded by indication, and conditioning on aeration closes that route.
+# Limits, read with the numbers:
+#   - specific elastance is similar on AVERAGE across groups (Chiumello et al.), not
+#     constant: in that cohort it spans about two-fold from low to high in every
+#     group. log(Crs / PFVC) estimates log f with an error of that size (SD about
+#     0.15 to 0.2 log units), so the adjustment is incomplete and the aeration
+#     gradient is attenuated; and if specific elastance moves with age or sex, the
+#     term carries a demographic part too.
+#   - Crs is the respiratory system's, not the lung's: the chest wall (obesity,
+#     abdominal pressure) lowers it without loss of aeration. log BMI enters as a
+#     covariate and, while ventilated, beside the aeration term.
+#   - plateau pressure needs an inspiratory hold in a volume-controlled mode, so Crs
+#     exists for a subset; every design is also fitted without the aeration terms on
+#     that same subset (base_estimate, base_vt_gradient) so the two are comparable.
+#   - a larger VT for the size can overdistend the lung and lower Crs: the index
+#     value is measured before the outcome window, which limits but does not remove it.
+aeration_design <- function(design) {
+  if (!grepl("lv_on", design$formula) || !grepl("\\bldisc\\b", design$formula)) return(NULL)
+  design$formula <- paste0(design$formula, " + laer_on + lbmi + lbmi_on")
+  design
+}
+# The aeration designs on the patients with what they need (compliance in the
+# ventilated, BMI in both), each beside the same design without the aeration terms.
+fit_aeration <- function(designs, patients, panel, family = "gaussian") {
+  pats <- patients[!is.na(patients$lbmi) & !is.na(patients$laer0), , drop = FALSE]
+  pan <- panel[panel$id %in% pats$id, , drop = FALSE]
+  coef_of <- function(fit, term) { j <- which(sorted_term(names(fit$beta)) == sorted_term(term)); if (length(j) == 1) j else NA_integer_ }
+  purrr::map_dfr(seq_len(nrow(designs)), function(r) {
+    d <- aeration_design(designs[r, ])
+    if (is.null(d)) return(NULL)
+    out <- tibble::tibble(design = d$design, estimate = NA_real_, se = NA_real_, vt_gradient = NA_real_, vt_gradient_se = NA_real_,
+                          aeration_gradient = NA_real_, aeration_gradient_se = NA_real_, p_strain_restriction = NA_real_,
+                          base_estimate = NA_real_, base_se = NA_real_, base_vt_gradient = NA_real_,
+                          n_patients = NA_integer_, n_with_compliance = sum(pats$vent == 1))
+    base <- fit_all_designs(designs[r, ], pats, pan, family = family)
+    out$base_estimate <- base$estimate; out$base_se <- base$se; out$base_vt_gradient <- base$vt_gradient
+    prep <- prepare_design(d, pats, pan, raw = family == "poisson")
+    out$n_patients <- prep$n_patients
+    fit <- if (prep$ok) fit_coefs(prep, align_outcome(prep, pan), family) else NULL
+    if (is.null(fit)) return(out)
+    k <- prep$k; v <- coef_of(fit, "lv_on"); a <- coef_of(fit, "laer_on"); s <- prep$sign
+    out$estimate <- s * fit$beta[[k]]; out$se <- sqrt(fit$V[k, k])
+    if (!is.na(v)) { out$vt_gradient <- s * fit$beta[[v]]; out$vt_gradient_se <- sqrt(fit$V[v, v]) }
+    if (!is.na(a)) { out$aeration_gradient <- s * fit$beta[[a]]; out$aeration_gradient_se <- sqrt(fit$V[a, a]) }
+    if (!is.na(v) && !is.na(a)) {
+      # strain: beta_lambda = beta_VT and beta_aeration = -beta_lambda
+      L <- matrix(0, 2, length(fit$beta)); L[1, k] <- 1; L[1, v] <- -1; L[2, k] <- 1; L[2, a] <- 1
+      dlt <- L %*% fit$beta; W <- tryCatch(as.numeric(t(dlt) %*% solve(L %*% fit$V %*% t(L)) %*% dlt), error = function(e) NA_real_)
+      out$p_strain_restriction <- stats::pchisq(W, df = 2, lower.tail = FALSE)
+    }
+    out
+  })
+}
+
+# Which predicted volume does compliance scale with? log Crs on log PBW and the log of
+# each predicted volume, with log BMI for the chest wall, in all ventilated patients
+# with compliance and in the least injured (S/F at or above the median and PEEP at or
+# below 8), aged 80 or under so that every volume is defined on one sample. A coefficient near 1 on the volume and near 0 on PBW says compliance scales
+# with that volume and not with PBW. The individual spread of specific elastance is in
+# the residual SD; what is estimated here is how the AVERAGE scales.
+compliance_scaling <- function(patients) {
+  vols <- c(pfvc = "pfvc", pfvc_age25 = "pfvc_age25", tlc = "ptlc", alveolar_volume = "pva", frc = "pfrc")
+  # one sample for every volume (TLC and FRC are defined to age 80), so that the AICs compare
+  ok <- patients$vent == 1 & !is.na(patients$crs) & patients$crs > 0 & !is.na(patients$lbmi) &
+    stats::complete.cases(patients[unname(vols)])
+  v <- patients[ok, , drop = FALSE]
+  if (nrow(v) < 30) return(tibble::tibble())
+  v$least_injured <- v$sf_ratio_raw >= stats::median(v$sf_ratio_raw, na.rm = TRUE) & !is.na(v$peep_set) & v$peep_set <= 8
+  purrr::map_dfr(c("all", "least injured"), function(subset) {
+    d <- if (subset == "all") v else v[v$least_injured %in% TRUE, , drop = FALSE]
+    purrr::imap_dfr(vols, function(col, name) {
+      dd <- d[is.finite(log(d[[col]])), , drop = FALSE]
+      if (nrow(dd) < 30) return(NULL)
+      f <- stats::lm(log(crs) ~ log(pbw) + log(dd[[col]]) + lbmi, data = dd)
+      cf <- stats::coef(summary(f))
+      tibble::tibble(subset = subset, volume = name, n_patients = nrow(dd),
+                     volume_coef = cf[3, 1], volume_se = cf[3, 2], pbw_coef = cf[2, 1], pbw_se = cf[2, 2],
+                     bmi_coef = cf[4, 1], bmi_se = cf[4, 2], residual_sd = summary(f)$sigma, r2 = summary(f)$r.squared,
+                     aic = stats::AIC(f))
+    })
+  })
 }
 
 # ---- The time course ------------------------------------------------------------
