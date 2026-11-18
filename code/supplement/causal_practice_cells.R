@@ -39,7 +39,12 @@
 # hours; patients with neither are left out (unit_source says how each was placed).
 # The unit is the site's own location_name within hospital_id (PBWPFVC_CELL_UNIT=
 # location_type uses the mCIDE ICU type instead, coarser and comparable across sites).
-# Periods are calendar years of the index (PBWPFVC_CELL_YEARS=2 groups two years).
+# Periods are calendar years of the index (PBWPFVC_CELL_YEARS=2 groups two years;
+# PBWPFVC_CELL_YEARS=0 uses no period, the unit alone). A site whose dates are shifted
+# for de-identification (MIMIC-IV moves each patient's dates by a random number of years
+# into 2100-2200) has no usable calendar time: run it with PBWPFVC_CELL_YEARS=0. The
+# script stops when index years fall after 2100 or span more than 30 years and
+# PBWPFVC_CELL_YEARS is not 0.
 # Cells with fewer than PBWPFVC_CELL_MIN patients (default 30) are left out of the
 # estimates and counted.
 #
@@ -81,7 +86,7 @@ CELL_UNIT  <- Sys.getenv("PBWPFVC_CELL_UNIT", "location_name")
 CELL_YEARS <- as.integer(Sys.getenv("PBWPFVC_CELL_YEARS", "1"))
 CELL_MIN   <- as.integer(Sys.getenv("PBWPFVC_CELL_MIN", "30"))
 ICU_AFTER_H <- 24
-stopifnot(CELL_UNIT %in% c("location_name", "location_type"), CELL_YEARS >= 1, CELL_MIN >= 10)
+stopifnot(CELL_UNIT %in% c("location_name", "location_type"), CELL_YEARS >= 0, CELL_MIN >= 10)
 
 # ---- The ventilated cohort at its index ----------------------------------------------
 cs_file <- file.path(config$output_dir, paste0("analysis_cross_sectional", config$cs_suffix, ".parquet"))
@@ -125,12 +130,17 @@ placed <- bind_rows(at_index, after) %>% select(hospitalization_id, hospital_id,
 d <- vent %>% left_join(placed, by = "hospitalization_id") %>%
   mutate(unit_source = coalesce(unit_source, "no ICU at or within 24 h of the index"),
          year = as.integer(format(index_dttm, "%Y", tz = "UTC")),
-         period = paste0(year - (year - min(year, na.rm = TRUE)) %% CELL_YEARS,
-                         if (CELL_YEARS > 1) paste0("-", year - (year - min(year, na.rm = TRUE)) %% CELL_YEARS + CELL_YEARS - 1) else ""),
+         period = if (CELL_YEARS == 0) "all years" else
+           paste0(year - (year - min(year, na.rm = TRUE)) %% CELL_YEARS,
+                  if (CELL_YEARS > 1) paste0("-", year - (year - min(year, na.rm = TRUE)) %% CELL_YEARS + CELL_YEARS - 1) else ""),
          cell = paste(hospital_id, unit, period, sep = " | "),
          lvt = log(vtpbw * pbw), lvtpbw = log(vtpbw), lpbw = log(pbw), lpfvc = log(pfvc), lambda = log(pbw / pfvc),
          female = as.numeric(sex_category == "Female"), age10 = age_at_admission / 10,
          lbmi = if_else(bmi > 0, log(bmi), NA_real_))
+yrs <- range(d$year, na.rm = TRUE)
+if (CELL_YEARS > 0 && (yrs[2] > 2100 || diff(yrs) > 30))
+  stop("index years run from ", yrs[1], " to ", yrs[2], ": dates look shifted for de-identification (as in MIMIC-IV), ",
+       "so calendar periods mean nothing here. Run with PBWPFVC_CELL_YEARS=0 (the unit alone).")
 cell_n <- d %>% filter(!is.na(unit)) %>% count(cell)
 d <- d %>% left_join(cell_n %>% rename(cell_n = n), by = "cell")
 placement <- d %>% mutate(status = case_when(is.na(unit) ~ unit_source,
@@ -208,7 +218,8 @@ case_mix <- map_dfr(c("mean_age", "share_female", "mean_sofa", "mean_sf", "mean_
 })
 # a period effect: rho over calendar time, pooled across units
 by_period <- a %>% group_by(period) %>%
-  group_modify(~ { s <- summary(lm(lvt ~ factor(cell) + lpbw, data = .x))$coefficients
+  group_modify(~ { f <- if (n_distinct(.x$cell) > 1) lvt ~ factor(cell) + lpbw else lvt ~ lpbw   # one cell in a period: no cell term
+                   s <- summary(lm(f, data = .x))$coefficients
                    tibble(n_patients = nrow(.x), n_cells = n_distinct(.x$cell), rho = s["lpbw", 1], rho_se = s["lpbw", 2]) }) %>% ungroup()
 
 summary_tbl <- bind_rows(
