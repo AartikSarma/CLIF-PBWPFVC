@@ -131,10 +131,11 @@ exposure_sd <- map_dbl(EXPOSURES, ~ sd(patients[[.x]]))
 for (exposure in EXPOSURES) patients[[paste0(exposure, "_sd")]] <- patients[[exposure]] / sd(patients[[exposure]])
 
 # --- every ventilator row of those patients over the first HORIZON_H hours of IMV
-timepoints <- open_dataset(file.path(output_dir, "analysis_all_eligible_timepoints.parquet")) %>%
+# read_parquet() (utils/intermediate_io.R), not open_dataset(): it restores the dates
+timepoints <- read_parquet(file.path(output_dir, "analysis_all_eligible_timepoints.parquet"),
+                           col_select = c("hospitalization_id", "recorded_dttm", "mode_category", "tidal_volume_set",
+                                          "dp", "crs", "sf_ratio")) %>%
   filter(hospitalization_id %in% patients$hospitalization_id) %>%
-  select(hospitalization_id, recorded_dttm, mode_category, tidal_volume_set, dp, crs, sf_ratio) %>%
-  collect() %>%
   as.data.table()
 setorder(timepoints, hospitalization_id, recorded_dttm)
 timepoints[, t_h := as.numeric(difftime(recorded_dttm, min(recorded_dttm), units = "hours")), by = hospitalization_id]

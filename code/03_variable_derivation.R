@@ -826,8 +826,7 @@ if (config$cohort == "imv") {
 
 # The ventilated cohort's cross-sectional table, which the control builds read for
 # the no-shared-patients rule (here) and the negative controls (3k).
-ventilated_cs_path <- file.path(getwd(), "output", paste0(config$base_site, "_output"), "intermediate",
-                                "analysis_cross_sectional.parquet")
+ventilated_cs_path <- file.path(config$intermediate_site, "analysis_cross_sectional.parquet")
 read_ventilated_cs <- function() {
   if (!file.exists(ventilated_cs_path))
     stop("The ventilated cohort must be built first: ", ventilated_cs_path, " is missing. ",

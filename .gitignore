@@ -25,8 +25,15 @@ CLIF_cohort_identifier*
 *.pdf
 *.html
 
-# ignore all generated analysis outputs
-output/
+# ignore all generated analysis outputs, except the release folder of SOP.md: reviewed
+# aggregates that a person copied there with release_result()
+output/*
+!output/final_no_phi/
+output/final_no_phi/*
+!output/final_no_phi/*.csv
+!output/final_no_phi/*.png
+!output/final_no_phi/*.pdf
+!output/final_no_phi/README.md
 
 # ignore collected per-site results for central pooling (read by pooled_estimates.R)
 results/
@@ -64,3 +71,33 @@ figures/
 
 # editor settings (uvr init writes machine-specific R paths here)
 .vscode/
+
+# --- Data-zone standards (SOP.md; CLIF cloud-environment template, commit 9813e85) ---
+# Site config holds local paths; only config_template.json is committed.
+config/config.json
+# No data files in the repo, whatever their name. Results go to results_directory,
+# outside the repo; only reviewed aggregates are copied to output/final_no_phi/.
+*.parquet
+*.feather
+*.arrow
+*.fst
+*.csv
+*.tsv
+*.xlsx
+*.rds
+*.rda
+*.pkl
+*.pickle
+*.h5
+*.dcm
+*.nii
+*.nii.gz
+*.edf
+*.wfdb
+logs/
+__pycache__/
+.venv/
+.ipynb_checkpoints/
+# reference tables that are code, not data
+!outlier-thresholds/*.csv
+!output/final_no_phi/*.csv

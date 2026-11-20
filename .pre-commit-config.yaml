@@ -1,0 +1,31 @@
+# Install once per clone:  uv tool install pre-commit && pre-commit install
+# Blocks data files, private keys and notebook outputs from being committed.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: detect-private-key
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+  - repo: local
+    hooks:
+      - id: no-data-files
+        name: No patient-level data files in the repo
+        language: fail
+        entry: "Data files belong outside the repo (see SOP.md). Commit code and reviewed aggregates only."
+        files: '\.(parquet|feather|arrow|fst|rds|rda|RData|pkl|pickle|h5|dcm|nii|edf)$'
+        exclude: '^clif_demo/'
+      - id: no-site-config
+        name: Site config stays local
+        language: fail
+        entry: "config/config.json holds local paths; commit config/config_template.json instead."
+        files: '^config/config\.json$'
+      - id: release-folder-csv-only
+        name: Only reviewed aggregates in output/final_no_phi
+        language: fail
+        entry: "Only aggregate CSVs and figures released with release_result() belong in output/final_no_phi/."
+        files: '^output/final_no_phi/.*\.(parquet|feather|arrow|rds|pkl)$'

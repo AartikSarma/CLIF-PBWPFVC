@@ -43,6 +43,11 @@ seed <- as.integer(arg_value("--seed", "1"))
 stopifnot(is.finite(frac), frac > 0, frac < 1, is.finite(seed))
 
 src <- path.expand(config$tables_path)
+# this tool copies core tables, which SOP.md forbids for real data: synthetic data only
+synthetic <- normalizePath(Filter(nzchar, Sys.getenv(c("CLIF_SYNTH_DATA", "CLIF_SYNTH_DATA_V2_1", "CLIF_SYNTH_DATA_V3_0"))), mustWork = FALSE)
+if (!normalizePath(src, mustWork = FALSE) %in% synthetic && !grepl("^synth", config$data_release))
+  stop("subset_synthetic.R copies core CLIF tables and runs on synthetic data only: data_directory ", src,
+       " is not one of CLIF_SYNTH_DATA, CLIF_SYNTH_DATA_V2_1 or CLIF_SYNTH_DATA_V3_0, and data_release does not start with 'synth'")
 out <- arg_value("--out", paste0(sub("/+$", "", src), "_sub", round(100 * frac)))
 dir.create(out, recursive = TRUE, showWarnings = FALSE)
 message("Subsetting ", src, " -> ", out, " (fraction ", frac, ", seed ", seed, ")")

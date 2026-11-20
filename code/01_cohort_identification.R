@@ -6,16 +6,17 @@
 # the later scripts need, restricted to that cohort.
 #
 # Population (PBWPFVC_COHORT, environment variable only):
-#   imv (default; the paper's cohort)  adults (age >= 18) with an ICU stay and any
+#   imv (default; the paper's cohort)  adults under 90 (18 <= age < 90: PFVC depends on
+#       age, and ages above 89 are withheld under HIPAA Safe Harbor) with an ICU stay and any
 #       recorded set tidal volume > 0 in the hospitalization, with no ventilator-mode
 #       requirement; one hospitalization per patient, the last that qualifies. The
 #       height, VT/PBW 6-8 and SF < 315 gates follow in script 03.
-#   nosupport (the negative control)   adults with an ICU stay and a room-air or
+#   nosupport (the negative control)   adults under 90 with an ICU stay and a room-air or
 #       nasal-cannula row before any advanced support (HFNC, NIPPV, CPAP, IMV);
 #       script 03 sets the index at ICU admission.
-#   niv (built on request only)         adults with an ICU stay whose first advanced
+#   niv (built on request only)         adults under 90 with an ICU stay whose first advanced
 #       support is HFNC, NIPPV or CPAP, with no invasive ventilation before it.
-# Separately, for every adult ICU patient, it classifies hypoxemia for the two
+# Separately, for every adult ICU patient under 90, it classifies hypoxemia for the two
 # non-hypoxemic negative-control cohorts of script 04 (section 4j).
 #
 # Inputs:  config/config.json (utils/config.R); the CLIF tables patient,
@@ -249,7 +250,7 @@ cohort_rule <- switch(config$cohort,
 attrition_steps <- attrition_steps_for(config$cohort)   # step labels (utils/attrition_log.R)
 
 cohort_patient_and_hospitalization_ids <- clif_hospitalization %>%
-  filter(age_at_admission >= 18) %>% # Only adults
+  filter(in_age_range(age_at_admission)) %>% # adults under 90 (AGE_MIN, AGE_MAX in utils/config.R)
   filter(hospitalization_id %in% cohort_ids) %>% # with a set tidal volume (or the nosupport / niv first-support rule)
   filter(hospitalization_id %in% icu_ids) %>% # in the ICU 
   arrange(desc(admission_dttm)) %>% # if multiple hospitalizations, we want the last admission
@@ -268,7 +269,7 @@ message("Cohort size: ", length(eligible_hospitalizations), " hospitalizations")
 # SAME hospitalization, so the funnel is monotonic and matches the per-patient
 # analytic cohort (steps 4-7 are appended in script 03). Patient-level counts
 # (not hospitalization-level) keep the chain consistent with downstream outputs.
-funnel <- clif_hospitalization %>% filter(age_at_admission >= 18)
+funnel <- clif_hospitalization %>% filter(in_age_range(age_at_admission))
 n_adult <- n_distinct(funnel$patient_id)
 
 funnel <- funnel %>% filter(hospitalization_id %in% icu_ids)
@@ -283,7 +284,7 @@ attrition <- attrition_init() %>%
                 exclusion_reason = "No ICU admission") %>%
   attrition_add(attrition_steps[3], n_imv, exclusion_reason = cohort_rule)
 
-message("Attrition (steps 1-3): adults=", n_adult, ", +ICU=", n_icu, ", +IMV=", n_imv)
+message("Attrition (steps 1-3): adults under 90=", n_adult, ", +ICU=", n_icu, ", +IMV=", n_imv)
 
 # =============================================================================
 # Run respiratory support waterfall
@@ -473,6 +474,12 @@ cohort_demographics <- clif_hospitalization %>%
       TRUE ~ 0L
     )
   )
+# PHI the analyses never use stays out of the intermediate (SOP.md, standard 3):
+# geography from clif_hospitalization and the date of birth from clif_patient (age is
+# already age_at_admission)
+cohort_demographics <- cohort_demographics %>%
+  select(-any_of(c("zipcode_five_digit", "zipcode_nine_digit", "census_block_code", "census_block_group_code",
+                   "census_tract", "state_code", "county_code", "fips_version", "birth_date")))
 
 message("Demographics: ", nrow(cohort_demographics), " rows")
 message("Mortality rate: ", round(mean(cohort_demographics$deceased) * 100, 1), "%")
@@ -505,7 +512,7 @@ NC_HYPOXEMIA_WINDOW_H <- 24
 
 resp_tz <- attr(clif_respiratory_support$recorded_dttm, "tzone")
 nc_hosp <- clif_hospitalization %>%
-  filter(age_at_admission >= 18, hospitalization_id %in% icu_ids) %>%
+  filter(in_age_range(age_at_admission), hospitalization_id %in% icu_ids) %>%
   arrange(desc(admission_dttm)) %>%
   distinct(patient_id, .keep_all = TRUE) %>%
   mutate(imv_set_vt = hospitalization_id %in% imv_ids) %>%

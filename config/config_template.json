@@ -1,5 +1,12 @@
 {
     "site_name": "Your_Site_Name",
-    "tables_path": "/path/to/tables/",
-    "file_type": "csv/parquet/fst"
+    "clif_version": "2.1",
+    "data_directory": "./clif_demo",
+    "filetype": "parquet",
+    "timezone": "US/Eastern",
+    "output_directory": "",
+    "intermediate_directory": "",
+    "results_directory": "",
+    "data_release": "clif_demo",
+    "min_cell_size": 10
 }

@@ -58,7 +58,8 @@ guidance on constructing these tables.
 
 ## Cohort identification
 
-Adult (age >= 18) ICU encounters receiving invasive mechanical ventilation, with
+Adult ICU encounters (age 18-89: PFVC, and so the exposure, depends on age, and ages
+above 89 are withheld under HIPAA Safe Harbor) receiving invasive mechanical ventilation, with
 the height and ventilator data needed to compute PBW, PFVC, and delivered tidal
 volume. Detailed inclusion/exclusion criteria and attrition are produced by
 `01_cohort_identification.R` and logged to the cohort attrition table. The control
@@ -96,28 +97,40 @@ what it writes, and says how to restore what was removed.
 
 ## Outputs
 
-Each site has one output folder, `output/<site_name>_output/`:
+Files live in the data zones of [SOP.md](SOP.md), set in `config/config.json` and
+created by `utils/config.R`. By default both working zones sit next to the project
+folder, in `../clif_workspace/<repo>/`, never inside it:
 
-- `intermediate/` holds patient-level data and never leaves the site. The control
-  cohorts' patient-level data sits under `intermediate/controls/<cohort>/`.
-- `final/` holds aggregates only and is the folder a site returns. It is sorted by
+- **Core CLIF tables** are read in place from `data_directory` and never copied or written.
+- **Intermediates** (`<intermediate_directory>/<site>/`) hold patient-level data and never
+  leave the site; a control cohort's sit under `controls/<cohort>/`. They carry no dates:
+  `read_parquet()` and `write_parquet()` (`utils/intermediate_io.R`) store every date-time
+  as seconds from the hospitalization's admission and restore it, to the microsecond, when
+  the file is read, top-code ages at 90, and refuse to write a file with a date, geography
+  or identifier column.
+- **Results** (`<results_directory>/<site>/`) hold aggregates only. They are sorted by
   manuscript block:
 
   | Subfolder | Holds | Written by |
   |---|---|---|
-  | `final/cross_sectional/` | figures 1-3 | `03`-`05` |
-  | `final/injury/` | figure 4 | `21`-`28` |
-  | `final/supplement/` | supplementary analyses | `code/supplement/` |
-  | `final/controls/` | the control cohorts, all in one folder; file names carry `<site>_<cohort>` | `01`-`03`, `21`-`26` under `PBWPFVC_COHORT` |
-  | `final/ungated/<block>/` | the same tables for the ventilated cohort without the VT/PBW 6-8 mL/kg entry band | the runners, with `PBWPFVC_VTPBW_GATE=0` |
+  | `cross_sectional/` | figures 1-3 | `03`-`05` |
+  | `injury/` | figure 4 | `21`-`28` |
+  | `supplement/` | supplementary analyses | `code/supplement/` |
+  | `controls/` | the control cohorts, all in one folder; file names carry `<site>_<cohort>` | `01`-`03`, `21`-`26` under `PBWPFVC_COHORT` |
+  | `ungated/<block>/` | the same tables for the ventilated cohort without the VT/PBW 6-8 mL/kg entry band | the runners, with `PBWPFVC_VTPBW_GATE=0` |
 
   A script asks `utils/config.R` for its folder with `final_dir_for("<block>")`.
 
-Re-running a stage updates `final/` in place, so a site can return the folder again
-after any stage. No patient-level data is written to `final/`. Counts are not masked:
-small-cell masking (censoring small cells, or a deterministic scheme agreed with CLIF)
-will be a separate step applied to `final/` before a site shares it. Until then, do
-not share `final/` outside the study team.
+- **Release** (`output/final_no_phi/`, the only data folder in the repository): reviewed
+  aggregates that a person copied there with `release_result()`, which refuses a CSV
+  with a count below `min_cell_size`. No script writes there.
+
+Re-running a stage updates the results folder in place. No patient-level data is
+written there, but counts are not masked: review every file, including counts that can
+be derived by subtraction, before releasing it. Each pipeline run writes
+`run_manifest.json` (git commit, data release, R version) to the results folder.
+Folders written by earlier versions of the code (`output/<site>_output/`) hold dated,
+patient-level files inside the project folder: delete them after re-running from 01.
 
 **Output file names are an interface between scripts.** Every pooling and figure
 script finds its inputs by file-name prefix (`regression_results_long_`, `norm_`,
@@ -130,16 +143,29 @@ have returned `final/` folders, a renamed prefix orphans their results.
 
 ### 1. Configure the site
 
-Edit `config/config.json` with your site name, the path to your CLIF tables, and
-the file format. See [config/README.md](config/README.md).
+Copy `config/config_template.json` to `config/config.json` and fill in the site name,
+CLIF version, the site's time zone, the folder holding your CLIF tables
+(`data_directory`) and the data release. Leave the three output folders empty to use the
+defaults outside the project folder, or point them at a workspace that is outside both
+the project and the data folder. See [SOP.md](SOP.md) and [config/README.md](config/README.md).
 
 ```json
 {
   "site_name": "YOUR_SITE",
-  "tables_path": "~/path/to/clif_tables",
-  "file_type": "parquet"
+  "clif_version": "2.1",
+  "data_directory": "/path/to/clif_tables",
+  "filetype": "parquet",
+  "timezone": "US/Pacific",
+  "output_directory": "",
+  "intermediate_directory": "",
+  "results_directory": "",
+  "data_release": "YOUR_RELEASE",
+  "min_cell_size": 10
 }
 ```
+
+An older `config.json` with `tables_path` and `file_type` is refused with a message
+naming the renames.
 
 ### 2. Install uvr
 
@@ -242,6 +268,8 @@ recoverable from the tag `pre-prune-2026-09-19`.
 
 ## Data safety
 
-- Never commit patient data — only aggregated results belong in `output/`.
-- Counts in `final/` are unmasked until the masking step exists; see above.
-- `config/config.json` is site-specific and should not be committed with real paths.
+- Never commit patient data: only reviewed aggregates in `output/final_no_phi/` belong in
+  the repository. The commit checks in `.pre-commit-config.yaml` (`uv tool install
+  pre-commit`, then `pre-commit install`) refuse data files and `config/config.json`.
+- Counts in the results folder are unmasked; review them before release (see above).
+- `config/config.json` is site-specific and is never committed.
