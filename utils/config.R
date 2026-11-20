@@ -129,6 +129,14 @@ final_dir_for <- function(block) {
 }
 # device categories (CLIF mCIDE, lower case): the niv cohort's, the control's, and
 # everything that counts as advanced support (escalation)
+# The age range of every cohort: adults, and under 90. PFVC, and so the exposure, is a
+# function of age, and an age above 89 is withheld under HIPAA Safe Harbor (SOP.md
+# top-codes it at 90), so a patient whose PFVC cannot be computed from their true age
+# is not entered.
+AGE_MIN <- 18   # inclusive
+AGE_MAX <- 90   # exclusive: age_at_admission < 90
+in_age_range <- function(age) !is.na(age) & age >= AGE_MIN & age < AGE_MAX
+
 NIV_DEVICES       <- c("high flow nc", "nippv", "cpap")
 NOSUPPORT_DEVICES <- c("room air", "nasal cannula")
 SUPPORT_DEVICES   <- c("imv", NIV_DEVICES)

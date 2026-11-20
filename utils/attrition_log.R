@@ -15,9 +15,10 @@ library(tidyverse)
 
 # Canonical inclusion steps of the ventilated (imv) cohort, in order. Steps 1-3 are
 # logged in script 01, steps 4-7 in script 03. These labels are pooled across sites:
-# do not reword them.
+# do not reword them. (Step 1 was "Adults (age >= 18)" before the age < 90 criterion;
+# a log with that label comes from a run without it and does not pool with this one.)
 ATTRITION_STEPS <- c(
-  "Adults (age >= 18)",
+  "Adults aged 18-89",
   "ICU admission",
   "Invasive ventilation with set tidal volume",
   "Height 150-210 cm",

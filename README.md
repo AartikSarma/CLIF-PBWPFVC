@@ -58,7 +58,8 @@ guidance on constructing these tables.
 
 ## Cohort identification
 
-Adult (age >= 18) ICU encounters receiving invasive mechanical ventilation, with
+Adult ICU encounters (age 18-89: PFVC, and so the exposure, depends on age, and ages
+above 89 are withheld under HIPAA Safe Harbor) receiving invasive mechanical ventilation, with
 the height and ventilator data needed to compute PBW, PFVC, and delivered tidal
 volume. Detailed inclusion/exclusion criteria and attrition are produced by
 `01_cohort_identification.R` and logged to the cohort attrition table. The control
