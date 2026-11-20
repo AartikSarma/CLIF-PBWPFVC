@@ -1,34 +1,60 @@
 # Packages come from the project library that uvr installs (uvr.lock).
 library(jsonlite)
 
-# Load the site configuration from config/config.json, then apply any overrides
-# passed through the environment. The pipeline runner (code/00_run_pipeline.R)
-# translates its --site_name / --site_path / --file_type arguments into these
-# variables so that every numbered script, each a separate Rscript subprocess,
-# sees the same override without config.json being edited:
-#   PBWPFVC_SITE_NAME    -> config$site_name
-#   PBWPFVC_TABLES_PATH  -> config$tables_path
-#   PBWPFVC_FILE_TYPE    -> config$file_type
+# The data zones of SOP.md (the CLIF cloud-environment template, project-template/ at
+# commit 9813e85). utils/clif_paths.R is that template's helper file, vendored
+# unchanged; this file builds the project's configuration on top of it.
+source(file.path("utils", "clif_paths.R"))   # load_config(), phi_columns(), write_manifest(), ...
+
+# Load the site configuration from config/config.json (keys: config_template.json),
+# then apply any overrides passed through the environment. The pipeline runner
+# (code/00_run_pipeline.R) translates its --site_name / --site_path / --file_type
+# arguments into these variables so that every numbered script, each a separate
+# Rscript subprocess, sees the same override without config.json being edited:
+#   PBWPFVC_SITE_NAME    -> site_name
+#   PBWPFVC_TABLES_PATH  -> data_directory
+#   PBWPFVC_FILE_TYPE    -> filetype
 # The same variables work when a single script is run by hand. config.json must
 # still exist (it carries any field not overridden).
-load_config <- function() {
-  json_path <- "config/config.json"
-  if (file.exists(json_path)) {
-    config <- fromJSON(json_path)
-    message("Loaded configuration from config.json")
-  } else {
-    stop("Configuration file not found. Please create config.json",
-         "based on the config_template.")
-  }
-  overrides <- c(site_name = "PBWPFVC_SITE_NAME", tables_path = "PBWPFVC_TABLES_PATH",
-                 file_type = "PBWPFVC_FILE_TYPE")
+#
+# Where files go (SOP.md, the four standards):
+#   data_directory           the core CLIF tables, read in place and never written
+#   intermediate_directory   row-level working files, outside the project folder
+#                            (default ../clif_workspace/<repo>/intermediate)
+#   results_directory        aggregates from a run (default ../clif_workspace/<repo>/results)
+#   output/final_no_phi/     reviewed aggregates only, copied there by a person with
+#                            release_result(); no script writes there
+# The scripts keep their internal names: config$tables_path is data_directory,
+# config$file_type is filetype, config$output_dir the cohort's intermediate folder,
+# config$final_root the site's results folder.
+load_project_config <- function() {
+  json_path <- file.path("config", "config.json")
+  if (!file.exists(json_path))
+    stop("Configuration file not found: copy config/config_template.json to config/config.json")
+  raw <- fromJSON(json_path)
+  old <- intersect(c("tables_path", "file_type"), names(raw))
+  if (length(old) && is.null(raw$data_directory))
+    stop("config/config.json uses the old keys (", paste(old, collapse = ", "), "). Rename tables_path to ",
+         "data_directory and file_type to filetype, and add the other keys of config/config_template.json.")
+  overrides <- c(site_name = "PBWPFVC_SITE_NAME", data_directory = "PBWPFVC_TABLES_PATH",
+                 filetype = "PBWPFVC_FILE_TYPE")
   for (field in names(overrides)) {
     value <- Sys.getenv(overrides[[field]], unset = "")
     if (nzchar(value)) {
-      config[[field]] <- value
-      message("  config$", field, " overridden from ", overrides[[field]], ": ", value)
+      raw[[field]] <- value
+      message("  ", field, " overridden from ", overrides[[field]], ": ", value)
     }
   }
+  # the template's loader checks the paths (outside the project, outside the data) and
+  # creates the workspace folders; it reads a file, so the overridden copy is written to one
+  tmp <- tempfile(fileext = ".json")
+  on.exit(unlink(tmp), add = TRUE)
+  write_json(raw, tmp, auto_unbox = TRUE)
+  cfg <- load_config(tmp)
+  message("Loaded configuration from config.json")
+  config <- cfg
+  config$tables_path <- cfg$data_directory
+  config$file_type <- cfg$filetype
   if (!config$file_type %in% c("parquet", "csv", "fst"))
     stop("config$file_type must be parquet, csv or fst; got '", config$file_type, "'")
   # Cohort (PBWPFVC_COHORT; environment variable only):
@@ -44,15 +70,15 @@ load_config <- function() {
   config$cohort <- Sys.getenv("PBWPFVC_COHORT", "imv")
   if (!config$cohort %in% c("imv", "niv", "nosupport"))
     stop("PBWPFVC_COHORT must be imv, niv or nosupport; got '", config$cohort, "'")
-  # Where a cohort's files live. One site has ONE output folder, output/{site}_output/:
-  #   intermediate/                      patient-level, never shared
-  #   intermediate/controls/{cohort}/    the same for a control cohort
-  #   final/                             aggregates only: the folder a site returns,
-  #                                      sorted by manuscript block (final_dir_for() below):
-  #     final/cross_sectional/           figures 1-3 (scripts 03-05)
-  #     final/injury/                    figure 4 (scripts 21-28)
-  #     final/supplement/                supplementary analyses (code/supplement/)
-  #     final/controls/                  the control cohorts' aggregates, all in one folder
+  # Where a cohort's files live (both folders outside the project; see above):
+  #   <intermediate_directory>/{site}/                    patient-level, never shared
+  #   <intermediate_directory>/{site}/controls/{cohort}/  the same for a control cohort
+  #   <results_directory>/{site}/                         aggregates only, sorted by
+  #                                      manuscript block (final_dir_for() below):
+  #     cross_sectional/                 figures 1-3 (scripts 03-05)
+  #     injury/                          figure 4 (scripts 21-28)
+  #     supplement/                      supplementary analyses (code/supplement/)
+  #     controls/                        the control cohorts' aggregates, all in one folder
   # A control's FILE NAMES carry {site}_{cohort} (e.g. jm_estimates_pfvc_7d_MIMIC_nosupport.csv),
   # so config$site_name is that tag and config$base_site is the site itself. Setting
   # PBWPFVC_COHORT is enough; a PBWPFVC_SITE_NAME that already ends in _{cohort} is
@@ -79,10 +105,13 @@ load_config <- function() {
   if (config$vtpbw_gate == "0" && config$cohort != "imv")
     stop("PBWPFVC_VTPBW_GATE=0 applies to the ventilated cohort only; unset PBWPFVC_COHORT")
   config$cs_suffix <- if (config$vtpbw_gate == "0") "_ungated" else ""
-  site_root <- file.path(getwd(), "output", paste0(config$base_site, "_output"))
-  config$output_dir <- if (config$cohort == "imv") file.path(site_root, "intermediate") else
-    file.path(site_root, "intermediate", "controls", config$cohort)
-  config$final_root <- file.path(site_root, "final")
+  # one folder per site in each zone: <intermediate_directory>/<site>/ (a control cohort
+  # in controls/<cohort>/ below it) and <results_directory>/<site>/
+  config$intermediate_site <- file.path(config$intermediate_directory, config$base_site)
+  config$output_dir <- if (config$cohort == "imv") config$intermediate_site else
+    file.path(config$intermediate_site, "controls", config$cohort)
+  dir.create(config$output_dir, recursive = TRUE, showWarnings = FALSE)
+  config$final_root <- file.path(config$results_directory, config$base_site)
   config$final_dir  <- if (config$cohort == "imv") config$final_root else file.path(config$final_root, "controls")
   return(config)
 }
@@ -131,4 +160,5 @@ estimate_fio2_nosupport <- function(df) {
 # agreed with CLIF, is a separate step applied to final/ before a site shares it.
 
 # Load the configuration
-config <- load_config()
+config <- load_project_config()
+source(file.path("utils", "intermediate_io.R"))   # read_parquet()/write_parquet() for the intermediate zone

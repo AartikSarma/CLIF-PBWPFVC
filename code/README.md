@@ -70,8 +70,9 @@ Linux needs none of this. Windows is untested.
 
   ```bash
   mkdir -p results/fig4/MIMIC results/fig4/UCSF     # results/ is gitignored
-  cp -R output/MIMIC_output/final/injury output/MIMIC_output/final/supplement results/fig4/MIMIC/
-  cp -R output/UCSF_output/final/injury  output/UCSF_output/final/supplement  results/fig4/UCSF/
+  # each site's reviewed injury/ and supplement/ results, as returned
+  cp -R <MIMIC results>/injury <MIMIC results>/supplement results/fig4/MIMIC/
+  cp -R <UCSF results>/injury  <UCSF results>/supplement  results/fig4/UCSF/
   PBWPFVC_RESULTS_ROOT=results/fig4 uvr run code/pooling/pooled_biotrauma.R
   ```
 

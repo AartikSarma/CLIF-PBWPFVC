@@ -130,16 +130,16 @@ load_causal_patients <- function(config) {
   keep <- c("hospitalization_id", "patient_id", "index_dttm", "age_at_admission", "sex_category",
             "race_category", "height_cm", "pbw", "pfvc", "pfvc_age25", "pva", "ptlc", "pfrc", "sf_ratio", "sofa_total",
             "admission_dttm", "discharge_dttm", "death_dttm")
-  vent <- arrow::read_parquet(vent_file) %>%
+  vent <- read_parquet(vent_file) %>%
     select(all_of(keep), vtpbw, last_imv_dttm, any_of(c("crs", "peep_set", "bmi"))) %>% mutate(arm = "ventilated")
   for (col in c("crs", "peep_set", "bmi")) if (!col %in% names(vent)) vent[[col]] <- NA_real_
-  ctrl <- arrow::read_parquet(ctrl_file) %>%
+  ctrl <- read_parquet(ctrl_file) %>%
     select(all_of(keep), escalation_dttm, any_of("bmi")) %>% mutate(arm = "no support", vtpbw = NA_real_, crs = NA_real_, peep_set = NA_real_)
   if (!"bmi" %in% names(ctrl)) ctrl$bmi <- NA_real_
   # the on switch: the stay's first invasive-ventilation record
   wf_file <- file.path(config$output_dir, "resp_support_waterfall_clean.parquet")
   if (!file.exists(wf_file)) stop("missing ", wf_file, ": run script 02 first")
-  first_imv <- arrow::read_parquet(wf_file, col_select = c("hospitalization_id", "recorded_dttm", "device_category")) %>%
+  first_imv <- read_parquet(wf_file, col_select = c("hospitalization_id", "recorded_dttm", "device_category")) %>%
     filter(tolower(device_category) == "imv") %>%
     group_by(hospitalization_id) %>% summarise(first_imv_dttm = min(recorded_dttm), .groups = "drop")
   vent <- vent %>% left_join(first_imv, by = "hospitalization_id") %>%
@@ -227,7 +227,7 @@ both_cohorts <- function(config, file) {
 # calibrates its measurement rate on them).
 load_causal_panel <- function(config, patients, lab_category, complete = TRUE) {
   read_labs <- function(f) {
-    labs <- arrow::read_parquet(f)
+    labs <- read_parquet(f)
     value <- intersect(c("lab_value_numeric", "lab_value"), names(labs))[1]
     labs %>% filter(lab_category == !!lab_category) %>%
       transmute(id = hospitalization_id, lab_dttm = lab_result_dttm, value = suppressWarnings(as.numeric(.data[[value]])))
@@ -250,7 +250,7 @@ load_causal_panel <- function(config, patients, lab_category, complete = TRUE) {
 load_pressor_panel <- function(config, patients, complete = TRUE) {
   bin <- PRESSOR_BIN_H / 24
   dose <- purrr::map_dfr(both_cohorts(config, "ne_equiv_admin.parquet"), function(f)
-    arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, dose = ne_equiv_total)) %>%
+    read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, dose = ne_equiv_total)) %>%
     inner_join(patients %>% select(id, t0), by = "id") %>%
     mutate(k = floor(as.numeric(difftime(dttm, t0, units = "days")) / bin)) %>%
     filter(is.finite(dose), dose >= 0) %>%
@@ -275,13 +275,13 @@ load_pressor_panel <- function(config, patients, complete = TRUE) {
 load_osi_panel <- function(config, patients, complete = TRUE) {
   bin <- PRESSOR_BIN_H / 24
   vent <- patients %>% filter(vent == 1) %>% select(id, t0, t_off_d)
-  wf <- arrow::read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
+  wf <- read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
                             col_select = c("hospitalization_id", "recorded_dttm", "fio2_set", "mean_airway_pressure_obs")) %>%
     rename(id = hospitalization_id) %>% filter(id %in% vent$id) %>% mutate(s = as.numeric(recorded_dttm))
   fio2 <- data.table::as.data.table(wf %>% filter(!is.na(fio2_set), fio2_set > 0) %>% select(id, s, fio2_set))
   maw  <- data.table::as.data.table(wf %>% filter(!is.na(mean_airway_pressure_obs), mean_airway_pressure_obs > 0) %>%
                                       transmute(id, s, maw = mean_airway_pressure_obs, s_maw = s))
-  spo2 <- arrow::read_parquet(file.path(config$output_dir, "cohort_vitals_clean.parquet")) %>%
+  spo2 <- read_parquet(file.path(config$output_dir, "cohort_vitals_clean.parquet")) %>%
     filter(vital_category == "spo2", hospitalization_id %in% vent$id, !is.na(vital_value), vital_value >= 50, vital_value <= 100) %>%
     transmute(id = hospitalization_id, s = as.numeric(recorded_dttm), spo2 = pmin(pmax(vital_value, 80), 97))
   spo2 <- data.table::as.data.table(spo2)
@@ -850,7 +850,7 @@ load_injury_times <- function(config, patients, marker, values = NULL, rrt = NUL
     mutate(t = as.numeric(difftime(.data[[time]], t0, units = "days"))) %>% select(-t0)
   if (marker == "pressor") {
     if (is.null(values)) values <- purrr::map_dfr(both_cohorts(config, "ne_equiv_admin.parquet"), function(f)
-      arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, value = ne_equiv_total)) %>% days_from_t0("dttm")
+      read_parquet(f) %>% transmute(id = hospitalization_id, dttm = admin_dttm, value = ne_equiv_total)) %>% days_from_t0("dttm")
     running <- values %>% filter(is.finite(value), value > 0, value >= PRESSOR_MIN)
     out <- who %>%
       left_join(running %>% filter(t >= -1, t < 0) %>% distinct(id) %>% mutate(before = TRUE), by = "id") %>%
@@ -859,7 +859,7 @@ load_injury_times <- function(config, patients, marker, values = NULL, rrt = NUL
   } else {
     lab <- c(creatinine = "creatinine", platelets = "platelet_count")[[marker]]
     if (is.null(values)) values <- purrr::map_dfr(both_cohorts(config, "cohort_labs_clean.parquet"), function(f) {
-      labs <- arrow::read_parquet(f)
+      labs <- read_parquet(f)
       col <- intersect(c("lab_value_numeric", "lab_value"), names(labs))[1]
       labs %>% filter(lab_category == lab) %>%
         transmute(id = hospitalization_id, dttm = lab_result_dttm, value = suppressWarnings(as.numeric(.data[[col]])))
@@ -886,7 +886,7 @@ load_injury_times <- function(config, patients, marker, values = NULL, rrt = NUL
         purrr::map_dfr(c(config$output_dir, file.path(config$output_dir, "controls", "nosupport")), function(dir) {
           f <- file.path(dir, file)
           if (!file.exists(f)) return(NULL)
-          arrow::read_parquet(f) %>% transmute(id = hospitalization_id, dttm = recorded_dttm)
+          read_parquet(f) %>% transmute(id = hospitalization_id, dttm = recorded_dttm)
         })) %>% { if (nrow(.)) days_from_t0(., "dttm") else tibble(id = character(), t = numeric()) }
       if (!is.null(rrt) && nrow(rrt)) {
         base <- base %>% mutate(already = already | id %in% rrt$id[rrt$t <= grace])
@@ -1028,7 +1028,7 @@ step_integral <- function(seg, qpid, t) {
 # The ventilator records of the ventilated patients, in days from t0.
 load_vent_records <- function(config, patients) {
   v <- patients[patients$vent == 1, c("id", "t0"), drop = FALSE]
-  wf <- arrow::read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
+  wf <- read_parquet(file.path(config$output_dir, "resp_support_waterfall_clean.parquet"),
                             col_select = c("hospitalization_id", "recorded_dttm", "device_category", "mode_category",
                                            "tidal_volume_set", "fio2_set", "peep_set")) %>%
     dplyr::rename(id = hospitalization_id) %>%
@@ -1039,7 +1039,7 @@ load_vent_records <- function(config, patients) {
                   fio2 = dplyr::if_else(fio2_set > 1.5, fio2_set / 100, fio2_set)) %>%
     dplyr::filter(s >= -1, s <= ON_DAYS + 1) %>%
     dplyr::select(id, s, mode, vt = tidal_volume_set, fio2, peep = peep_set)
-  pr <- arrow::read_parquet(both_cohorts(config, "ne_equiv_admin.parquet")[[1]]) %>%
+  pr <- read_parquet(both_cohorts(config, "ne_equiv_admin.parquet")[[1]]) %>%
     dplyr::transmute(id = hospitalization_id, dttm = admin_dttm, dose = pmin(ne_equiv_total, 1)) %>%
     dplyr::inner_join(v, by = "id") %>%
     dplyr::mutate(s = as.numeric(difftime(dttm, t0, units = "days"))) %>%

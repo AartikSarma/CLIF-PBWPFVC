@@ -26,7 +26,7 @@ for (r in seq_len(reps)) {
   patients <- load_causal_patients(config)
   for (f in both_cohorts(config, "cohort_labs_clean.parquet")) {
     step(paste0("pass ", r, ": read_parquet ", basename(dirname(f)), "/", basename(f)))
-    labs <- arrow::read_parquet(f)
+    labs <- read_parquet(f)
     step(paste0("pass ", r, ":   ", nrow(labs), " rows read"))
     rm(labs); invisible(gc())
   }

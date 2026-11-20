@@ -473,6 +473,12 @@ cohort_demographics <- clif_hospitalization %>%
       TRUE ~ 0L
     )
   )
+# PHI the analyses never use stays out of the intermediate (SOP.md, standard 3):
+# geography from clif_hospitalization and the date of birth from clif_patient (age is
+# already age_at_admission)
+cohort_demographics <- cohort_demographics %>%
+  select(-any_of(c("zipcode_five_digit", "zipcode_nine_digit", "census_block_code", "census_block_group_code",
+                   "census_tract", "state_code", "county_code", "fips_version", "birth_date")))
 
 message("Demographics: ", nrow(cohort_demographics), " rows")
 message("Mortality rate: ", round(mean(cohort_demographics$deceased) * 100, 1), "%")

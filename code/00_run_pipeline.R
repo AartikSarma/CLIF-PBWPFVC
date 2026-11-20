@@ -7,8 +7,10 @@
 #   1. Installs the packages pinned in uvr.lock (uvr sync).
 #   2. Runs the requested stages in order, each script as a clean subprocess.
 #
-# Everything a stage writes for sharing goes to output/<site>_output/final/, which
-# holds aggregates only and is the folder a site returns. Re-running a stage updates
+# Everything a stage writes for sharing goes to the site's results folder
+# (<results_directory>/<site>/, outside the project; SOP.md), which holds aggregates
+# only. A person reviews it and releases files to output/final_no_phi/ with
+# release_result(). Re-running a stage updates
 # that folder in place. Stages, by the manuscript figure they feed:
 #
 #   prep             01-03   cohort, quality checks, derived variables; then 03 again
@@ -65,9 +67,9 @@
 #
 # The optional arguments override the matching fields of config/config.json for
 # this run only (config.json is not edited): --site_name sets config$site_name,
-# which names the output folder output/<site_name>_output/; --site_path sets
-# config$tables_path, the folder holding the clif_*.<file_type> tables;
-# --file_type sets config$file_type (parquet, csv or fst). Both `--flag value`
+# which names the site's folders in the intermediate and results zones; --site_path
+# sets data_directory, the folder holding the clif_*.<filetype> tables; --file_type
+# sets filetype (parquet, csv or fst). Both `--flag value`
 # and `--flag=value` forms are accepted. The overrides reach every numbered
 # script through environment variables read by utils/config.R
 # (PBWPFVC_SITE_NAME, PBWPFVC_TABLES_PATH, PBWPFVC_FILE_TYPE), so a single script
@@ -202,11 +204,14 @@ stage_steps <- list(
   injury = step("29_run_figure4.R", "1")      # sets the gate for each of its own steps
 )
 pipeline_steps <- do.call(rbind, stage_steps[stages])
+# the site's folders, from the same configuration every script reads (utils/config.R):
+# intermediates and results both live outside the project folder (SOP.md)
+cfg_env <- new.env()
+source(file.path("utils", "config.R"), local = cfg_env)
+paths <- cfg_env$config
 if (analysis_only) {
   # the analyses read script 03's outputs; refuse to start if they are not on disk
-  site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
-                  else jsonlite::fromJSON("config/config.json")$site_name
-  stage_dir <- file.path("output", paste0(site_for_dir, "_output"), "intermediate")
+  stage_dir <- paths$intermediate_site
   needed <- file.path(stage_dir, c("analysis_cross_sectional.parquet", "analysis_cross_sectional_ungated.parquet",
                                    "analysis_ungated_index.parquet", "analysis_negative_control.parquet"))
   missing <- needed[!file.exists(needed)]
@@ -226,9 +231,7 @@ if (analysis_only) {
 # (final/controls/) is not touched. The ungated cohort's block
 # (final/ungated/cross_sectional/) is cleared whole: 03 writes nothing there.
 if (Sys.getenv("PBWPFVC_COHORT", "imv") == "imv" && any(c("prep", "cross_sectional") %in% stages)) {
-  site_for_dir <- if (!is.null(cli_overrides$PBWPFVC_SITE_NAME)) cli_overrides$PBWPFVC_SITE_NAME
-                  else jsonlite::fromJSON("config/config.json")$site_name
-  final_root <- file.path("output", paste0(site_for_dir, "_output"), "final")
+  final_root <- paths$final_root
   block_dir <- file.path(final_root, "cross_sectional")
   old_files <- list.files(block_dir, full.names = TRUE)
   if (!("prep" %in% stages)) old_files <- old_files[!grepl("^(attrition_log_|dist_)", basename(old_files))]
@@ -264,5 +267,9 @@ for (i in seq_len(nrow(pipeline_steps))) {
 
 message("=============================================================")
 message("[00] Pipeline complete. All scripts ran successfully.")
-message("Shareable aggregates: output/<site_name>_output/final/, sorted into cross_sectional/, injury/, supplement/ and controls/, with the ungated cohort's twins in ungated/.")
+manifest <- cfg_env$write_manifest(paths, counts = list(stages = paste(stages, collapse = ","), steps = nrow(pipeline_steps)))
+message("Results (aggregates, for review): ", paths$final_root, ", sorted into cross_sectional/, injury/, supplement/ and controls/, with the ungated cohort's twins in ungated/.")
+message("Run manifest: ", manifest)
+message("Intermediates (row-level, never shared): ", paths$intermediate_site)
+message("Release reviewed aggregates to output/final_no_phi/ by hand with release_result() (SOP.md).")
 message("=============================================================")
