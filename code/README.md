@@ -17,6 +17,21 @@ scripts find their inputs by file-name prefix, so a prefix changes together with
 its readers, in one commit. No other site has the code yet, so names are still free
 to change; that stops once sites have returned `final/` folders.
 
+## macOS on Apple silicon: run with one thread
+
+On an Apple silicon Mac (M3 Max, macOS 26, R 4.6.1, arrow 26.0.0) script 03 and
+`supplement/causal_triangulation.R` crash R with a segfault (`caught segfault ...
+cause 'invalid permissions'`, no traceback) on real-data volumes, and run cleanly when
+every threaded library is limited to one thread before R starts. Which library is at
+fault is not yet known; limiting arrow from inside R was not enough. Until it is, set
+these in the terminal before `uvr run` (or add the line to `~/.zshrc`):
+
+```bash
+export OMP_NUM_THREADS=1 OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 R_DATATABLE_NUM_THREADS=1
+```
+
+Linux needs none of this. Windows is untested.
+
 ## Pipeline
 
 | Script | Block | What it does | Writes (prefix) |
@@ -128,6 +143,83 @@ to change; that stops once sites have returned `final/` folders.
   in-hospital death, 60-day death and death during the exposure (as pseudo-observations)
   and the 7-day platelet and creatinine slopes, along lambda. Run by `29_run_figure4.R`
   (step 8e, gated and ungated).
+  `causal_triangulation.R` and `causal_testbed.R` (with the sourced `causal_common.R` and
+  `causal_generator.R`) take on the positivity problem directly. At a fixed VT/PBW, VT/PFVC moves only with
+  log PBW/PFVC, which age, sex and race explain almost entirely (R² about 0.99), so the
+  adjusted contrast rests on height within sex alone and the unadjusted one carries
+  every other effect of the demographics. `causal_triangulation.R` estimates one
+  quantity, the ventilation-specific change in an outcome's slope per log unit of PBW/PFVC,
+  for platelets, creatinine, the vasopressor dose (a model of the expected dose with its
+  zero bins kept, and whether any pressor runs) and the oxygen saturation index (on the
+  ventilator only), from designs that fail under different assumptions: the
+  paper's own (unadjusted, adjusted, height fingerprint, ventilated minus control), and
+  three kinds it did not have. The within-person designs compare each ventilated
+  patient's days before intubation with their days on the ventilator (`within_onoff`),
+  subtract the controls' change around ICU admission (`within_triple`), and compare the
+  ventilator days with the days after extubation (`off_reversal`); a patient's
+  demographics do not change at intubation, so nothing is adjusted. The ladder
+  (`free_age`, `free_sex`, `free_race`, `free_height`, each also as a
+  ventilated-minus-control contrast) frees one input at a time and identifies the
+  gradient from the other three. Every design is fitted with the index VT/PBW held and
+  with it dropped, because holding it lets severity into the estimate where tidal volume
+  is chosen by how sick the lung is. With it dropped, lambda alone also assumes tidal
+  volume was set at the same multiple of PBW in everyone, so a reported check (not part
+  of the decision rule) refits those designs with log PBW freed beside lambda, giving
+  the gradient along PFVC at a fixed PBW and a test of the ratio form, and reports how
+  closely tidal volume followed PBW (rho, the slope of log VT on log PBW, read in the
+  ungated cohort, since the 6-8 mL/kg gate pulls it toward 1). An aeration table adds
+  index compliance over predicted lung size (the fraction still aerated) and BMI to the
+  held designs, which tests that tidal volume, PBW/PFVC and aeration act with the equal
+  weight strain gives them and adjusts the tidal-volume gradient for volumes lowered
+  for stiff lungs; a compliance-scaling table asks which predicted volume compliance
+  follows. A second table repeats the designs with other
+  strain denominators (PFVC at age 25, TLC, alveolar volume, FRC) and tests each against
+  PFVC in one model, and a third cuts the ventilator days into segments so that a marker
+  that responds early and plateaus can be read beside one that responds late.
+  `causal_longitudinal.R` compares each ventilated patient with themselves: the
+  marker's course against the set tidal volume as it changed over their ventilator
+  days, with a patient intercept and slope (so lambda and every fixed trait drop out),
+  lagged FiO2, PEEP and pressor dose, and a falsification row on future tidal volume.
+  It tests whether tidal volume matters, not which lung size; its specification is
+  fixed in its header, and it prints how tidal volume changed before any estimate.
+  `causal_practice_cells.R` reads no outcome: it asks whether ICUs and periods differ
+  enough in how tidal volume followed PBW (rho, the slope of log VT on log PBW, per
+  unit x year) to support a design that uses those differences as an instrument, with
+  the spread of rho, the first-stage F and balance on baseline characteristics.
+  `causal_testbed.R` is a simulation study of those designs with a planted
+  truth; its protocol (aims, data-generating mechanisms, estimand, methods, performance
+  measures) is [`supplement/CAUSAL_TESTBED_PROTOCOL.md`](supplement/CAUSAL_TESTBED_PROTOCOL.md).
+  It keeps the site's patients and generates the marker, its measurement times and the
+  patients' exits (`causal_generator.R`), tuned so that the analysis reads the same
+  noise, slopes and sampling off a simulated site as off the real one. Stages: the
+  generator reduced to the analysis model (a check of the estimators); a realistic
+  generator (curved trajectories, autocorrelated heavy-tailed errors, unmeasured
+  severity, variation in true lung size, measurement and exits that depend on the
+  marker) under a strain effect and under confounders sized to look the same to the
+  unadjusted model; one-at-a-time stress scenarios (strongly informative exits or
+  measurement, a tidal volume set by size and severity with and without the 6-8 gate,
+  thresholds, saturating or delayed effects, error in charted height, strain on another
+  denominator, and more); power by effect size; the segment-by-segment time course
+  against a straight line under steady, saturating and delayed effects; four heterogeneous sites pooled; and a
+  cross-check of the estimator against a mixed model. It scores each design (bias,
+  coverage, rejection rate, minimum detectable effect, each with its Monte Carlo standard
+  error) and a decision rule that reads all fifteen estimates together and must hold
+  with VT/PBW held and dropped, against relying on the unadjusted model or the control
+  contrast alone. Only the two labs are simulated; the vasopressor and OSI models have
+  unit tests and no simulation yet.
+  `causal_illness_death.R` gives death its own place instead of treating it as censoring:
+  each marker becomes an injury state by a threshold (KDIGO stage 2 or renal replacement;
+  platelets below 100 or halved; any vasopressor), and the PBW/PFVC gradient is estimated
+  on the hazards of injury, of death without injury and of death after injury, by the
+  same single-phase designs. Strain predicts a larger gradient on injury than on death
+  without injury; frailty predicts one on every route. The testbed's `illness_death`
+  stage runs it on simulated sites where death follows the marker, strain directly, or
+  age alone.
+  `causal_tests.R` holds the unit tests and needs no data. All of these are the
+  longitudinal model alone, with no joint model for death or liberation. Not in a
+  runner; `causal_triangulation.R`, `causal_illness_death.R` and `causal_testbed.R` each
+  need scripts 01-03 for the ventilated and no-support cohorts, and write
+  `causal_triangulation_`, `causal_illness_death_` and `causal_testbed_` tables.
 - `tools/` holds developer tools: `subset_synthetic.R` makes a small synthetic CLIF
   dataset for fast test loops, `calc_external_pfvc.R` computes PFVC, predicted TLC and alveolar volume, and the
   delivered VT on each scale, by arm for an external trial table, `creatinine_positive_control.R` checks that creatinine rises
